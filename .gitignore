@@ -48,7 +48,11 @@ Thumbs.db
 # Ignore local user data if you accidentally save it in the repo
 # (Your app saves to Documents/MotionStudio, so this is just a safeguard)
 *.json
+
+# --- WHITELIST (Files we actually WANT to commit) ---
 !package.json
+!package-lock.json
 !tsconfig.json
-!project.json   # If you have a template project.json
-!scene.json     # If you have a template scene.json
+!wails.json
+!frontend/package.json
+!frontend/tsconfig.json

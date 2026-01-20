@@ -22,13 +22,15 @@ import {
   SelectImage,
   ReadImageBase64,
   ExtractLastFrame,
-  SaveShots, // <--- NEW
-  GetShots, // <--- NEW
+  SaveShots,
+  GetShots,
 } from "../../wailsjs/go/main/App";
 
 // --- TYPES ---
+// FIX: Updated to match the Go Struct exactly
 interface Shot {
   id: string;
+  sceneId: string; // <--- Added
   name: string;
   sourceImage: string;
   previewBase64?: string;
@@ -36,6 +38,8 @@ interface Shot {
   motionStrength: number;
   seed: number;
   duration: number;
+  status: string; // <--- Added (DRAFT, DONE)
+  outputVideo: string; // <--- Added
 }
 
 interface Project {
@@ -50,8 +54,8 @@ interface Scene {
 function StudioContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const projectId = searchParams.get("projectId");
-  const sceneId = searchParams.get("sceneId");
+  const projectId = searchParams.get("projectId") || "";
+  const sceneId = searchParams.get("sceneId") || "";
   const { confirm } = useConfirm();
 
   const [project, setProject] = useState<Project | null>(null);
@@ -63,10 +67,16 @@ function StudioContent() {
   const initialized = useRef(false);
 
   // 1. AUTO-SAVE EFFECT
-  // Whenever 'shots' changes, save to disk.
   useEffect(() => {
-    if (projectId && sceneId && shots.length > 0) {
-      SaveShots(projectId, sceneId, shots);
+    // Only save if we have a valid project/scene and initialized at least once
+    if (projectId && sceneId && initialized.current && shots.length > 0) {
+      // Remove previewBase64 before saving to disk to keep JSON small
+      // (The Go backend doesn't need the base64 string saved)
+      const cleanShots = shots.map(({ previewBase64, ...keep }) => keep);
+
+      // We need to cast back to any because TypeScript gets confused by the removed prop
+      // but the data structure now matches Go perfectly.
+      SaveShots(projectId, sceneId, cleanShots as any);
     }
   }, [shots, projectId, sceneId]);
 
@@ -87,11 +97,9 @@ function StudioContent() {
       const savedShots = await GetShots(pId, sId);
 
       if (savedShots && savedShots.length > 0) {
-        // If we found shots, load them
-        // IMPORTANT: We need to re-hydrate the Base64 previews for the images!
-        // Browsers can't read the raw "C:/" path, so we convert them again.
+        // Hydrate the Base64 previews
         const hydratedShots = await Promise.all(
-          savedShots.map(async (shot) => {
+          savedShots.map(async (shot: any) => {
             if (shot.sourceImage) {
               const b64 = await ReadImageBase64(shot.sourceImage);
               return { ...shot, previewBase64: b64 };
@@ -102,6 +110,7 @@ function StudioContent() {
 
         setShots(hydratedShots);
         setActiveShotId(hydratedShots[0].id);
+        initialized.current = true; // Mark as loaded so we don't double-save immediately
       } else {
         // Only if NO saved shots exist, create the default one
         if (!initialized.current) {
@@ -117,15 +126,20 @@ function StudioContent() {
   // --- ACTIONS ---
 
   const handleAddShot = () => {
+    if (!sceneId) return;
+
     setShots((prev) => {
       const newShot: Shot = {
         id: crypto.randomUUID(),
+        sceneId: sceneId, // <--- FIX: Pass sceneId
         name: `Shot ${prev.length + 1}`,
         sourceImage: "",
         prompt: "",
         motionStrength: 127,
         seed: Math.floor(Math.random() * 1000000),
         duration: 48,
+        status: "DRAFT", // <--- FIX: Default status
+        outputVideo: "", // <--- FIX: Empty string
       };
       setActiveShotId((current) => current || newShot.id);
       return [...prev, newShot];
@@ -149,6 +163,7 @@ function StudioContent() {
     setShots((prev) => {
       const newShot: Shot = {
         id: crypto.randomUUID(),
+        sceneId: sceneId, // <--- FIX
         name: `${originalShot.name} (Ext)`,
         sourceImage: lastFramePath,
         previewBase64: b64,
@@ -156,6 +171,8 @@ function StudioContent() {
         motionStrength: originalShot.motionStrength,
         seed: Math.floor(Math.random() * 1000000),
         duration: 48,
+        status: "DRAFT", // <--- FIX
+        outputVideo: "", // <--- FIX
       };
       setActiveShotId(newShot.id);
       return [...prev, newShot];
@@ -178,6 +195,8 @@ function StudioContent() {
               newShots.length > 0 ? newShots[newShots.length - 1].id : null;
             setActiveShotId(newActive);
           }
+          // If we deleted everything, add a new blank shot?
+          // Or just leave it empty. Let's leave it empty but update persistent store will handle it.
           return newShots;
         });
       },
@@ -199,7 +218,6 @@ function StudioContent() {
     }
   };
 
-  // Helper getters
   const activeShotIndex = shots.findIndex((s) => s.id === activeShotId);
   const activeShot = shots[activeShotIndex];
   const prevShot = shots[activeShotIndex - 1];
