@@ -1,0 +1,56 @@
+@import "tailwindcss";
+
+@theme {
+  /* 1. FORCE THE CINEMA LIME COLOR */
+  --color-primary: #d2ff44; /* <--- The exact color from your code */
+  --color-primary-foreground: #000000;
+
+  /* 2. DARK BACKGROUNDS */
+  --color-background: #09090b; /* Zinc 950 */
+  --color-foreground: #ffffff;
+
+  /* 3. CARDS & BORDERS */
+  --color-card: #18181b; /* Zinc 900 */
+  --color-card-foreground: #ffffff;
+  --color-border: #27272a; /* Zinc 800 */
+  --color-input: #09090b; /* Darker input background */
+  --color-ring: #d2ff44;
+
+  --color-muted: #27272a;
+  --color-muted-foreground: #a1a1aa;
+}
+
+/* Base Styles */
+@layer base {
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    font-family: Arial, Helvetica, sans-serif;
+    overflow-y: auto; /* Allow scrolling */
+  }
+
+  *,
+  ::after,
+  ::before {
+    border-color: var(--color-border);
+  }
+}
+
+/* CUSTOM SCROLLBAR */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #09090b;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #27272a;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #3f3f46;
+}
