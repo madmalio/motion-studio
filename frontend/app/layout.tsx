@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 import Shell from "../components/Shell";
 import { ConfirmProvider } from "../components/ConfirmProvider"; // <--- Import
+import { SettingsProvider } from "../components/SettingsProvider";
 
 export const metadata: Metadata = {
   title: "Motion Studio",
@@ -18,7 +19,9 @@ export default function RootLayout({
       <body className="antialiased bg-[#09090b] text-white">
         {/* Wrap Shell inside ConfirmProvider */}
         <ConfirmProvider>
-          <Shell>{children}</Shell>
+          <SettingsProvider>
+            <Shell>{children}</Shell>
+          </SettingsProvider>
         </ConfirmProvider>
       </body>
     </html>

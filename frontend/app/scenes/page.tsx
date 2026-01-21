@@ -3,7 +3,15 @@
 import { useRouter, useSearchParams } from "next/navigation";
 import { Plus, MoreVertical, Film, Search } from "lucide-react";
 import { Suspense, useEffect, useState } from "react";
-import { GetProject, CreateScene, GetScenes } from "../../wailsjs/go/main/App";
+import {
+  GetProject,
+  CreateScene,
+  GetScenes,
+  DeleteScene,
+  ReadImageBase64,
+} from "../../wailsjs/go/main/App";
+import CardMenu from "../../components/CardMenu";
+import { useConfirm } from "../../components/ConfirmProvider";
 
 interface Project {
   id: string;
@@ -13,6 +21,8 @@ interface Scene {
   id: string;
   name: string;
   shotCount: number;
+  thumbnail: string;
+  displayThumbnail?: string;
 }
 
 function ScenesContent() {
@@ -24,6 +34,8 @@ function ScenesContent() {
   const [scenes, setScenes] = useState<Scene[]>([]);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [newSceneName, setNewSceneName] = useState("");
+  const [editingScene, setEditingScene] = useState<Scene | null>(null);
+  const { confirm } = useConfirm();
 
   useEffect(() => {
     if (projectId) loadData(projectId);
@@ -33,15 +45,67 @@ function ScenesContent() {
     const p = await GetProject(id);
     setProject(p);
     const s = await GetScenes(id);
-    setScenes(s || []);
+
+    if (s) {
+      const hydrated = await Promise.all(
+        s.map(async (scene: any) => {
+          if (scene.thumbnail) {
+            const b64 = await ReadImageBase64(scene.thumbnail);
+            return { ...scene, displayThumbnail: b64 };
+          }
+          return scene;
+        }),
+      );
+      setScenes(hydrated);
+    } else {
+      setScenes([]);
+    }
   };
 
-  const handleCreateScene = async () => {
+  const handleSave = async () => {
     if (!projectId || !newSceneName) return;
-    await CreateScene(projectId, newSceneName);
-    await loadData(projectId);
+
+    if (editingScene) {
+      // TODO: Implement UpdateScene in backend
+      // For now, just update local state to reflect change immediately
+      setScenes((prev) =>
+        prev.map((s) =>
+          s.id === editingScene.id ? { ...s, name: newSceneName } : s,
+        ),
+      );
+    } else {
+      await CreateScene(projectId, newSceneName);
+      await loadData(projectId);
+    }
+
     setIsModalOpen(false);
     setNewSceneName("");
+    setEditingScene(null);
+  };
+
+  const openNewSceneModal = () => {
+    setEditingScene(null);
+    setNewSceneName("");
+    setIsModalOpen(true);
+  };
+
+  const handleEdit = (scene: Scene) => {
+    setEditingScene(scene);
+    setNewSceneName(scene.name);
+    setIsModalOpen(true);
+  };
+
+  const handleDelete = (id: string) => {
+    confirm({
+      title: "Delete Scene?",
+      message: "This will permanently delete the scene and all its shots.",
+      confirmText: "Delete",
+      variant: "danger",
+      onConfirm: async () => {
+        await DeleteScene(projectId, id);
+        setScenes((prev) => prev.filter((s) => s.id !== id));
+      },
+    });
   };
 
   if (!project) return <div className="p-10 text-white">Loading...</div>;
@@ -69,7 +133,7 @@ function ScenesContent() {
           </div>
 
           <button
-            onClick={() => setIsModalOpen(true)}
+            onClick={openNewSceneModal}
             className="bg-[#D2FF44] hover:bg-[#c2eb39] text-black text-xs font-bold px-4 py-2 rounded flex items-center gap-2 transition-colors"
           >
             <Plus size={16} strokeWidth={3} />
@@ -83,7 +147,7 @@ function ScenesContent() {
         <div className="max-w-[1600px] mx-auto grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
           {/* Create Card */}
           <div
-            onClick={() => setIsModalOpen(true)}
+            onClick={openNewSceneModal}
             className="aspect-[16/10] border border-dashed border-zinc-800 rounded-lg flex flex-col items-center justify-center gap-3 text-zinc-600 hover:text-[#D2FF44] hover:border-[#D2FF44] hover:bg-zinc-900/40 transition-all cursor-pointer group"
           >
             <div className="h-10 w-10 rounded-full bg-zinc-900 border border-zinc-800 flex items-center justify-center group-hover:scale-110 transition-transform">
@@ -101,24 +165,37 @@ function ScenesContent() {
                   `/studio?sceneId=${scene.id}&projectId=${projectId}`,
                 )
               }
-              className="group aspect-[16/10] bg-zinc-900 border border-zinc-800 rounded-lg p-5 hover:border-[#D2FF44]/50 hover:shadow-lg transition-all cursor-pointer relative flex flex-col justify-between"
+              className="group aspect-[16/10] bg-zinc-900 border border-zinc-800 rounded-lg hover:border-[#D2FF44]/50 hover:shadow-[0_4px_20px_rgba(0,0,0,0.5)] transition-all cursor-pointer relative"
             >
-              <div className="flex justify-between items-start">
-                <div className="h-8 w-8 bg-zinc-800 rounded flex items-center justify-center text-[#D2FF44]">
-                  <Film size={16} />
-                </div>
-                <button className="text-zinc-600 hover:text-white">
-                  <MoreVertical size={16} />
-                </button>
+              {/* Image Area */}
+              <div className="absolute inset-0 overflow-hidden rounded-lg bg-zinc-950">
+                {scene.displayThumbnail ? (
+                  <img
+                    src={scene.displayThumbnail}
+                    className="w-full h-full object-cover opacity-60 group-hover:opacity-100 group-hover:scale-105 transition-all duration-500"
+                  />
+                ) : (
+                  <div className="w-full h-full bg-gradient-to-br from-zinc-800 to-zinc-900 flex items-center justify-center opacity-60 group-hover:opacity-100 transition-all">
+                    <Film className="text-zinc-700" size={32} />
+                  </div>
+                )}
+                <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/20 to-transparent" />
               </div>
 
-              <div>
-                <h3 className="font-bold text-white group-hover:text-[#D2FF44] transition-colors truncate">
-                  {scene.name}
-                </h3>
-                <p className="text-[10px] text-zinc-500 font-mono mt-1">
-                  {scene.shotCount} SHOTS
-                </p>
+              {/* Content Footer */}
+              <div className="absolute bottom-0 left-0 w-full p-3 flex justify-between items-end z-10">
+                <div>
+                  <h3 className="text-sm font-bold text-white group-hover:text-[#D2FF44] transition-colors leading-tight truncate pr-2">
+                    {scene.name}
+                  </h3>
+                  <p className="text-[10px] text-zinc-400 font-bold tracking-wider mt-0.5 uppercase">
+                    {scene.shotCount} SHOTS
+                  </p>
+                </div>
+                <CardMenu
+                  onDelete={() => handleDelete(scene.id)}
+                  onRename={() => handleEdit(scene)}
+                />
               </div>
             </div>
           ))}
@@ -129,7 +206,9 @@ function ScenesContent() {
       {isModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-[2px]">
           <div className="bg-[#09090b] border border-zinc-800 w-96 rounded-lg shadow-2xl p-6">
-            <h3 className="font-bold text-white mb-4">New Scene</h3>
+            <h3 className="font-bold text-white mb-4">
+              {editingScene ? "Edit Scene" : "New Scene"}
+            </h3>
             <input
               autoFocus
               className="w-full bg-zinc-900 border border-zinc-700 rounded p-3 text-sm text-white focus:border-[#D2FF44] outline-none placeholder-zinc-500 mb-6"
@@ -145,10 +224,10 @@ function ScenesContent() {
                 Cancel
               </button>
               <button
-                onClick={handleCreateScene}
+                onClick={handleSave}
                 className="px-6 py-2 text-xs font-bold bg-[#D2FF44] text-black rounded hover:opacity-90"
               >
-                Create
+                {editingScene ? "Save" : "Create"}
               </button>
             </div>
           </div>

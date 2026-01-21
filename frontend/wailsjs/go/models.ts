@@ -6,6 +6,7 @@ export namespace main {
 	    type: string;
 	    thumbnail: string;
 	    updatedAt: string;
+	    sceneCount: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new Project(source);
@@ -18,6 +19,7 @@ export namespace main {
 	        this.type = source["type"];
 	        this.thumbnail = source["thumbnail"];
 	        this.updatedAt = source["updatedAt"];
+	        this.sceneCount = source["sceneCount"];
 	    }
 	}
 	export class Scene {
@@ -26,6 +28,7 @@ export namespace main {
 	    name: string;
 	    shotCount: number;
 	    updatedAt: string;
+	    thumbnail: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new Scene(source);
@@ -38,6 +41,7 @@ export namespace main {
 	        this.name = source["name"];
 	        this.shotCount = source["shotCount"];
 	        this.updatedAt = source["updatedAt"];
+	        this.thumbnail = source["thumbnail"];
 	    }
 	}
 	export class Shot {

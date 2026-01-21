@@ -1,36 +1,44 @@
 "use client";
 
 import { useRouter, useSearchParams } from "next/navigation";
-import {
-  Settings,
-  Play,
-  Image as ImageIcon,
-  Plus,
-  Wand2,
-  Link as LinkIcon,
-  Loader2,
-  Trash2,
-  Ghost,
-} from "lucide-react";
 import { Suspense, useEffect, useState, useRef } from "react";
 import { useConfirm } from "../../components/ConfirmProvider";
+import { Loader2 } from "lucide-react";
+
+// DND Kit
+import {
+  DndContext,
+  DragOverlay,
+  DragStartEvent,
+  DragEndEvent,
+  useSensor,
+  useSensors,
+  PointerSensor,
+  defaultDropAnimationSideEffects,
+} from "@dnd-kit/core";
+
+// Panels
+import GeneratorPanel from "../../components/studio/GeneratorPanel";
+import LibraryPanel from "../../components/studio/LibraryPanel";
+import ViewerPanel from "../../components/studio/ViewerPanel";
+import TimelinePanel from "../../components/studio/TimelinePanel";
+import { useGaplessPlayback } from "../../hooks/useGaplessPlayback";
 
 // WAILS IMPORTS
 import {
   GetProject,
   GetScenes,
-  SelectImage,
   ReadImageBase64,
   ExtractLastFrame,
   SaveShots,
   GetShots,
+  DeleteShot,
 } from "../../wailsjs/go/main/App";
 
 // --- TYPES ---
-// FIX: Updated to match the Go Struct exactly
 interface Shot {
   id: string;
-  sceneId: string; // <--- Added
+  sceneId: string;
   name: string;
   sourceImage: string;
   previewBase64?: string;
@@ -38,8 +46,8 @@ interface Shot {
   motionStrength: number;
   seed: number;
   duration: number;
-  status: string; // <--- Added (DRAFT, DONE)
-  outputVideo: string; // <--- Added
+  status: string;
+  outputVideo: string;
 }
 
 interface Project {
@@ -49,6 +57,12 @@ interface Project {
 interface Scene {
   id: string;
   name: string;
+}
+
+// Timeline Item Wrapper
+interface TimelineItem extends Shot {
+  timelineId: string;
+  trackIndex?: number;
 }
 
 function StudioContent() {
@@ -63,19 +77,39 @@ function StudioContent() {
   const [shots, setShots] = useState<Shot[]>([]);
   const [activeShotId, setActiveShotId] = useState<string | null>(null);
   const [showGhost, setShowGhost] = useState(false);
+  const [isRendering, setIsRendering] = useState(false);
 
+  const videoCache = useRef<Map<string, string>>(new Map());
+
+  // Timeline State: Array of Arrays (Tracks)
+  const [tracks, setTracks] = useState<TimelineItem[][]>([[]]);
+  const [activeDragItem, setActiveDragItem] = useState<any>(null);
   const initialized = useRef(false);
 
-  // 1. AUTO-SAVE EFFECT
-  useEffect(() => {
-    // Only save if we have a valid project/scene and initialized at least once
-    if (projectId && sceneId && initialized.current && shots.length > 0) {
-      // Remove previewBase64 before saving to disk to keep JSON small
-      // (The Go backend doesn't need the base64 string saved)
-      const cleanShots = shots.map(({ previewBase64, ...keep }) => keep);
+  // --- SMART PLAYBACK HOOK ---
+  const {
+    primaryVideoRef,
+    secondaryVideoRef,
+    activePlayer,
+    isPlaying,
+    togglePlay,
+    currentTime,
+    seekTo,
+    duration,
+  } = useGaplessPlayback({
+    tracks,
+    totalDuration: Math.max(
+      60,
+      ...tracks.map((track) =>
+        track.reduce((acc, shot) => acc + (shot.duration || 4), 0),
+      ),
+    ),
+  });
 
-      // We need to cast back to any because TypeScript gets confused by the removed prop
-      // but the data structure now matches Go perfectly.
+  // 1. AUTO-SAVE
+  useEffect(() => {
+    if (projectId && sceneId && initialized.current && shots.length > 0) {
+      const cleanShots = shots.map(({ previewBase64, ...keep }) => keep);
       SaveShots(projectId, sceneId, cleanShots as any);
     }
   }, [shots, projectId, sceneId]);
@@ -93,11 +127,10 @@ function StudioContent() {
       const s = sData.find((x: any) => x.id === sId);
       setScene(s || null);
 
-      // LOAD SHOTS FROM DISK
       const savedShots = await GetShots(pId, sId);
 
       if (savedShots && savedShots.length > 0) {
-        // Hydrate the Base64 previews
+        // Load THUMBNAILS only (Base64 is fine for small images, BAD for video)
         const hydratedShots = await Promise.all(
           savedShots.map(async (shot: any) => {
             if (shot.sourceImage) {
@@ -107,12 +140,10 @@ function StudioContent() {
             return shot;
           }),
         );
-
         setShots(hydratedShots);
         setActiveShotId(hydratedShots[0].id);
-        initialized.current = true; // Mark as loaded so we don't double-save immediately
+        initialized.current = true;
       } else {
-        // Only if NO saved shots exist, create the default one
         if (!initialized.current) {
           initialized.current = true;
           handleAddShot();
@@ -123,23 +154,26 @@ function StudioContent() {
     }
   };
 
+  const activeShotIndex = shots.findIndex((s) => s.id === activeShotId);
+  const activeShot = shots[activeShotIndex];
+  const prevShot = shots[activeShotIndex - 1];
+
   // --- ACTIONS ---
 
   const handleAddShot = () => {
     if (!sceneId) return;
-
     setShots((prev) => {
       const newShot: Shot = {
         id: crypto.randomUUID(),
-        sceneId: sceneId, // <--- FIX: Pass sceneId
+        sceneId: sceneId,
         name: `Shot ${prev.length + 1}`,
         sourceImage: "",
         prompt: "",
         motionStrength: 127,
         seed: Math.floor(Math.random() * 1000000),
-        duration: 48,
-        status: "DRAFT", // <--- FIX: Default status
-        outputVideo: "", // <--- FIX: Empty string
+        duration: 4,
+        status: "DRAFT",
+        outputVideo: "",
       };
       setActiveShotId((current) => current || newShot.id);
       return [...prev, newShot];
@@ -147,32 +181,23 @@ function StudioContent() {
   };
 
   const handleExtendShot = async (originalShot: Shot) => {
-    if (!originalShot.sourceImage) {
-      alert("Please select a source image for this shot first.");
-      return;
-    }
+    const sourcePath = originalShot.outputVideo || originalShot.sourceImage;
+    if (!sourcePath) return alert("Select source first");
 
-    const lastFramePath = await ExtractLastFrame(originalShot.sourceImage);
-    if (!lastFramePath) {
-      console.error("Failed to extract frame");
-      return;
-    }
+    const lastFramePath = await ExtractLastFrame(sourcePath);
+    if (!lastFramePath) return;
 
     const b64 = await ReadImageBase64(lastFramePath);
 
     setShots((prev) => {
       const newShot: Shot = {
+        ...originalShot,
         id: crypto.randomUUID(),
-        sceneId: sceneId, // <--- FIX
         name: `${originalShot.name} (Ext)`,
         sourceImage: lastFramePath,
         previewBase64: b64,
-        prompt: originalShot.prompt,
-        motionStrength: originalShot.motionStrength,
-        seed: Math.floor(Math.random() * 1000000),
-        duration: 48,
-        status: "DRAFT", // <--- FIX
-        outputVideo: "", // <--- FIX
+        status: "DRAFT",
+        outputVideo: "",
       };
       setActiveShotId(newShot.id);
       return [...prev, newShot];
@@ -185,20 +210,10 @@ function StudioContent() {
     confirm({
       title: "Delete Shot?",
       message: "This will permanently remove the shot.",
-      confirmText: "Delete",
       variant: "danger",
-      onConfirm: () => {
-        setShots((prev) => {
-          const newShots = prev.filter((s) => s.id !== id);
-          if (activeShotId === id) {
-            const newActive =
-              newShots.length > 0 ? newShots[newShots.length - 1].id : null;
-            setActiveShotId(newActive);
-          }
-          // If we deleted everything, add a new blank shot?
-          // Or just leave it empty. Let's leave it empty but update persistent store will handle it.
-          return newShots;
-        });
+      onConfirm: async () => {
+        if (project && scene) await DeleteShot(project.id, scene.id, id);
+        setShots((prev) => prev.filter((s) => s.id !== id));
       },
     });
   };
@@ -210,17 +225,103 @@ function StudioContent() {
     );
   };
 
-  const handleUpload = async () => {
-    const path = await SelectImage();
-    if (path) {
-      const b64 = await ReadImageBase64(path);
-      updateActiveShot({ sourceImage: path, previewBase64: b64 });
-    }
+  // --- DND HANDLERS ---
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
+  );
+
+  const handleDragStart = (event: DragStartEvent) => {
+    setActiveDragItem(event.active.data.current);
   };
 
-  const activeShotIndex = shots.findIndex((s) => s.id === activeShotId);
-  const activeShot = shots[activeShotIndex];
-  const prevShot = shots[activeShotIndex - 1];
+  const handleDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event;
+    setActiveDragItem(null);
+    if (!over) return;
+
+    const activeType = active.data.current?.type;
+    const overId = over.id as string;
+
+    // Find Target Track Index
+    let targetTrackIndex = -1;
+
+    // Check if dropped directly on a track container
+    if (overId.toString().startsWith("track-")) {
+      targetTrackIndex = parseInt(overId.toString().replace("track-", ""));
+    }
+    // Check if dropped on an item inside a track
+    else if (over.data.current?.trackIndex !== undefined) {
+      targetTrackIndex = over.data.current.trackIndex;
+    }
+
+    if (targetTrackIndex === -1) return;
+
+    // A) NEW CLIP FROM LIBRARY
+    if (activeType === "shot") {
+      const shotData = active.data.current?.shot;
+      if (shotData) {
+        setTracks((prev) => {
+          const newTracks = [...prev];
+          if (!newTracks[targetTrackIndex]) newTracks[targetTrackIndex] = [];
+
+          const newItem = {
+            ...shotData,
+            timelineId: crypto.randomUUID(),
+            duration: shotData.duration || 4,
+            trackIndex: targetTrackIndex,
+          };
+
+          // Find insertion index if dropped on an item
+          const overTimelineId = over.data.current?.timelineId;
+          const insertIndex = newTracks[targetTrackIndex].findIndex(
+            (i) => i.timelineId === overTimelineId,
+          );
+
+          if (insertIndex !== -1) {
+            newTracks[targetTrackIndex].splice(insertIndex, 0, newItem);
+          } else {
+            newTracks[targetTrackIndex].push(newItem);
+          }
+          return newTracks;
+        });
+      }
+    }
+    // B) MOVING EXISTING ITEM
+    else if (activeType === "timeline-item") {
+      const activeId = active.id;
+      const sourceTrackIndex = active.data.current?.trackIndex;
+
+      if (sourceTrackIndex === undefined) return;
+
+      setTracks((prev) => {
+        const newTracks = [...prev];
+        // Remove from source
+        const sourceItemIndex = newTracks[sourceTrackIndex].findIndex(
+          (i) => i.timelineId === activeId,
+        );
+        if (sourceItemIndex === -1) return prev;
+
+        const [item] = newTracks[sourceTrackIndex].splice(sourceItemIndex, 1);
+        item.trackIndex = targetTrackIndex; // Update internal track ref
+
+        // Add to target
+        if (!newTracks[targetTrackIndex]) newTracks[targetTrackIndex] = [];
+
+        const overTimelineId = over.data.current?.timelineId;
+        const insertIndex = newTracks[targetTrackIndex].findIndex(
+          (i) => i.timelineId === overTimelineId,
+        );
+
+        if (insertIndex !== -1) {
+          newTracks[targetTrackIndex].splice(insertIndex, 0, item);
+        } else {
+          newTracks[targetTrackIndex].push(item);
+        }
+
+        return newTracks;
+      });
+    }
+  };
 
   if (!project || !scene)
     return (
@@ -230,219 +331,101 @@ function StudioContent() {
     );
 
   return (
-    <div className="flex-1 w-full flex flex-col overflow-hidden bg-[#09090b]">
-      {/* HEADER */}
-      <header className="h-14 w-full border-b border-zinc-800 bg-[#09090b] flex items-center justify-between px-4 shrink-0">
-        <div className="flex items-center gap-4">
+    <DndContext
+      sensors={sensors}
+      onDragStart={handleDragStart}
+      onDragEnd={handleDragEnd}
+    >
+      <div className="flex-1 w-full flex flex-col overflow-hidden bg-[#09090b]">
+        {/* HEADER */}
+        <header className="h-10 w-full border-b border-zinc-800 bg-[#09090b] flex items-center justify-between px-4 shrink-0">
           <h1 className="text-sm font-bold text-white flex items-center gap-2">
             {scene.name} <span className="text-zinc-600">/</span>{" "}
             <span className="text-zinc-500 font-normal">{project.name}</span>
           </h1>
-        </div>
-        <button className="bg-[#D2FF44] text-black text-xs font-bold px-4 py-1.5 rounded hover:opacity-90 flex items-center gap-2">
-          <Play size={14} fill="black" /> RENDER SCENE
-        </button>
-      </header>
+        </header>
 
-      {/* WORKSPACE */}
-      <div className="flex-1 w-full flex overflow-hidden">
-        {/* INSPECTOR */}
-        <aside className="w-80 border-r border-zinc-800 bg-[#09090b] flex flex-col overflow-y-auto">
-          {activeShot ? (
-            <div className="p-4 space-y-6">
-              {/* Image Input */}
-              <div>
-                <h3 className="text-xs font-bold text-zinc-500 uppercase tracking-wider mb-3 flex items-center gap-2">
-                  <ImageIcon size={12} /> Source
-                </h3>
-                <div
-                  onClick={handleUpload}
-                  className="aspect-video border border-dashed border-zinc-800 rounded-lg bg-zinc-900/50 flex flex-col items-center justify-center gap-2 text-zinc-600 hover:text-white hover:border-[#D2FF44] cursor-pointer transition-all overflow-hidden relative group"
-                >
-                  {activeShot.previewBase64 ? (
-                    <img
-                      src={activeShot.previewBase64}
-                      className="w-full h-full object-cover"
-                    />
-                  ) : (
-                    <>
-                      <ImageIcon size={24} />
-                      <span className="text-xs">Select Image</span>
-                    </>
-                  )}
-                </div>
-              </div>
-              {/* Prompt Input */}
-              <div>
-                <h3 className="text-xs font-bold text-zinc-500 uppercase tracking-wider mb-3 flex items-center gap-2">
-                  <Wand2 size={12} /> Prompt
-                </h3>
-                <textarea
-                  className="w-full bg-zinc-900 border border-zinc-800 rounded-md p-3 text-xs text-white focus:border-[#D2FF44] outline-none resize-none h-24 leading-relaxed placeholder-zinc-600"
-                  placeholder="Describe the motion..."
-                  value={activeShot.prompt}
-                  onChange={(e) => updateActiveShot({ prompt: e.target.value })}
-                />
-              </div>
-              {/* Settings */}
-              <div className="space-y-4">
-                <h3 className="text-xs font-bold text-zinc-500 uppercase tracking-wider flex items-center gap-2">
-                  <Settings size={12} /> Settings
-                </h3>
-                <div className="space-y-2">
-                  <div className="flex justify-between text-xs text-zinc-400">
-                    <label>Motion Strength</label>
-                    <span>{activeShot.motionStrength}</span>
-                  </div>
-                  <input
-                    type="range"
-                    min="1"
-                    max="255"
-                    className="w-full accent-[#D2FF44] h-1 bg-zinc-800 rounded appearance-none"
-                    value={activeShot.motionStrength}
-                    onChange={(e) =>
-                      updateActiveShot({
-                        motionStrength: parseInt(e.target.value),
-                      })
-                    }
-                  />
-                </div>
-                <div className="space-y-2">
-                  <div className="flex justify-between text-xs text-zinc-400">
-                    <label>Seed</label>
-                    <span className="font-mono text-[10px]">
-                      {activeShot.seed}
-                    </span>
-                  </div>
-                  <div className="flex gap-2">
-                    <input
-                      type="number"
-                      className="flex-1 bg-zinc-900 border border-zinc-800 rounded px-2 py-1 text-xs text-white outline-none focus:border-[#D2FF44]"
-                      value={activeShot.seed}
-                      onChange={(e) =>
-                        updateActiveShot({ seed: parseInt(e.target.value) })
-                      }
-                    />
-                    <button
-                      onClick={() =>
-                        updateActiveShot({
-                          seed: Math.floor(Math.random() * 1000000),
-                        })
-                      }
-                      className="bg-zinc-800 px-2 rounded hover:bg-zinc-700 text-zinc-400"
-                      title="Randomize"
-                    >
-                      🎲
-                    </button>
-                  </div>
-                </div>
-              </div>
+        {/* WORKSPACE */}
+        <div className="flex-1 flex flex-col overflow-hidden">
+          <div className="flex-1 flex overflow-hidden min-h-0">
+            {/* GENERATOR */}
+            <div className="w-80 border-r border-zinc-800 bg-[#09090b] flex flex-col min-h-0">
+              <GeneratorPanel
+                activeShot={activeShot}
+                updateActiveShot={updateActiveShot}
+                project={project}
+                scene={scene}
+                isRendering={isRendering}
+                setIsRendering={setIsRendering}
+                setVideoCache={(id, b64) => videoCache.current.set(id, b64)}
+                setVideoSrc={() => {}}
+              />
             </div>
-          ) : (
-            <div className="p-10 text-center text-zinc-600 text-xs">
-              Select a shot to edit
-            </div>
-          )}
-        </aside>
 
-        {/* VIEWPORT */}
-        <div className="flex-1 bg-black flex flex-col items-center justify-center relative border-r border-zinc-800 overflow-hidden">
-          <div className="absolute top-4 flex gap-2 z-10 bg-zinc-900/80 backdrop-blur rounded-full px-2 py-1 border border-zinc-800">
-            <button
-              onClick={() => setShowGhost(!showGhost)}
-              className={`p-1.5 rounded-full transition-all ${showGhost ? "bg-[#D2FF44] text-black" : "text-zinc-400 hover:text-white"}`}
-              title="Toggle Onion Skinning (Ghosting)"
-            >
-              <Ghost size={14} />
-            </button>
+            {/* LIBRARY */}
+            <div className="w-80 border-r border-zinc-800 bg-[#09090b] flex flex-col min-h-0">
+              <LibraryPanel
+                shots={shots}
+                activeShotId={activeShotId}
+                setActiveShotId={setActiveShotId}
+                handleAddShot={handleAddShot}
+                handleExtendShot={handleExtendShot}
+                handleDeleteShot={handleDeleteShot}
+              />
+            </div>
+
+            {/* VIEWER */}
+            <div className="flex-1 min-w-0 bg-black min-h-0">
+              <ViewerPanel
+                primaryVideoRef={primaryVideoRef}
+                secondaryVideoRef={secondaryVideoRef}
+                activePlayer={activePlayer}
+                activeShot={activeShot}
+                showGhost={showGhost}
+                setShowGhost={setShowGhost}
+                prevShot={prevShot}
+              />
+            </div>
           </div>
-          <div className="relative max-h-[80%] max-w-[80%] aspect-video flex items-center justify-center">
-            {activeShot?.previewBase64 ? (
-              <img
-                src={activeShot.previewBase64}
-                className="w-full h-full object-contain shadow-2xl relative z-0"
-              />
-            ) : (
-              <div className="text-zinc-600 text-sm font-mono flex flex-col items-center gap-2">
-                <div className="w-12 h-12 rounded-full bg-zinc-900 flex items-center justify-center">
-                  <ImageIcon size={20} />
-                </div>
-                NO IMAGE
-              </div>
-            )}
-            {showGhost && prevShot?.previewBase64 && (
-              <img
-                src={prevShot.previewBase64}
-                className="absolute inset-0 w-full h-full object-contain opacity-40 pointer-events-none z-10 mix-blend-overlay"
-                style={{ filter: "grayscale(100%)" }}
-              />
-            )}
+
+          {/* TIMELINE */}
+          <div className="h-[300px] border-t border-zinc-800 bg-[#1e1e20] shrink-0">
+            <TimelinePanel
+              tracks={tracks}
+              shots={shots}
+              onRemoveItem={(id) => {
+                setTracks((prev) =>
+                  prev.map((t) => t.filter((i) => i.timelineId !== id)),
+                );
+              }}
+              onAddTrack={() => setTracks((prev) => [...prev, []])}
+              isPlaying={isPlaying}
+              togglePlay={togglePlay}
+              currentTime={currentTime}
+              duration={duration}
+              seekTo={seekTo}
+            />
           </div>
         </div>
       </div>
 
-      {/* TIMELINE */}
-      <div className="h-48 border-t border-zinc-800 bg-[#09090b] flex flex-col shrink-0">
-        <div className="h-8 border-b border-zinc-800 flex items-center justify-between px-4 bg-zinc-900/50">
-          <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">
-            Timeline
-          </span>
-          <span className="text-[10px] text-zinc-500 font-mono">
-            Total Duration: {shots.length * 4}s
-          </span>
-        </div>
-        <div className="flex-1 overflow-x-auto p-4 flex items-center gap-2">
-          {shots.map((shot, index) => (
-            <div
-              key={shot.id}
-              onClick={() => setActiveShotId(shot.id)}
-              className={`relative group flex-shrink-0 w-48 h-28 rounded-lg border-2 overflow-hidden cursor-pointer transition-all ${activeShotId === shot.id ? "border-[#D2FF44] shadow-[0_0_15px_rgba(210,255,68,0.1)]" : "border-zinc-800 hover:border-zinc-600"}`}
-            >
-              <div className="absolute inset-0 bg-zinc-900">
-                {shot.previewBase64 && (
-                  <img
-                    src={shot.previewBase64}
-                    className="w-full h-full object-cover opacity-60 group-hover:opacity-100 transition-opacity"
-                  />
-                )}
-              </div>
-              <div className="absolute top-2 left-2 bg-black/60 backdrop-blur px-1.5 py-0.5 rounded text-[10px] font-bold text-white border border-white/10">
-                {index + 1}
-              </div>
-              <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    handleExtendShot(shot);
-                  }}
-                  className="bg-black/60 hover:bg-[#D2FF44] hover:text-black text-white p-1 rounded backdrop-blur transition-colors"
-                >
-                  <LinkIcon size={12} />
-                </button>
-                <button
-                  onClick={(e) => handleDeleteShot(e, shot.id)}
-                  className="bg-black/60 hover:bg-red-500 text-white p-1 rounded backdrop-blur transition-colors"
-                >
-                  <Trash2 size={12} />
-                </button>
-              </div>
-              <div className="absolute bottom-0 w-full bg-gradient-to-t from-black/90 to-transparent p-2">
-                <div className="text-[10px] font-bold text-white truncate">
-                  {shot.name}
-                </div>
-                <div className="text-[9px] text-zinc-400 font-mono">4s</div>
-              </div>
-            </div>
-          ))}
-          <button
-            onClick={handleAddShot}
-            className="flex-shrink-0 w-12 h-28 rounded-lg border border-dashed border-zinc-800 hover:border-[#D2FF44] hover:bg-zinc-900/50 flex items-center justify-center text-zinc-600 hover:text-[#D2FF44] transition-all"
-          >
-            <Plus size={20} />
-          </button>
-        </div>
-      </div>
-    </div>
+      <DragOverlay
+        dropAnimation={{
+          sideEffects: defaultDropAnimationSideEffects({
+            styles: { active: { opacity: "0.5" } },
+          }),
+        }}
+      >
+        {activeDragItem?.type === "shot" ? (
+          <div className="w-48 aspect-video rounded-lg overflow-hidden border-2 border-[#D2FF44] shadow-xl">
+            <img
+              src={activeDragItem.shot.previewBase64}
+              className="w-full h-full object-cover"
+            />
+          </div>
+        ) : null}
+      </DragOverlay>
+    </DndContext>
   );
 }
 

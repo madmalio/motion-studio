@@ -11,7 +11,15 @@ import {
 } from "lucide-react";
 
 // --- WAILS IMPORTS ---
-import { CreateProject, GetProjects } from "../wailsjs/go/main/App";
+import {
+  CreateProject,
+  GetProjects,
+  UpdateProject,
+  DeleteProject,
+  ReadImageBase64,
+} from "../wailsjs/go/main/App";
+import CardMenu from "../components/CardMenu";
+import { useConfirm } from "../components/ConfirmProvider";
 
 // --- TYPES ---
 interface Project {
@@ -20,13 +28,17 @@ interface Project {
   type: string;
   thumbnail: string;
   updatedAt: string;
+  sceneCount: number;
+  displayThumbnail?: string; // New field for the Base64 image
 }
 
 export default function Dashboard() {
   // --- STATE ---
   const [projects, setProjects] = useState<Project[]>([]);
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [editingProject, setEditingProject] = useState<Project | null>(null);
   const router = useRouter();
+  const { confirm } = useConfirm();
 
   // Form State
   const [newProjectName, setNewProjectName] = useState("");
@@ -41,30 +53,79 @@ export default function Dashboard() {
     try {
       // Call Go Backend
       const data = await GetProjects();
-      // Go returns null if empty, default to []
-      setProjects(data || []);
+
+      if (data) {
+        // Hydrate thumbnails (Convert paths to Base64 for display)
+        const hydrated = await Promise.all(
+          data.map(async (p) => {
+            if (p.thumbnail) {
+              const b64 = await ReadImageBase64(p.thumbnail);
+              return { ...p, displayThumbnail: b64 };
+            }
+            return p;
+          }),
+        );
+        setProjects(hydrated);
+      } else {
+        setProjects([]);
+      }
     } catch (err) {
       console.error("Error loading projects:", err);
     }
   };
 
-  // --- 2. CREATE PROJECT HANDLER ---
-  const handleCreate = async () => {
+  // --- 2. CREATE / UPDATE HANDLER ---
+  const handleSave = async () => {
     if (!newProjectName) return;
 
     try {
-      // 1. Send data to Go to create folder & JSON
-      await CreateProject(newProjectName, newProjectFormat);
+      if (editingProject) {
+        // Update existing
+        await UpdateProject({
+          ...editingProject,
+          name: newProjectName,
+          type: newProjectFormat,
+        });
+      } else {
+        // Create new
+        await CreateProject(newProjectName, newProjectFormat);
+      }
 
-      // 2. Refresh the list
+      // Refresh & Reset
       await refreshProjects();
-
-      // 3. Reset & Close
       setNewProjectName("");
+      setEditingProject(null);
       setIsModalOpen(false);
     } catch (err) {
-      console.error("Error creating project:", err);
+      console.error("Error saving project:", err);
     }
+  };
+
+  const openNewProjectModal = () => {
+    setEditingProject(null);
+    setNewProjectName("");
+    setNewProjectFormat("16:9 (Cinematic)");
+    setIsModalOpen(true);
+  };
+
+  const handleEdit = (project: Project) => {
+    setEditingProject(project);
+    setNewProjectName(project.name);
+    setNewProjectFormat(project.type);
+    setIsModalOpen(true);
+  };
+
+  const handleDelete = (id: string) => {
+    confirm({
+      title: "Delete Project?",
+      message: "This will permanently delete the project and all its scenes.",
+      confirmText: "Delete",
+      variant: "danger",
+      onConfirm: async () => {
+        await DeleteProject(id);
+        setProjects((prev) => prev.filter((p) => p.id !== id));
+      },
+    });
   };
 
   return (
@@ -91,7 +152,7 @@ export default function Dashboard() {
 
         <div className="flex items-center gap-3">
           <button
-            onClick={() => setIsModalOpen(true)}
+            onClick={openNewProjectModal}
             className="bg-[#D2FF44] hover:bg-[#c2eb39] text-black text-xs font-bold px-4 py-2 rounded flex items-center gap-2 transition-colors"
           >
             <Plus size={16} strokeWidth={3} />
@@ -115,7 +176,7 @@ export default function Dashboard() {
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
             {/* 1. CREATE NEW CARD (The Anchor) */}
             <div
-              onClick={() => setIsModalOpen(true)}
+              onClick={openNewProjectModal}
               className="aspect-[16/10] border border-dashed border-zinc-800 rounded-lg flex flex-col items-center justify-center gap-3 text-zinc-600 hover:text-[#D2FF44] hover:border-[#D2FF44] hover:bg-zinc-900/40 transition-all cursor-pointer group"
             >
               <div className="h-10 w-10 rounded-full bg-zinc-900 border border-zinc-800 flex items-center justify-center group-hover:scale-110 transition-transform shadow-lg">
@@ -131,40 +192,38 @@ export default function Dashboard() {
               <div
                 key={project.id}
                 onClick={() => router.push(`/scenes?projectId=${project.id}`)}
-                className="group aspect-[16/10] bg-zinc-900 border border-zinc-800 rounded-lg overflow-hidden hover:border-[#D2FF44]/50 hover:shadow-[0_4px_20px_rgba(0,0,0,0.5)] transition-all cursor-pointer relative"
+                className="group aspect-[16/10] bg-zinc-900 border border-zinc-800 rounded-lg hover:border-[#D2FF44]/50 hover:shadow-[0_4px_20px_rgba(0,0,0,0.5)] transition-all cursor-pointer relative"
               >
-                {/* Image Area */}
-                <div className="h-full w-full relative bg-zinc-950">
-                  {project.thumbnail ? (
-                    <img
-                      src={project.thumbnail}
-                      className="w-full h-full object-cover opacity-60 group-hover:opacity-100 group-hover:scale-105 transition-all duration-500"
-                    />
-                  ) : (
-                    <div className="w-full h-full flex items-center justify-center bg-zinc-900 text-zinc-700">
-                      <Clapperboard size={32} />
-                    </div>
-                  )}
+                {/* Image Area - Clipped */}
+                <div className="absolute inset-0 overflow-hidden rounded-lg bg-zinc-950">
+                  <img
+                    src={project.displayThumbnail || "/default-cover.png"}
+                    onError={(e) =>
+                      (e.currentTarget.src = "/default-cover.png")
+                    }
+                    className="w-full h-full object-cover opacity-60 group-hover:opacity-100 group-hover:scale-105 transition-all duration-500"
+                  />
 
                   {/* Gradient Overlay */}
                   <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/20 to-transparent" />
+                </div>
 
-                  {/* Content Footer */}
-                  <div className="absolute bottom-0 left-0 w-full p-3 flex justify-between items-end">
-                    <div>
-                      <h3 className="text-sm font-bold text-white group-hover:text-[#D2FF44] transition-colors leading-tight">
-                        {project.name}
-                      </h3>
-                      <p className="text-[10px] text-zinc-400 font-bold tracking-wider mt-0.5 uppercase">
-                        {project.type}
-                      </p>
-                    </div>
-
-                    {/* Menu Button */}
-                    <button className="text-zinc-500 hover:text-white p-1 hover:bg-white/10 rounded">
-                      <MoreVertical size={14} />
-                    </button>
+                {/* Content Footer - Not Clipped for Menu */}
+                <div className="absolute bottom-0 left-0 w-full p-3 flex justify-between items-end z-10">
+                  <div>
+                    <h3 className="text-sm font-bold text-white group-hover:text-[#D2FF44] transition-colors leading-tight">
+                      {project.name}
+                    </h3>
+                    <p className="text-[10px] text-zinc-400 font-bold tracking-wider mt-0.5 uppercase">
+                      {project.type} • {project.sceneCount} SCENES
+                    </p>
                   </div>
+
+                  {/* Menu Button */}
+                  <CardMenu
+                    onDelete={() => handleDelete(project.id)}
+                    onRename={() => handleEdit(project)}
+                  />
                 </div>
               </div>
             ))}
@@ -176,7 +235,9 @@ export default function Dashboard() {
       {isModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-[2px]">
           <div className="bg-[#09090b] border border-zinc-800 w-96 rounded-lg shadow-2xl p-6">
-            <h3 className="font-bold text-white mb-4 text-lg">New Project</h3>
+            <h3 className="font-bold text-white mb-4 text-lg">
+              {editingProject ? "Edit Project" : "New Project"}
+            </h3>
             <div className="space-y-4">
               <input
                 autoFocus
@@ -203,10 +264,10 @@ export default function Dashboard() {
                 Cancel
               </button>
               <button
-                onClick={handleCreate}
+                onClick={handleSave}
                 className="px-6 py-2 text-xs font-bold bg-[#D2FF44] text-black rounded hover:opacity-90"
               >
-                Create
+                {editingProject ? "Save" : "Create"}
               </button>
             </div>
           </div>

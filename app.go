@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
+	"mime/multipart"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,11 +21,14 @@ import (
 // App struct
 type App struct {
 	ctx context.Context
+	comfyURL string
 }
 
 // NewApp creates a new App application struct
 func NewApp() *App {
-	return &App{}
+	return &App{
+		comfyURL: "http://127.0.0.1:8188",
+	}
 }
 
 // startup is called when the app starts
@@ -34,6 +39,7 @@ func (a *App) startup(ctx context.Context) {
 	if _, err := os.Stat(baseDir); os.IsNotExist(err) {
 		os.MkdirAll(baseDir, 0755)
 	}
+	a.loadConfig()
 }
 
 // --- MODELS ---
@@ -44,6 +50,7 @@ type Project struct {
 	Type      string `json:"type"`
 	Thumbnail string `json:"thumbnail"`
 	UpdatedAt string `json:"updatedAt"`
+	SceneCount int    `json:"sceneCount"`
 }
 
 type Scene struct {
@@ -52,6 +59,7 @@ type Scene struct {
 	Name      string `json:"name"`
 	ShotCount int    `json:"shotCount"`
 	UpdatedAt string `json:"updatedAt"`
+	Thumbnail string `json:"thumbnail"`
 }
 
 type Shot struct {
@@ -67,6 +75,10 @@ type Shot struct {
 	OutputVideo    string `json:"outputVideo"`    // Path to generated MP4
 }
 
+type Config struct {
+	ComfyURL string `json:"comfyUrl"`
+}
+
 // --- HELPER FUNCTIONS ---
 
 // getAppDir returns the path to "Documents/MotionStudio"
@@ -78,7 +90,18 @@ func (a *App) getAppDir() string {
 func (a *App) saveProjectFile(p Project) {
 	projectPath := filepath.Join(a.getAppDir(), p.ID)
 	data, _ := json.MarshalIndent(p, "", "  ")
-	ioutil.WriteFile(filepath.Join(projectPath, "project.json"), data, 0644)
+	os.WriteFile(filepath.Join(projectPath, "project.json"), data, 0644)
+}
+
+func (a *App) loadConfig() {
+	path := filepath.Join(a.getAppDir(), "config.json")
+	data, err := os.ReadFile(path)
+	if err == nil {
+		var config Config
+		if err := json.Unmarshal(data, &config); err == nil && config.ComfyURL != "" {
+			a.comfyURL = config.ComfyURL
+		}
+	}
 }
 
 // --- PROJECT FUNCTIONS ---
@@ -117,16 +140,44 @@ func (a *App) GetProjects() []Project {
 func (a *App) GetProject(id string) (Project, error) {
 	var p Project
 	path := filepath.Join(a.getAppDir(), id, "project.json")
-	data, err := ioutil.ReadFile(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return p, err
 	}
 	err = json.Unmarshal(data, &p)
+
+	// Calculate scene count dynamically
+	scenesDir := filepath.Join(a.getAppDir(), id, "scenes")
+	entries, _ := os.ReadDir(scenesDir)
+	count := 0
+	for _, e := range entries {
+		if e.IsDir() {
+			count++
+		}
+	}
+	p.SceneCount = count
 	return p, err
 }
 
 func (a *App) UpdateProject(p Project) {
 	p.UpdatedAt = time.Now().Format("2006-01-02 15:04")
+	a.saveProjectFile(p)
+}
+
+func (a *App) DeleteProject(id string) {
+	if id == "" {
+		return
+	}
+	projectPath := filepath.Join(a.getAppDir(), id)
+	os.RemoveAll(projectPath)
+}
+
+func (a *App) SetProjectThumbnail(projectId string, path string) {
+	p, err := a.GetProject(projectId)
+	if err != nil {
+		return
+	}
+	p.Thumbnail = path
 	a.saveProjectFile(p)
 }
 
@@ -146,7 +197,7 @@ func (a *App) CreateScene(projectId string, name string) Scene {
 	}
 
 	data, _ := json.MarshalIndent(s, "", "  ")
-	ioutil.WriteFile(filepath.Join(sceneDir, "scene.json"), data, 0644)
+	os.WriteFile(filepath.Join(sceneDir, "scene.json"), data, 0644)
 	return s
 }
 
@@ -158,17 +209,28 @@ func (a *App) GetScenes(projectId string) []Scene {
 	for _, entry := range entries {
 		if entry.IsDir() {
 			var s Scene
-			data, err := ioutil.ReadFile(filepath.Join(scenesDir, entry.Name(), "scene.json"))
+			data, err := os.ReadFile(filepath.Join(scenesDir, entry.Name(), "scene.json"))
 			if err == nil {
 				json.Unmarshal(data, &s)
 				// Count shots for the UI
 				shots := a.GetShots(projectId, s.ID)
 				s.ShotCount = len(shots)
+				if len(shots) > 0 {
+					s.Thumbnail = shots[0].SourceImage
+				}
 				scenes = append(scenes, s)
 			}
 		}
 	}
 	return scenes
+}
+
+func (a *App) DeleteScene(projectId string, sceneId string) {
+	if projectId == "" || sceneId == "" {
+		return
+	}
+	sceneDir := filepath.Join(a.getAppDir(), projectId, "scenes", sceneId)
+	os.RemoveAll(sceneDir)
 }
 
 // --- SHOT FUNCTIONS ---
@@ -177,14 +239,14 @@ func (a *App) GetScenes(projectId string) []Scene {
 func (a *App) SaveShots(projectId string, sceneId string, shots []Shot) {
 	path := filepath.Join(a.getAppDir(), projectId, "scenes", sceneId, "shots.json")
 	data, _ := json.MarshalIndent(shots, "", "  ")
-	ioutil.WriteFile(path, data, 0644)
+	os.WriteFile(path, data, 0644)
 }
 
 // GetShots reads the list from disk
 func (a *App) GetShots(projectId string, sceneId string) []Shot {
 	path := filepath.Join(a.getAppDir(), projectId, "scenes", sceneId, "shots.json")
 	
-	data, err := ioutil.ReadFile(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return []Shot{} 
 	}
@@ -192,6 +254,21 @@ func (a *App) GetShots(projectId string, sceneId string) []Shot {
 	var shots []Shot
 	json.Unmarshal(data, &shots)
 	return shots
+}
+
+func (a *App) DeleteShot(projectId string, sceneId string, shotId string) {
+	shots := a.GetShots(projectId, sceneId)
+	var newShots []Shot
+	for _, s := range shots {
+		if s.ID == shotId {
+			if s.OutputVideo != "" {
+				os.Remove(s.OutputVideo)
+			}
+		} else {
+			newShots = append(newShots, s)
+		}
+	}
+	a.SaveShots(projectId, sceneId, newShots)
 }
 
 func (a *App) CreateShot(sceneId string) Shot {
@@ -203,6 +280,377 @@ func (a *App) CreateShot(sceneId string) Shot {
 		MotionStrength: 127,
 		Duration:       48,
 	}
+}
+
+// GetComfyURL returns the current ComfyUI endpoint
+func (a *App) GetComfyURL() string {
+	return a.comfyURL
+}
+
+// SetComfyURL updates the ComfyUI endpoint
+func (a *App) SetComfyURL(url string) {
+	a.comfyURL = strings.TrimRight(url, "/")
+
+	// Save Config
+	path := filepath.Join(a.getAppDir(), "config.json")
+	config := Config{ComfyURL: a.comfyURL}
+	data, _ := json.MarshalIndent(config, "", "  ")
+	os.WriteFile(path, data, 0644)
+}
+
+func (a *App) TestComfyConnection() bool {
+	resp, err := http.Get(a.comfyURL + "/system_stats")
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == 200
+}
+
+func (a *App) CheckWorkflowExists() bool {
+	path := filepath.Join(a.getAppDir(), "workflow.json")
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+// SelectAndSaveWorkflow opens a file dialog for the user to select a workflow.json
+// and copies it to the app directory.
+func (a *App) SelectAndSaveWorkflow() string {
+	selection, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
+		Title: "Select ComfyUI Workflow (API Format)",
+		Filters: []runtime.FileFilter{
+			{DisplayName: "JSON Files", Pattern: "*.json"},
+		},
+	})
+	if err != nil || selection == "" {
+		return "" // Cancelled
+	}
+
+	data, err := os.ReadFile(selection)
+	if err != nil {
+		return "Error reading file"
+	}
+
+	dest := filepath.Join(a.getAppDir(), "workflow.json")
+	err = os.WriteFile(dest, data, 0644)
+	if err != nil {
+		return "Error saving workflow"
+	}
+
+	return "Success"
+}
+
+// --- COMFYUI INTEGRATION ---
+
+// RenderShot orchestrates the ComfyUI generation
+func (a *App) RenderShot(projectId string, sceneId string, shotId string) (Shot, error) {
+	// 1. Get Shot
+	shots := a.GetShots(projectId, sceneId)
+	var shot *Shot
+	for i := range shots {
+		if shots[i].ID == shotId {
+			shot = &shots[i]
+			break
+		}
+	}
+	if shot == nil {
+		return Shot{}, fmt.Errorf("shot not found")
+	}
+
+	if shot.SourceImage == "" {
+		return *shot, fmt.Errorf("source image is missing")
+	}
+
+	// 2. Ensure Workflow Template Exists
+	workflowPath := filepath.Join(a.getAppDir(), "workflow.json")
+	if _, err := os.Stat(workflowPath); os.IsNotExist(err) {
+		a.createDefaultWorkflow(workflowPath)
+	}
+
+	// 3. Upload Image to ComfyUI
+	comfyFilename, err := a.uploadImageToComfy(shot.SourceImage)
+	if err != nil {
+		return *shot, fmt.Errorf("upload failed: %v", err)
+	}
+
+	// 4. Prepare Workflow JSON
+	workflowData, _ := os.ReadFile(workflowPath)
+	var workflow map[string]interface{}
+	json.Unmarshal(workflowData, &workflow)
+
+	// 5. Inject Values (Smart Node Lookup)
+	// We iterate over nodes to find specific types to update
+	imageInjected := false
+	for key, node := range workflow {
+		nodeMap, ok := node.(map[string]interface{})
+		if !ok { continue }
+		
+		classType, _ := nodeMap["class_type"].(string)
+		inputs, _ := nodeMap["inputs"].(map[string]interface{})
+
+		// Update Input Image
+		if classType == "LoadImage" {
+			fmt.Printf("Injecting Image into Node %s\n", key)
+			inputs["image"] = comfyFilename
+			imageInjected = true
+		}
+
+		// Update Seed (KSampler or SVD Conditioning)
+		if classType == "KSampler" || classType == "SVD_img2vid_Conditioning" {
+			if _, ok := inputs["seed"]; ok {
+				fmt.Printf("Injecting Seed %d into Node %s\n", shot.Seed, key)
+				inputs["seed"] = shot.Seed
+			}
+			if _, ok := inputs["noise_seed"]; ok {
+				fmt.Printf("Injecting Noise Seed %d into Node %s\n", shot.Seed, key)
+				inputs["noise_seed"] = shot.Seed
+			}
+		}
+
+		// Update Motion Bucket (SVD)
+		if classType == "SVD_img2vid_Conditioning" {
+			fmt.Printf("Injecting Motion %d into Node %s\n", shot.MotionStrength, key)
+			inputs["motion_bucket_id"] = shot.MotionStrength
+		}
+
+		// Update Prompt (CLIP Text Encode) - Optional, if you use text-to-video
+		if classType == "CLIPTextEncode" {
+			fmt.Printf("Injecting Prompt into Node %s\n", key)
+			inputs["text"] = shot.Prompt
+		}
+	}
+
+	if !imageInjected {
+		fmt.Println("WARNING: No 'LoadImage' node found in workflow. Source image was NOT injected.")
+	}
+
+	// 6. Queue Prompt
+	promptReq := map[string]interface{}{
+		"prompt": workflow,
+	}
+	promptBytes, _ := json.Marshal(promptReq)
+	resp, err := http.Post(a.comfyURL+"/prompt", "application/json", bytes.NewBuffer(promptBytes))
+	if err != nil {
+		return *shot, fmt.Errorf("failed to connect to ComfyUI: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return *shot, fmt.Errorf("ComfyUI API Error (%d): %s", resp.StatusCode, string(body))
+	}
+
+	var promptResp map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&promptResp)
+	promptID := promptResp["prompt_id"].(string)
+
+	// 7. Poll for Completion
+	// In a real app, use WebSockets. For MVP, we poll history.
+	outputFilename := ""
+	outputSubfolder := ""
+	outputType := ""
+	timeout := time.After(10 * time.Minute) // Increased timeout for slower renders
+	var histMap map[string]interface{}
+
+	for {
+		select {
+		case <-timeout:
+			return *shot, fmt.Errorf("rendering timed out")
+		default:
+		}
+
+		time.Sleep(1 * time.Second)
+		histResp, err := http.Get(a.comfyURL + "/history/" + promptID)
+		if err != nil { continue }
+		
+		histMap = make(map[string]interface{})
+		json.NewDecoder(histResp.Body).Decode(&histMap)
+		histResp.Body.Close()
+
+		if len(histMap) > 0 {
+			// Job done! Find output filename
+			data, ok := histMap[promptID].(map[string]interface{})
+			if !ok {
+				break
+			}
+
+			// Check for execution errors
+			if status, ok := data["status"].(map[string]interface{}); ok {
+				if statusStr, ok := status["status_str"].(string); ok && statusStr == "error" {
+					return *shot, fmt.Errorf("ComfyUI execution failed")
+				}
+			}
+
+			outputs, ok := data["outputs"].(map[string]interface{})
+			if !ok {
+				break
+			}
+			for _, outNode := range outputs {
+				outNodeMap, ok := outNode.(map[string]interface{})
+				if !ok {
+					continue
+				}
+
+				// Check for "images" (Standard SaveImage)
+				if images, ok := outNodeMap["images"].([]interface{}); ok && len(images) > 0 {
+					if imgData, ok := images[0].(map[string]interface{}); ok {
+						if filename, ok := imgData["filename"].(string); ok {
+							outputFilename = filename
+							if sub, ok := imgData["subfolder"].(string); ok {
+								outputSubfolder = sub
+							}
+							if typ, ok := imgData["type"].(string); ok {
+								outputType = typ
+							}
+							break
+						}
+					}
+				}
+				// Check for "videos" (VHS / Video Helper Suite)
+				if videos, ok := outNodeMap["videos"].([]interface{}); ok && len(videos) > 0 {
+					if vidData, ok := videos[0].(map[string]interface{}); ok {
+						if filename, ok := vidData["filename"].(string); ok {
+							outputFilename = filename
+							if sub, ok := vidData["subfolder"].(string); ok {
+								outputSubfolder = sub
+							}
+							if typ, ok := vidData["type"].(string); ok {
+								outputType = typ
+							}
+							break
+						}
+					}
+				}
+				// Check for "gifs"
+				if gifs, ok := outNodeMap["gifs"].([]interface{}); ok && len(gifs) > 0 {
+					if gifData, ok := gifs[0].(map[string]interface{}); ok {
+						if filename, ok := gifData["filename"].(string); ok {
+							outputFilename = filename
+							if sub, ok := gifData["subfolder"].(string); ok {
+								outputSubfolder = sub
+							}
+							if typ, ok := gifData["type"].(string); ok {
+								outputType = typ
+							}
+							break
+						}
+					}
+				}
+			}
+			break
+		}
+	}
+
+	if outputFilename == "" {
+		// Debugging: Print raw outputs to help diagnose
+		if len(histMap) > 0 {
+			if data, ok := histMap[promptID].(map[string]interface{}); ok {
+				if outputs, ok := data["outputs"]; ok {
+					outBytes, _ := json.MarshalIndent(outputs, "", "  ")
+					fmt.Printf("DEBUG: Raw ComfyUI Outputs:\n%s\n", string(outBytes))
+				}
+			}
+		}
+		return *shot, fmt.Errorf("job finished but no output file was found in history")
+	}
+
+	// 8. Download Result
+	if outputFilename != "" {
+		outPath := filepath.Join(a.getAppDir(), projectId, "scenes", sceneId, shotId+".mp4")
+		
+		// ComfyUI View Endpoint
+		// http://.../view?filename=...&subfolder=&type=output
+		query := fmt.Sprintf("filename=%s&subfolder=%s&type=%s", outputFilename, outputSubfolder, outputType)
+		vidResp, err := http.Get(fmt.Sprintf("%s/view?%s", a.comfyURL, query))
+		if err == nil {
+			defer vidResp.Body.Close()
+			if vidResp.StatusCode != 200 {
+				return *shot, fmt.Errorf("download failed (Status %d)", vidResp.StatusCode)
+			}
+
+			outFile, _ := os.Create(outPath)
+			defer outFile.Close()
+			io.Copy(outFile, vidResp.Body)
+
+			shot.OutputVideo = outPath
+			shot.Status = "DONE"
+			a.SaveShots(projectId, sceneId, shots)
+		} else {
+			return *shot, fmt.Errorf("failed to download result: %v", err)
+		}
+	}
+
+	return *shot, nil
+}
+
+func (a *App) uploadImageToComfy(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil { return "", err }
+	defer file.Close()
+
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	part, _ := writer.CreateFormFile("image", filepath.Base(path))
+	io.Copy(part, file)
+	writer.Close()
+
+	req, _ := http.NewRequest("POST", a.comfyURL+"/upload/image", body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil { return "", err }
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("comfyui returned status %d", resp.StatusCode)
+	}
+
+	var res map[string]interface{}
+	json.NewDecoder(resp.Body).Decode(&res)
+	
+	// Comfy returns name, possibly modified if duplicate
+	if name, ok := res["name"].(string); ok {
+		return name, nil
+	}
+	return filepath.Base(path), nil
+}
+
+func (a *App) createDefaultWorkflow(path string) {
+	// A minimal valid SVD workflow JSON structure (simplified for brevity)
+	// In reality, this string should be a full exported API JSON from ComfyUI
+	// For now, we write an empty object or a placeholder instruction
+	defaultJson := `{
+ "3": {
+    "inputs": {
+      "seed": 0,
+      "steps": 20,
+      "cfg": 2.5,
+      "sampler_name": "euler",
+      "scheduler": "karras",
+      "denoise": 1,
+      "model": [ "14", 0 ],
+      "positive": [ "12", 0 ],
+      "negative": [ "12", 0 ],
+      "latent_image": [ "12", 0 ]
+    },
+    "class_type": "KSampler"
+  },
+  "14": {
+    "inputs": {
+      "ckpt_name": "svd_xt.safetensors"
+    },
+    "class_type": "ImageOnlyCheckpointLoader"
+  },
+  "19": {
+    "inputs": {
+      "image": "example.png",
+      "upload": "image"
+    },
+    "class_type": "LoadImage"
+  }
+}`
+	os.WriteFile(path, []byte(defaultJson), 0644)
 }
 
 // --- UTILITY FUNCTIONS ---
@@ -224,7 +672,7 @@ func (a *App) ReadImageBase64(path string) string {
 	if path == "" {
 		return ""
 	}
-	bytes, err := ioutil.ReadFile(path)
+	bytes, err := os.ReadFile(path)
 	if err != nil {
 		return ""
 	}
@@ -235,6 +683,8 @@ func (a *App) ReadImageBase64(path string) string {
 		mimeType = "image/png"
 	} else if ext == ".webp" {
 		mimeType = "image/webp"
+	} else if ext == ".mp4" {
+		mimeType = "video/mp4"
 	}
 	
 	base64Str := base64.StdEncoding.EncodeToString(bytes)
@@ -268,12 +718,12 @@ func (a *App) ExtractLastFrame(inputPath string) string {
 	}
 
 	// 2. If input is video, run FFmpeg
-	// -sseof -3 : Seek to 3 seconds before the end
+	// -sseof -0.25 : Seek to last quarter second (safe for short AI videos)
 	// -i        : Input file
 	// -update 1 : Overwrite existing
 	// -q:v 1    : High quality output
 	// -vframes 1: Capture exactly 1 frame
-	cmd := exec.Command("ffmpeg", "-sseof", "-3", "-i", inputPath, "-update", "1", "-q:v", "1", "-vframes", "1", outputPath, "-y")
+	cmd := exec.Command("ffmpeg", "-sseof", "-0.25", "-i", inputPath, "-update", "1", "-q:v", "1", "-vframes", "1", outputPath, "-y")
 	
 	err := cmd.Run()
 	if err != nil {
