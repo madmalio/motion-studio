@@ -28,6 +28,8 @@ export function GetScenes(arg1:string):Promise<Array<main.Scene>>;
 
 export function GetShots(arg1:string,arg2:string):Promise<Array<main.Shot>>;
 
+export function GetVideoDuration(arg1:string):Promise<number>;
+
 export function ReadImageBase64(arg1:string):Promise<string>;
 
 export function RenderShot(arg1:string,arg2:string,arg3:string):Promise<main.Shot>;
@@ -45,3 +47,5 @@ export function SetProjectThumbnail(arg1:string,arg2:string):Promise<void>;
 export function TestComfyConnection():Promise<boolean>;
 
 export function UpdateProject(arg1:main.Project):Promise<void>;
+
+export function UpdateTimeline(arg1:Array<string>):Promise<string>;

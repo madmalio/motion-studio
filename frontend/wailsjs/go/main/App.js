@@ -54,6 +54,10 @@ export function GetShots(arg1, arg2) {
   return window['go']['main']['App']['GetShots'](arg1, arg2);
 }
 
+export function GetVideoDuration(arg1) {
+  return window['go']['main']['App']['GetVideoDuration'](arg1);
+}
+
 export function ReadImageBase64(arg1) {
   return window['go']['main']['App']['ReadImageBase64'](arg1);
 }
@@ -88,4 +92,8 @@ export function TestComfyConnection() {
 
 export function UpdateProject(arg1) {
   return window['go']['main']['App']['UpdateProject'](arg1);
+}
+
+export function UpdateTimeline(arg1) {
+  return window['go']['main']['App']['UpdateTimeline'](arg1);
 }

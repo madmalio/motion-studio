@@ -7,12 +7,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"mime/multipart"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
@@ -20,7 +24,7 @@ import (
 
 // App struct
 type App struct {
-	ctx context.Context
+	ctx      context.Context
 	comfyURL string
 }
 
@@ -39,17 +43,51 @@ func (a *App) startup(ctx context.Context) {
 	if _, err := os.Stat(baseDir); os.IsNotExist(err) {
 		os.MkdirAll(baseDir, 0755)
 	}
+
+	// ---------------------------------------------------------
+	// CRITICAL FIX: START THE ENGINE HERE
+	// ---------------------------------------------------------
+	go StartStreamServer()
+	// ---------------------------------------------------------
+
 	a.loadConfig()
+}
+
+// --- ENGINE BRIDGE (Frontend calls this) ---
+
+// UpdateTimeline receives a list of file paths, generates a playlist,
+// renders a gapless MP4 preview, and tells the frontend where to stream it from.
+func (a *App) UpdateTimeline(clips []string) string {
+	if server == nil {
+		return "error: server_not_ready"
+	}
+
+	// 1. Generate the FFmpeg playlist file
+	_, err := server.GeneratePlaylist(clips)
+	if err != nil {
+		fmt.Println("Error generating playlist:", err)
+		return "error: " + err.Error()
+	}
+
+	// 2. Render a gapless MP4 preview (fast concat because clips match)
+	_, err = server.RenderPreviewMP4()
+	if err != nil {
+		fmt.Println("Error rendering preview:", err)
+		return "error: " + err.Error()
+	}
+
+	// 3. Return the preview URL with a timestamp to force reload
+	return fmt.Sprintf("http://localhost:3456/preview.mp4?t=%d", time.Now().UnixMilli())
 }
 
 // --- MODELS ---
 
 type Project struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Type      string `json:"type"`
-	Thumbnail string `json:"thumbnail"`
-	UpdatedAt string `json:"updatedAt"`
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Type       string `json:"type"`
+	Thumbnail  string `json:"thumbnail"`
+	UpdatedAt  string `json:"updatedAt"`
 	SceneCount int    `json:"sceneCount"`
 }
 
@@ -63,16 +101,16 @@ type Scene struct {
 }
 
 type Shot struct {
-	ID             string `json:"id"`
-	SceneID        string `json:"sceneId"`
-	Name           string `json:"name"`
-	SourceImage    string `json:"sourceImage"`    // Path to input image
-	Prompt         string `json:"prompt"`         // AI Prompt
-	MotionStrength int    `json:"motionStrength"` // 1-127
-	Seed           int64  `json:"seed"`
-	Duration       int    `json:"duration"`       // Frames
-	Status         string `json:"status"`         // DRAFT, RENDERING, DONE
-	OutputVideo    string `json:"outputVideo"`    // Path to generated MP4
+	ID             string  `json:"id"`
+	SceneID        string  `json:"sceneId"`
+	Name           string  `json:"name"`
+	SourceImage    string  `json:"sourceImage"`    // Path to input image
+	Prompt         string  `json:"prompt"`         // AI Prompt
+	MotionStrength int     `json:"motionStrength"` // 1-127
+	Seed           int64   `json:"seed"`
+	Duration       float64 `json:"duration"`    // Seconds
+	Status         string  `json:"status"`      // DRAFT, RENDERING, DONE
+	OutputVideo    string  `json:"outputVideo"` // Path to generated MP4
 }
 
 type Config struct {
@@ -245,10 +283,10 @@ func (a *App) SaveShots(projectId string, sceneId string, shots []Shot) {
 // GetShots reads the list from disk
 func (a *App) GetShots(projectId string, sceneId string) []Shot {
 	path := filepath.Join(a.getAppDir(), projectId, "scenes", sceneId, "shots.json")
-	
+
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return []Shot{} 
+		return []Shot{}
 	}
 
 	var shots []Shot
@@ -278,7 +316,7 @@ func (a *App) CreateShot(sceneId string) Shot {
 		Name:           "New Shot",
 		Status:         "DRAFT",
 		MotionStrength: 127,
-		Duration:       48,
+		Duration:       4.0,
 	}
 }
 
@@ -340,6 +378,7 @@ func (a *App) SelectAndSaveWorkflow() string {
 	return "Success"
 }
 
+
 // --- COMFYUI INTEGRATION ---
 
 // RenderShot orchestrates the ComfyUI generation
@@ -383,8 +422,10 @@ func (a *App) RenderShot(projectId string, sceneId string, shotId string) (Shot,
 	imageInjected := false
 	for key, node := range workflow {
 		nodeMap, ok := node.(map[string]interface{})
-		if !ok { continue }
-		
+		if !ok {
+			continue
+		}
+
 		classType, _ := nodeMap["class_type"].(string)
 		inputs, _ := nodeMap["inputs"].(map[string]interface{})
 
@@ -461,8 +502,10 @@ func (a *App) RenderShot(projectId string, sceneId string, shotId string) (Shot,
 
 		time.Sleep(1 * time.Second)
 		histResp, err := http.Get(a.comfyURL + "/history/" + promptID)
-		if err != nil { continue }
-		
+		if err != nil {
+			continue
+		}
+
 		histMap = make(map[string]interface{})
 		json.NewDecoder(histResp.Body).Decode(&histMap)
 		histResp.Body.Close()
@@ -557,7 +600,7 @@ func (a *App) RenderShot(projectId string, sceneId string, shotId string) (Shot,
 	// 8. Download Result
 	if outputFilename != "" {
 		outPath := filepath.Join(a.getAppDir(), projectId, "scenes", sceneId, shotId+".mp4")
-		
+
 		// ComfyUI View Endpoint
 		// http://.../view?filename=...&subfolder=&type=output
 		query := fmt.Sprintf("filename=%s&subfolder=%s&type=%s", outputFilename, outputSubfolder, outputType)
@@ -574,6 +617,7 @@ func (a *App) RenderShot(projectId string, sceneId string, shotId string) (Shot,
 
 			shot.OutputVideo = outPath
 			shot.Status = "DONE"
+			shot.Duration = a.getVideoDuration(outPath)
 			a.SaveShots(projectId, sceneId, shots)
 		} else {
 			return *shot, fmt.Errorf("failed to download result: %v", err)
@@ -583,9 +627,39 @@ func (a *App) RenderShot(projectId string, sceneId string, shotId string) (Shot,
 	return *shot, nil
 }
 
+func (a *App) getVideoDuration(path string) float64 {
+	// Use ffprobe to get exact duration in seconds
+	cmd := exec.Command("ffprobe",
+		"-v", "error",
+		"-show_entries", "format=duration",
+		"-of", "default=noprint_wrappers=1:nokey=1",
+		path)
+
+	// Start the command and capture output
+	out, err := cmd.Output()
+	if err != nil {
+		fmt.Printf("Error running ffprobe on %s: %v\n", path, err)
+		return 2.5 // DEBUG FALLBACK
+	}
+
+	// Parse duration
+	durationStr := strings.TrimSpace(string(out))
+	fmt.Printf("DEBUG: ffprobe output for %s: '%s'\n", path, durationStr)
+	duration, err := strconv.ParseFloat(durationStr, 64)
+	if err != nil {
+		fmt.Printf("Error parsing duration '%s' for file %s: %v\n", durationStr, path, err)
+		return 2.5 // DEBUG FALLBACK
+	}
+
+	fmt.Printf("DEBUG: Final duration for %s: %f\n", path, duration)
+	return duration
+}
+
 func (a *App) uploadImageToComfy(path string) (string, error) {
 	file, err := os.Open(path)
-	if err != nil { return "", err }
+	if err != nil {
+		return "", err
+	}
 	defer file.Close()
 
 	body := &bytes.Buffer{}
@@ -596,10 +670,12 @@ func (a *App) uploadImageToComfy(path string) (string, error) {
 
 	req, _ := http.NewRequest("POST", a.comfyURL+"/upload/image", body)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
-	
+
 	client := &http.Client{}
 	resp, err := client.Do(req)
-	if err != nil { return "", err }
+	if err != nil {
+		return "", err
+	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
@@ -608,7 +684,7 @@ func (a *App) uploadImageToComfy(path string) (string, error) {
 
 	var res map[string]interface{}
 	json.NewDecoder(resp.Body).Decode(&res)
-	
+
 	// Comfy returns name, possibly modified if duplicate
 	if name, ok := res["name"].(string); ok {
 		return name, nil
@@ -617,9 +693,7 @@ func (a *App) uploadImageToComfy(path string) (string, error) {
 }
 
 func (a *App) createDefaultWorkflow(path string) {
-	// A minimal valid SVD workflow JSON structure (simplified for brevity)
-	// In reality, this string should be a full exported API JSON from ComfyUI
-	// For now, we write an empty object or a placeholder instruction
+	// A minimal valid SVD workflow JSON structure
 	defaultJson := `{
  "3": {
     "inputs": {
@@ -676,7 +750,7 @@ func (a *App) ReadImageBase64(path string) string {
 	if err != nil {
 		return ""
 	}
-	
+
 	mimeType := "image/jpeg"
 	ext := strings.ToLower(filepath.Ext(path))
 	if ext == ".png" {
@@ -686,7 +760,7 @@ func (a *App) ReadImageBase64(path string) string {
 	} else if ext == ".mp4" {
 		mimeType = "video/mp4"
 	}
-	
+
 	base64Str := base64.StdEncoding.EncodeToString(bytes)
 	return fmt.Sprintf("data:%s;base64,%s", mimeType, base64Str)
 }
@@ -706,25 +780,24 @@ func (a *App) ExtractLastFrame(inputPath string) string {
 	// 1. If input is just an image, copy it (Simulating 'Extend' for static images)
 	if ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".webp" {
 		source, err := os.Open(inputPath)
-		if err != nil { return "" }
+		if err != nil {
+			return ""
+		}
 		defer source.Close()
 
 		destination, err := os.Create(outputPath)
-		if err != nil { return "" }
+		if err != nil {
+			return ""
+		}
 		defer destination.Close()
-		
+
 		io.Copy(destination, source)
 		return outputPath
 	}
 
 	// 2. If input is video, run FFmpeg
-	// -sseof -0.25 : Seek to last quarter second (safe for short AI videos)
-	// -i        : Input file
-	// -update 1 : Overwrite existing
-	// -q:v 1    : High quality output
-	// -vframes 1: Capture exactly 1 frame
 	cmd := exec.Command("ffmpeg", "-sseof", "-0.25", "-i", inputPath, "-update", "1", "-q:v", "1", "-vframes", "1", outputPath, "-y")
-	
+
 	err := cmd.Run()
 	if err != nil {
 		fmt.Printf("FFmpeg Error: %v\n", err)
@@ -733,3 +806,159 @@ func (a *App) ExtractLastFrame(inputPath string) string {
 
 	return outputPath
 }
+
+// =========================================================================
+//  ↓↓↓ VIDEO ENGINE (STREAMING SERVER) ↓↓↓
+// =========================================================================
+
+var server *StreamServer
+
+type StreamServer struct {
+	cmd        *exec.Cmd
+	running    bool
+	mu         sync.Mutex
+	currentDir string
+}
+
+func NewStreamServer() *StreamServer {
+	dir := filepath.Join(os.TempDir(), "motion_studio_stream")
+	os.MkdirAll(dir, 0755)
+	return &StreamServer{
+		currentDir: dir,
+	}
+}
+
+// GeneratePlaylist creates the ffmpeg "concat" text file
+func (s *StreamServer) GeneratePlaylist(clips []string) (string, error) {
+	var content strings.Builder
+	for _, clip := range clips {
+		// Normalize slashes for FFmpeg (Windows backslash fix)
+		normalized := filepath.ToSlash(clip)
+		// Escape single quotes for FFmpeg
+		safePath := strings.ReplaceAll(normalized, "'", "'\\''")
+		content.WriteString(fmt.Sprintf("file '%s'\n", safePath))
+	}
+
+	playlistPath := filepath.Join(s.currentDir, "playlist.txt")
+	err := os.WriteFile(playlistPath, []byte(content.String()), 0644)
+	return playlistPath, err
+}
+
+func (s *StreamServer) RenderPreviewMP4() (string, error) {
+	playlistPath := filepath.Join(s.currentDir, "playlist.txt")
+	if _, err := os.Stat(playlistPath); os.IsNotExist(err) {
+		return "", fmt.Errorf("playlist not found")
+	}
+
+	outPath := filepath.Join(s.currentDir, "preview.mp4")
+
+	// Fast concat (no re-encode). Requires matching codecs/params across clips.
+	cmd := exec.Command("ffmpeg",
+		"-y",
+		"-f", "concat",
+		"-safe", "0",
+		"-i", playlistPath,
+		"-c", "copy",
+		"-movflags", "+faststart",
+		outPath,
+	)
+
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return "", err
+	}
+	return outPath, nil
+}
+
+func (s *StreamServer) StartStreamHandler(w http.ResponseWriter, r *http.Request) {
+	// MJPEG Headers
+	w.Header().Set("Content-Type", "multipart/x-mixed-replace; boundary=ffmpeg")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	s.mu.Lock()
+	// Clean up previous process
+	if s.cmd != nil && s.cmd.Process != nil {
+		s.cmd.Process.Kill()
+	}
+
+	playlistPath := filepath.Join(s.currentDir, "playlist.txt")
+	if _, err := os.Stat(playlistPath); os.IsNotExist(err) {
+		s.mu.Unlock()
+		return
+	}
+
+	// Run FFmpeg to output MJPEG stream to stdout
+	cmd := exec.Command("ffmpeg",
+		"-re",
+		"-f", "concat",
+		"-safe", "0",
+		"-i", playlistPath,
+		"-f", "mpjpeg", // Output format
+		"-q:v", "2", // Quality (2-31)
+		"-r", "24", // Frame rate
+		"-", // Output to stdout
+	)
+
+	// Pipe FFmpeg stderr to console for debugging
+	cmd.Stderr = os.Stderr
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		log.Println("Error creating stdout pipe:", err)
+		s.mu.Unlock()
+		return
+	}
+
+	if err := cmd.Start(); err != nil {
+		log.Println("Error starting ffmpeg:", err)
+		s.mu.Unlock()
+		return
+	}
+	s.cmd = cmd
+	s.running = true
+	s.mu.Unlock()
+
+	// Pipe stdout to HTTP response
+	buffer := make([]byte, 32*1024)
+	for {
+		n, err := stdout.Read(buffer)
+		if err != nil {
+			break
+		}
+		if n > 0 {
+			w.Write(buffer[:n])
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+		}
+	}
+}
+
+// GetVideoDuration returns the duration (seconds) of a video file using ffprobe.
+func (a *App) GetVideoDuration(path string) float64 {
+	return a.getVideoDuration(path)
+}
+
+func StartStreamServer() {
+	server = NewStreamServer()
+	mux := http.NewServeMux()
+
+	// Legacy MJPEG stream (still available)
+	mux.HandleFunc("/stream", server.StartStreamHandler)
+
+	// Gapless MP4 preview output
+	mux.HandleFunc("/preview.mp4", func(w http.ResponseWriter, r *http.Request) {
+		path := filepath.Join(server.currentDir, "preview.mp4")
+		if _, err := os.Stat(path); err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "video/mp4")
+		http.ServeFile(w, r, path)
+	})
+
+	fmt.Println("🎥 Video Engine listening on http://localhost:3456/stream")
+	http.ListenAndServe(":3456", mux)
+}
+
