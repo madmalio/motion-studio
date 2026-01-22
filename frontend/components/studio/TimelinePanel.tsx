@@ -10,30 +10,151 @@ import {
   Lock,
   Eye,
   Trash2,
+  Scissors,
 } from "lucide-react";
-import { useDroppable } from "@dnd-kit/core";
-import {
-  SortableContext,
-  useSortable,
-  horizontalListSortingStrategy,
-} from "@dnd-kit/sortable";
+import { useDroppable, useDraggable } from "@dnd-kit/core";
 import { CSS } from "@dnd-kit/utilities";
 
 const LEFT_PANEL_W = 96; // px (w-24)
 const LEFT_PANEL_BG = "bg-[#2c2f33]";
 const LEFT_PANEL_BORDER = "border-r border-zinc-700";
 
-function SortableTimelineItem({ id, data, width, onRemove }: any) {
-  const { attributes, listeners, setNodeRef, transform, transition } =
-    useSortable({
+function TimelineItemComponent({
+  id,
+  data,
+  width,
+  left,
+  onRemove,
+  onUpdate,
+  onClick,
+  zoom,
+}: any) {
+  const { attributes, listeners, setNodeRef, transform, isDragging } =
+    useDraggable({
       id,
       data: { type: "timeline-item" }, // ✅ important
     });
 
+  const [isResizing, setIsResizing] = useState(false);
+  const [localState, setLocalState] = useState({ width, left });
+
+  useEffect(() => {
+    if (!isResizing) setLocalState({ width, left });
+  }, [width, left, isResizing]);
+
+  const handleResizeStart = (e: React.PointerEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+    setIsResizing(true);
+
+    const startX = e.clientX;
+    const startWidth = localState.width;
+    const maxDur = data.maxDuration || data.duration || 4;
+    const maxPx = maxDur * zoom;
+
+    const onMove = (ev: PointerEvent) => {
+      const diff = ev.clientX - startX;
+      // Min width 10px, Max width based on maxDuration
+      const newW = Math.max(10, Math.min(startWidth + diff, maxPx));
+      setLocalState((prev) => ({ ...prev, width: newW }));
+    };
+
+    const onUp = (ev: PointerEvent) => {
+      const diff = ev.clientX - startX;
+      const newW = Math.max(10, Math.min(startWidth + diff, maxPx));
+      setIsResizing(false);
+      onUpdate({ duration: newW / zoom });
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
+
+  const handleResizeStartLeft = (e: React.PointerEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+    setIsResizing(true);
+
+    const startX = e.clientX;
+    const startWidth = localState.width;
+    const startLeft = localState.left;
+    const startTrim = data.trimStart || 0;
+
+    const onMove = (ev: PointerEvent) => {
+      const diff = ev.clientX - startX;
+      // Calculate potential new values
+      // Cannot grow left beyond trimStart (0)
+      // Cannot shrink width below 10px
+      // Cannot move startLeft below 0
+
+      let newLeft = startLeft + diff;
+      let newWidth = startWidth - diff;
+      let newTrim = startTrim + diff / zoom;
+
+      if (newWidth < 10) {
+        newLeft = startLeft + startWidth - 10;
+        newWidth = 10;
+        newTrim = startTrim + (startWidth - 10) / zoom;
+      }
+
+      if (newTrim < 0) {
+        newTrim = 0;
+        newLeft = startLeft - startTrim * zoom;
+        newWidth = startWidth + startTrim * zoom;
+      }
+
+      if (newLeft < 0) newLeft = 0; // Hard stop at timeline 0
+
+      setLocalState({ width: newWidth, left: newLeft });
+    };
+
+    const onUp = (ev: PointerEvent) => {
+      setIsResizing(false);
+      // Finalize
+      const current = localState; // Closure might be stale, but we rely on the last render state or calculate again.
+      // Actually, safer to recalculate or use a ref, but for this snippet we'll re-calculate from event to be safe or trust React state update speed (usually fine for drag end).
+      // Let's just use the logic from onMove for the final commit.
+      const diff = ev.clientX - startX;
+      let newLeft = startLeft + diff;
+      let newWidth = startWidth - diff;
+      let newTrim = startTrim + diff / zoom;
+
+      if (newWidth < 10) {
+        newLeft = startLeft + startWidth - 10;
+        newWidth = 10;
+        newTrim = startTrim + (startWidth - 10) / zoom;
+      }
+      if (newTrim < 0) {
+        newTrim = 0;
+        newLeft = startLeft - startTrim * zoom;
+        newWidth = startWidth + startTrim * zoom;
+      }
+      if (newLeft < 0) newLeft = 0;
+
+      onUpdate({
+        startTime: newLeft / zoom,
+        duration: newWidth / zoom,
+        trimStart: newTrim,
+      });
+
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
+
   const style = {
-    transform: CSS.Transform.toString(transform),
-    transition,
-    width: `${width}px`,
+    transform: CSS.Translate.toString(transform),
+    left: `${isResizing ? localState.left : left}px`,
+    width: `${isResizing ? localState.width : width}px`,
+    position: "absolute" as const,
+    height: "100%",
+    zIndex: isDragging || isResizing ? 50 : 10,
+    opacity: isDragging ? 0 : 1, // Hide original when dragging
   };
 
   return (
@@ -43,48 +164,74 @@ function SortableTimelineItem({ id, data, width, onRemove }: any) {
       {...listeners}
       {...attributes}
       className={`
-        relative group flex-shrink-0 h-full flex flex-col overflow-hidden select-none 
-        bg-[#375a6c] border border-[#213845] rounded-sm
-        ${style.transform ? "z-20 cursor-grabbing shadow-xl ring-2 ring-white" : "z-10 cursor-grab"}
+        absolute top-0 bottom-0 group flex flex-col select-none 
+        cursor-grab active:cursor-grabbing
       `}
+      onClick={onClick}
     >
-      <div className="flex-1 relative overflow-hidden flex">
-        {data.previewBase64 && (
-          <img
-            src={data.previewBase64}
-            className="h-full w-full object-cover opacity-80"
-          />
-        )}
+      {/* Inner Content Container */}
+      <div className="absolute inset-0 flex flex-col overflow-hidden bg-[#375a6c] border border-[#213845] rounded-sm">
+        <div className="flex-1 relative overflow-hidden flex">
+          {data.previewBase64 && (
+            <img
+              src={data.previewBase64}
+              className="h-full w-full object-cover opacity-80"
+            />
+          )}
+        </div>
+
+        <div className="absolute bottom-0 w-full bg-[#20343e] px-2 py-0.5 text-[9px] text-zinc-300 truncate font-mono pointer-events-none">
+          {data.name} ({data.duration?.toFixed(2)}s)
+        </div>
+
+        <div
+          className={`absolute inset-0 ring-inset ring-2 pointer-events-none transition-all ${
+            data.isActive ? "ring-orange-500" : "ring-transparent group-hover:ring-white/30"
+          }`}
+        />
+
+        <button
+          className="absolute top-1 right-1 bg-black/60 hover:bg-red-600 text-white p-1 rounded z-50 transition-colors opacity-0 group-hover:opacity-100"
+          onPointerDown={(e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            onRemove();
+          }}
+          title="Remove Clip"
+        >
+          <Trash2 size={10} />
+        </button>
       </div>
 
-      <div className="absolute bottom-0 w-full bg-[#20343e] px-2 py-0.5 text-[9px] text-zinc-300 truncate font-mono pointer-events-none">
-        {data.name} ({data.duration?.toFixed(2)}s)
-      </div>
-
+      {/* Resize Handle LEFT */}
       <div
-        className={`absolute inset-0 ring-inset ring-2 pointer-events-none transition-all ${
-          data.isActive
-            ? "ring-orange-500"
-            : "ring-transparent group-hover:ring-white/30"
-        }`}
-      />
-
-      <button
-        className="absolute top-1 right-1 bg-black/60 hover:bg-red-600 text-white p-1 rounded z-50 transition-colors opacity-0 group-hover:opacity-100"
-        onPointerDown={(e) => {
-          e.stopPropagation();
-          e.preventDefault();
-          onRemove();
-        }}
-        title="Remove Clip"
+        className="absolute left-0 top-0 bottom-0 w-2 -translate-x-1/2 cursor-ew-resize z-50 opacity-0 group-hover:opacity-100 hover:bg-white/20 flex items-center justify-center"
+        onPointerDown={handleResizeStartLeft}
       >
-        <Trash2 size={10} />
-      </button>
+        <div className="w-0.5 h-4 bg-white/50 rounded-full" />
+      </div>
+
+      {/* Resize Handle RIGHT */}
+      <div
+        className="absolute right-0 top-0 bottom-0 w-2 translate-x-1/2 cursor-ew-resize z-50 opacity-0 group-hover:opacity-100 hover:bg-white/20 flex items-center justify-center"
+        onPointerDown={handleResizeStart}
+      >
+        <div className="w-0.5 h-4 bg-white/50 rounded-full" />
+      </div>
     </div>
   );
 }
 
-function TrackDroppable({ id, items, trackIndex, onRemoveItem, zoom }: any) {
+function TrackDroppable({
+  id,
+  items,
+  trackIndex,
+  onRemoveItem,
+  onUpdateItem,
+  onShotClick,
+  zoom,
+  activeShotId,
+}: any) {
   const { setNodeRef } = useDroppable({
     id,
     data: { type: "track", trackIndex },
@@ -93,25 +240,26 @@ function TrackDroppable({ id, items, trackIndex, onRemoveItem, zoom }: any) {
   return (
     <div
       ref={setNodeRef}
-      className="absolute inset-0 w-full h-full min-h-[50px] flex items-stretch"
+      className="absolute inset-0 w-full h-full min-h-[50px]"
     >
-      <SortableContext
-        items={items.map((i: any) => i.timelineId)}
-        strategy={horizontalListSortingStrategy}
-      >
-        {items.map((item: any) => (
-          <SortableTimelineItem
-            key={item.timelineId}
-            id={item.timelineId}
-            data={{ ...item, type: "timeline-item", trackIndex }}
-            width={(item.duration || 0) * zoom}
-            onRemove={() => onRemoveItem(item.timelineId)}
-          />
-        ))}
-      </SortableContext>
-
-      {/* keeps the remaining empty area droppable so new clips drop to the end */}
-      <div className="flex-1 h-full" />
+      {items.map((item: any) => (
+        <TimelineItemComponent
+          key={item.timelineId}
+          id={item.timelineId}
+          data={{
+            ...item,
+            type: "timeline-item",
+            trackIndex,
+            isActive: item.id === activeShotId,
+          }}
+          width={(item.duration || 4) * zoom}
+          left={(item.startTime || 0) * zoom}
+          onRemove={() => onRemoveItem(item.timelineId)}
+          onUpdate={(updates: any) => onUpdateItem(item.timelineId, updates)}
+          onClick={() => onShotClick && onShotClick(item.id)}
+          zoom={zoom}
+        />
+      ))}
     </div>
   );
 }
@@ -119,28 +267,38 @@ function TrackDroppable({ id, items, trackIndex, onRemoveItem, zoom }: any) {
 interface TimelinePanelProps {
   tracks: any[][];
   onRemoveItem: (id: string) => void;
+  onUpdateItem: (id: string, updates: any) => void;
   onAddTrack: () => void;
   isPlaying: boolean;
   togglePlay: () => void;
   currentTime: number;
   duration: number;
   seekTo: (time: number) => void;
+  zoom: number;
+  setZoom: (z: number) => void;
 
   // ✅ add back (page.tsx passes these)
   activeShotId?: string;
   onShotClick?: (id: string) => void;
   shots?: any[];
+  onSplit?: () => void;
 }
 
 export default function TimelinePanel({
   tracks,
   onRemoveItem,
+  onUpdateItem,
   onAddTrack,
   isPlaying,
   togglePlay,
   currentTime,
   duration,
   seekTo,
+  zoom,
+  setZoom,
+  activeShotId,
+  onSplit,
+  onShotClick,
 }: TimelinePanelProps) {
   const formatTime = (seconds: number) => {
     const m = Math.floor(seconds / 60);
@@ -153,7 +311,6 @@ export default function TimelinePanel({
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const [isScrubbing, setIsScrubbing] = useState(false);
-  const [zoom, setZoom] = useState(10); // px/second
   const [viewportPx, setViewportPx] = useState(0);
 
   // Measure scroll viewport width (so ruler can stay “infinite-ish” at low zoom)
@@ -227,9 +384,16 @@ export default function TimelinePanel({
             <Plus size={10} /> Add Track
           </button>
 
+          <button
+            onClick={onSplit}
+            className="flex items-center gap-1 text-[10px] bg-zinc-800 hover:bg-zinc-700 px-2 py-1 rounded text-zinc-300"
+          >
+            <Scissors size={10} /> Split
+          </button>
+
           <div className="flex items-center gap-1 ml-4 border-l border-zinc-700 pl-4">
             <button
-              onClick={() => setZoom((z) => Math.max(1, z / 1.5))}
+              onClick={() => setZoom(Math.max(1, zoom / 1.5))}
               className="text-zinc-400 hover:text-white text-xs px-1"
             >
               -
@@ -238,7 +402,7 @@ export default function TimelinePanel({
               {Math.round(zoom)}%
             </span>
             <button
-              onClick={() => setZoom((z) => Math.min(200, z * 1.5))}
+              onClick={() => setZoom(Math.min(200, zoom * 1.5))}
               className="text-zinc-400 hover:text-white text-xs px-1"
             >
               +
@@ -375,7 +539,10 @@ export default function TimelinePanel({
                     items={track}
                     trackIndex={trackIndex}
                     onRemoveItem={onRemoveItem}
+                    onUpdateItem={onUpdateItem}
+                    onShotClick={onShotClick}
                     zoom={zoom}
+                    activeShotId={activeShotId}
                   />
                 </div>
               ))

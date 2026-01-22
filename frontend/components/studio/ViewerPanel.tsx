@@ -4,7 +4,7 @@ import { Play, Pause } from "lucide-react";
 import { memo } from "react";
 
 interface ViewerPanelProps {
-  streamUrl: string;
+  streamUrl?: string;
   isPlaying: boolean;
   onTogglePlay: () => void;
   // Legacy props kept to avoid build errors if parents pass them
@@ -12,8 +12,8 @@ interface ViewerPanelProps {
   showGhost?: boolean;
   setShowGhost?: any;
   prevShot?: any;
-  primaryVideoRef?: any;
-  secondaryVideoRef?: any;
+  primaryVideoRef?: React.RefObject<HTMLVideoElement | null>;
+  secondaryVideoRef?: React.RefObject<HTMLVideoElement | null>;
   activePlayer?: any;
 }
 
@@ -22,41 +22,22 @@ const ViewerPanel = memo(function ViewerPanel({
   isPlaying,
   onTogglePlay,
   primaryVideoRef,
+  secondaryVideoRef,
 }: ViewerPanelProps) {
-  // ✅ Fix: ignore query params when checking extension
-  const cleanUrl = (streamUrl || "").split("?")[0];
-  const isVideo = /\.(mp4|webm|mov|mkv)$/i.test(cleanUrl);
-
   return (
     <div className="h-full bg-black flex flex-col items-center justify-center relative overflow-hidden">
       {/* STREAM VIEWPORT */}
       <div className="relative w-full h-full flex items-center justify-center bg-zinc-950">
-        {streamUrl && isPlaying ? (
-          isVideo ? (
-            <video
-              ref={primaryVideoRef}
-              src={streamUrl}
-              className="w-full h-full object-contain"
-              autoPlay
-            />
-          ) : (
-            <img
-              src={streamUrl}
-              className="w-full h-full object-contain"
-              alt="Stream"
-            />
-          )
-        ) : (
-          // STATIC PLACEHOLDER
-          <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-zinc-600 z-0">
-            <div className="w-16 h-16 rounded-full bg-zinc-900 border border-zinc-800 flex items-center justify-center">
-              <Play fill="currentColor" className="ml-1" size={24} />
-            </div>
-            <p className="text-xs font-mono uppercase tracking-widest opacity-50">
-              Engine Ready
-            </p>
-          </div>
-        )}
+        <video
+          ref={primaryVideoRef as React.RefObject<HTMLVideoElement>}
+          className="absolute inset-0 w-full h-full object-contain bg-black"
+          style={{ opacity: 0, zIndex: 0 }}
+        />
+        <video
+          ref={secondaryVideoRef as React.RefObject<HTMLVideoElement>}
+          className="absolute inset-0 w-full h-full object-contain bg-black"
+          style={{ opacity: 0, zIndex: 0 }}
+        />
       </div>
 
       {/* FLOATING CONTROLS */}

@@ -6,6 +6,8 @@ interface PlaybackShot {
   outputVideo: string;
   duration: number;
   timelineId: string;
+  startTime?: number;
+  trimStart?: number;
   offset?: number; // Calculated internally
 }
 
@@ -58,21 +60,18 @@ export function useGaplessPlayback({
         const track = tracks[t];
         if (!track) continue;
 
-        let currentTrackTime = 0;
-
         for (const shot of track) {
           const duration = shot.duration || 4;
-          const shotStart = currentTrackTime;
+          const shotStart = shot.startTime ?? 0;
           const shotEnd = shotStart + duration;
 
           if (time >= shotStart && time < shotEnd) {
             return {
               shot: shot as PlaybackShot,
-              offset: time - shotStart, // How many seconds INTO the clip are we?
+              offset: time - shotStart + (shot.trimStart || 0), // How many seconds INTO the clip are we?
               trackIndex: t,
             };
           }
-          currentTrackTime += duration;
         }
       }
       return null;
@@ -138,61 +137,98 @@ export function useGaplessPlayback({
     const activeData = getShotAtTime(currentTime);
     const p = primaryVideoRef.current;
     const s = secondaryVideoRef.current;
+    let currentShotEnd = currentTime;
 
-    if (!activeData) {
-      // GAP in timeline
-      if (p) p.style.opacity = "0";
-      if (s) s.style.opacity = "0";
-      return;
-    }
+    let targetPlayer: "primary" | "secondary" = activePlayer;
 
-    const { shot, offset } = activeData;
+    // --- 1. HANDLE ACTIVE SHOT ---
+    if (activeData) {
+      const { shot, offset } = activeData;
+      currentShotEnd = (shot.startTime || 0) + (shot.duration || 0);
 
-    // Determine which player to use
-    // Simple strategy: Keep using the player that has the shot loaded.
-    let targetPlayer: "primary" | "secondary" = "primary";
-
-    if (loadedShotIds.current.secondary === shot.id) targetPlayer = "secondary";
-    else targetPlayer = "primary"; // Default to primary
-
-    // Load if needed
-    if (loadedShotIds.current[targetPlayer] !== shot.id) {
-      loadShot(shot, targetPlayer);
-    }
-
-    // Switch visible player
-    if (activePlayer !== targetPlayer) setActivePlayer(targetPlayer);
-
-    const activeEl = targetPlayer === "primary" ? p : s;
-    const otherEl = targetPlayer === "primary" ? s : p;
-
-    // Sync Time
-    if (activeEl) {
-      // Only seek if we drifted significantly (> 0.1s) or if scrubbing (paused)
-      // This allows the browser's native playback to run smooth during normal play
-      const drift = Math.abs(activeEl.currentTime - offset);
-
-      if (!isPlaying || drift > 0.2) {
-        if (Number.isFinite(offset)) activeEl.currentTime = offset;
+      // Determine which player SHOULD be active
+      if (loadedShotIds.current.primary === shot.id) {
+        targetPlayer = "primary";
+      } else if (loadedShotIds.current.secondary === shot.id) {
+        targetPlayer = "secondary";
+      } else {
+        // Not loaded anywhere? Load into the 'other' player to prepare for switch
+        // or fallback to switching immediately if we missed the preload window.
+        targetPlayer = activePlayer === "primary" ? "secondary" : "primary";
+        loadShot(shot, targetPlayer);
       }
 
-      // Sync Play State
-      if (isPlaying && activeEl.paused) {
-        activeEl.play().catch((e) => console.warn("Autoplay blocked", e));
-      } else if (!isPlaying && !activeEl.paused) {
-        activeEl.pause();
+      if (activePlayer !== targetPlayer) setActivePlayer(targetPlayer);
+
+      const activeEl = targetPlayer === "primary" ? p : s;
+      const otherEl = targetPlayer === "primary" ? s : p;
+
+      // Sync Active Player
+      if (activeEl) {
+        const drift = Math.abs(activeEl.currentTime - offset);
+        if (!isPlaying || drift > 0.2) {
+          if (Number.isFinite(offset)) activeEl.currentTime = offset;
+        }
+
+        if (isPlaying && activeEl.paused) {
+          activeEl.play().catch(() => {});
+        } else if (!isPlaying && !activeEl.paused) {
+          activeEl.pause();
+        }
+
+        activeEl.style.opacity = "1";
+        activeEl.style.zIndex = "10";
       }
 
-      activeEl.style.opacity = "1";
-      activeEl.style.zIndex = "10";
+      // Sync Inactive Player (Pause & Hide)
+      if (otherEl) {
+        otherEl.style.opacity = "0";
+        otherEl.style.zIndex = "0";
+        otherEl.pause();
+      }
+    } else {
+      // GAP: Hide both
+      if (p) {
+        p.style.opacity = "0";
+        p.pause();
+      }
+      if (s) {
+        s.style.opacity = "0";
+        s.pause();
+      }
     }
 
-    if (otherEl) {
-      otherEl.style.opacity = "0";
-      otherEl.style.zIndex = "0";
-      otherEl.pause();
+    // --- 2. PRELOAD NEXT SHOT ---
+    // Find the closest shot that starts >= currentShotEnd
+    let nextShot: PlaybackShot | null = null;
+    let minDiff = Infinity;
+
+    for (const track of tracks) {
+      for (const shot of track) {
+        const sTime = shot.startTime ?? 0;
+        // Look for shots starting in the future (relative to current clip end)
+        if (sTime >= currentShotEnd - 0.05) {
+          // Don't preload the current shot again
+          if (activeData && shot.id === activeData.shot.id) continue;
+
+          const diff = sTime - currentShotEnd;
+          if (diff < minDiff) {
+            minDiff = diff;
+            nextShot = shot as PlaybackShot;
+          }
+        }
+      }
     }
-  }, [currentTime, isPlaying, getShotAtTime, activePlayer]);
+
+    if (nextShot) {
+      // Load into the INACTIVE player
+      const preloadPlayer =
+        targetPlayer === "primary" ? "secondary" : "primary";
+      if (loadedShotIds.current[preloadPlayer] !== nextShot.id) {
+        loadShot(nextShot, preloadPlayer);
+      }
+    }
+  }, [currentTime, isPlaying, getShotAtTime, activePlayer, tracks]);
 
   const togglePlay = () => setIsPlaying(!isPlaying);
 
