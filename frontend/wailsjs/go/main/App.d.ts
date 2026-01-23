@@ -32,8 +32,6 @@ export function GetShots(arg1:string,arg2:string):Promise<Array<main.Shot>>;
 
 export function GetTimeline(arg1:string,arg2:string):Promise<main.TimelineData>;
 
-export function GetVideoDuration(arg1:string):Promise<number>;
-
 export function GetWorkflows():Promise<Array<main.Workflow>>;
 
 export function ImportWorkflow(arg1:string):Promise<string>;
@@ -49,6 +47,8 @@ export function SaveShots(arg1:string,arg2:string,arg3:Array<main.Shot>):Promise
 export function SaveTimeline(arg1:string,arg2:string,arg3:main.TimelineData):Promise<void>;
 
 export function SelectAndSaveWorkflow():Promise<string>;
+
+export function SelectAudio():Promise<string>;
 
 export function SelectImage():Promise<string>;
 

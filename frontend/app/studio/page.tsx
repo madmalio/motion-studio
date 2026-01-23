@@ -4,7 +4,6 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useState, useRef } from "react";
 import { useConfirm } from "../../components/ConfirmProvider";
 import { Loader2 } from "lucide-react";
-
 // --- DND KIT ---
 import {
   DndContext,
@@ -19,7 +18,7 @@ import {
   pointerWithin,
   defaultDropAnimationSideEffects,
 } from "@dnd-kit/core";
-import { arrayMove, sortableKeyboardCoordinates } from "@dnd-kit/sortable";
+import { sortableKeyboardCoordinates } from "@dnd-kit/sortable";
 import { useGaplessPlayback } from "../../hooks/useGaplessPlayback";
 
 // --- COMPONENTS ---
@@ -27,7 +26,6 @@ import GeneratorPanel from "../../components/studio/GeneratorPanel";
 import LibraryPanel from "../../components/studio/LibraryPanel";
 import ViewerPanel from "../../components/studio/ViewerPanel";
 import TimelinePanel from "../../components/studio/TimelinePanel";
-
 // --- WAILS IMPORTS ---
 import {
   GetProject,
@@ -47,6 +45,7 @@ interface Shot {
   sceneId: string;
   name: string;
   sourceImage: string;
+  audioPath: string; // <--- NEW: Store audio file path
   previewBase64?: string;
   prompt: string;
   motionStrength: number;
@@ -76,19 +75,14 @@ interface TimelineItem extends Shot {
 
 // --- HELPERS ---
 const findContainer = (id: string, tracks: TimelineItem[][]) => {
-  // ✅ ONLY timeline tracks count
   if (id.toString().startsWith("timeline-track-")) return id;
-
-  // ✅ OR an existing timeline clip (timelineId) inside a track
   for (let i = 0; i < tracks.length; i++) {
     const item = tracks[i].find((s) => s.timelineId === id);
     if (item) return `timeline-track-${i}`;
   }
-
   return undefined;
 };
 
-// ✅ NEW: allow drop only if over target is a real timeline track or existing timeline item
 const isTimelineDropTarget = (overId: string, tracks: TimelineItem[][]) => {
   if (overId.startsWith("track-")) return true;
   return tracks.some((t) => t.some((item) => item.timelineId === overId));
@@ -114,6 +108,7 @@ function StudioContent() {
   const [trackSettings, setTrackSettings] = useState<
     { locked: boolean; visible: boolean; name: string; height?: number }[]
   >([{ locked: false, visible: true, name: "Track 1", height: 96 }]);
+
   const [activeDragItem, setActiveDragItem] = useState<any>(null);
   const [zoom, setZoom] = useState(10); // px/second
 
@@ -177,30 +172,8 @@ function StudioContent() {
   const isCtrlPressed = useRef(false);
 
   // --- UNDO / REDO ---
-  const [history, setHistory] = useState<
-    {
-      tracks: TimelineItem[][];
-      shots: Shot[];
-      trackSettings: {
-        locked: boolean;
-        visible: boolean;
-        name: string;
-        height?: number;
-      }[];
-    }[]
-  >([]);
-  const [redoStack, setRedoStack] = useState<
-    {
-      tracks: TimelineItem[][];
-      shots: Shot[];
-      trackSettings: {
-        locked: boolean;
-        visible: boolean;
-        name: string;
-        height?: number;
-      }[];
-    }[]
-  >([]);
+  const [history, setHistory] = useState<any[]>([]);
+  const [redoStack, setRedoStack] = useState<any[]>([]);
 
   const recordHistory = () => {
     setHistory((prev) => [
@@ -218,7 +191,6 @@ function StudioContent() {
     if (history.length === 0) return;
     const previous = history[history.length - 1];
     const newHistory = history.slice(0, -1);
-
     setRedoStack((prev) => [
       ...prev,
       {
@@ -237,7 +209,6 @@ function StudioContent() {
     if (redoStack.length === 0) return;
     const next = redoStack[redoStack.length - 1];
     const newRedo = redoStack.slice(0, -1);
-
     setHistory((prev) => [
       ...prev,
       {
@@ -252,7 +223,6 @@ function StudioContent() {
     setTrackSettings(next.trackSettings);
   };
 
-  // Keep your existing behavior here
   const totalDuration = Math.max(
     0,
     ...tracks.map((t) =>
@@ -300,7 +270,6 @@ function StudioContent() {
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Control") isCtrlPressed.current = true;
-
       if (
         e.target instanceof HTMLInputElement ||
         e.target instanceof HTMLTextAreaElement
@@ -342,7 +311,6 @@ function StudioContent() {
       setScene(s || null);
 
       const savedShots = await GetShots(pId, sId);
-
       // 1. Hydrate Shots
       if (savedShots && savedShots.length > 0) {
         const hydratedShots = await Promise.all(
@@ -354,7 +322,6 @@ function StudioContent() {
             return shot;
           }),
         );
-
         setShots(hydratedShots);
         setActiveShotId(hydratedShots[0].id);
       }
@@ -382,12 +349,11 @@ function StudioContent() {
             setTrackSettings(timelineData.trackSettings);
           }
 
-          // 3. Pre-load Video Clips (Fix Black Flashes)
+          // 3. Pre-load Video Clips
           const uniquePaths = new Set<string>();
           hydratedTracks.flat().forEach((item: any) => {
             if (item.outputVideo) uniquePaths.add(item.outputVideo);
           });
-
           const blobMap = new Map<string, string>();
           await Promise.all(
             Array.from(uniquePaths).map(async (path) => {
@@ -436,6 +402,7 @@ function StudioContent() {
         sceneId: sceneId,
         name: `Shot ${prev.length + 1}`,
         sourceImage: "",
+        audioPath: "", // <--- INIT AUDIO
         prompt: "",
         motionStrength: 127,
         seed: Math.floor(Math.random() * 1000000),
@@ -461,6 +428,7 @@ function StudioContent() {
         id: crypto.randomUUID(),
         name: `${originalShot.name} (Ext)`,
         sourceImage: lastFramePath,
+        audioPath: "", // <--- RESET AUDIO FOR EXTENSION (Optional)
         previewBase64: b64,
         status: "DRAFT",
         outputVideo: "",
@@ -489,7 +457,6 @@ function StudioContent() {
     setShots((prev) =>
       prev.map((s) => (s.id === activeShotId ? { ...s, ...updates } : s)),
     );
-    // Update Timeline Tracks to reflect changes (like duration)
     setTracks((prev) =>
       prev.map((track) =>
         track.map((item) =>
@@ -519,7 +486,6 @@ function StudioContent() {
       let targetTrackIndex = -1;
       let targetItemIndex = -1;
 
-      // Find the specific item by timelineId
       for (let t = 0; t < newTracks.length; t++) {
         const idx = newTracks[t].findIndex(
           (item) => item.timelineId === itemId,
@@ -531,12 +497,10 @@ function StudioContent() {
         }
       }
 
-      // Perform Split
       if (targetTrackIndex !== -1 && targetItemIndex !== -1) {
         const track = newTracks[targetTrackIndex];
         const item = track[targetItemIndex];
 
-        // Validate split time (must be within clip with buffer)
         if (
           splitTime <= item.startTime + 0.05 ||
           splitTime >= item.startTime + (item.duration || 0) - 0.05
@@ -554,7 +518,6 @@ function StudioContent() {
           duration: (item.duration || 0) - splitOffset,
           trimStart: (item.trimStart || 0) + splitOffset,
         };
-
         const newTrack = [...track];
         newTrack[targetItemIndex] = leftItem;
         newTrack.splice(targetItemIndex + 1, 0, rightItem);
@@ -623,13 +586,11 @@ function StudioContent() {
     if (event.active.data.current?.shot) {
       setActiveDragItem(event.active.data.current.shot);
     } else {
-      // Fallback: find in library shots
       const shot = shots.find((s) => s.id === event.active.id);
       if (shot) {
         setActiveDragItem(shot);
         return;
       }
-      // Fallback: find in timeline tracks
       for (const track of tracks) {
         const item = track.find((i) => i.timelineId === event.active.id);
         if (item) setActiveDragItem(item);
@@ -641,8 +602,6 @@ function StudioContent() {
     const { active, over } = event;
     if (!over) return;
     if (active.data.current?.type === "shot") return;
-
-    // Removed list sorting logic since we now use absolute positioning
   };
 
   const handleDragEnd = (event: DragEndEvent) => {
@@ -651,15 +610,12 @@ function StudioContent() {
     if (!over) return;
 
     const dropContainer = findContainer(over.id as string, tracks);
-    if (!dropContainer) return; // ✅ only timeline accepts drop
+    if (!dropContainer) return;
 
     const overId = over.id as string;
-
-    // ✅ Only allow dropping on the timeline (track background or timeline clip)
     const overType = over.data.current?.type;
     if (overType !== "track" && overType !== "timeline-item") return;
 
-    // --- CALCULATE DROP TIME & SNAPPING ---
     const targetTrackIndex = parseInt(
       dropContainer.replace("timeline-track-", ""),
     );
@@ -668,22 +624,17 @@ function StudioContent() {
 
     let newStartTime = 0;
     if (activeRect && overRect) {
-      // Calculate X relative to the track container
       const relativeX = activeRect.left - overRect.left;
       const rawTime = Math.max(0, relativeX / zoom);
 
       newStartTime = rawTime;
-
       if (!isCtrlPressed.current) {
-        // Snapping Logic
         const SNAP_THRESHOLD_PX = 15;
         const snapThreshold = SNAP_THRESHOLD_PX / zoom;
 
-        // Determine active item duration for end-snapping
         let activeDuration = 4;
         let foundItem: any;
 
-        // Check tracks first (moving existing item)
         for (const t of tracks) {
           const i = t.find((it) => it.timelineId === active.id);
           if (i) {
@@ -691,7 +642,6 @@ function StudioContent() {
             break;
           }
         }
-        // Check shots if not found (dragging from library)
         if (!foundItem) {
           foundItem = shots.find((s) => s.id === active.id);
         }
@@ -701,56 +651,42 @@ function StudioContent() {
         }
 
         let minDiff = snapThreshold;
-
-        // Snap to 0
         if (Math.abs(rawTime - 0) < minDiff) {
           newStartTime = 0;
           minDiff = Math.abs(rawTime - 0);
         }
-
-        // Snap to Playhead (Start)
         if (Math.abs(rawTime - currentTime) < minDiff) {
           newStartTime = currentTime;
           minDiff = Math.abs(rawTime - currentTime);
         }
-
-        // Snap to Playhead (End)
         if (Math.abs(rawTime + activeDuration - currentTime) < minDiff) {
           newStartTime = Math.max(0, currentTime - activeDuration);
           minDiff = Math.abs(rawTime + activeDuration - currentTime);
         }
 
-        // Snap to other clips on ALL tracks
         tracks.forEach((track) => {
           track.forEach((item) => {
-            if (item.timelineId === active.id) return; // Don't snap to self
+            if (item.timelineId === active.id) return;
 
             const itemStart = item.startTime;
             const itemEnd = item.startTime + (item.duration || 4);
 
-            // 1. Snap My Start to Their Start
             const diffStartStart = Math.abs(rawTime - itemStart);
             if (diffStartStart < minDiff) {
               newStartTime = itemStart;
               minDiff = diffStartStart;
             }
-
-            // 2. Snap My Start to Their End
             const diffStartEnd = Math.abs(rawTime - itemEnd);
             if (diffStartEnd < minDiff) {
               newStartTime = itemEnd;
               minDiff = diffStartEnd;
             }
-
-            // 3. Snap My End to Their Start
             const myEnd = rawTime + activeDuration;
             const diffEndStart = Math.abs(myEnd - itemStart);
             if (diffEndStart < minDiff) {
               newStartTime = Math.max(0, itemStart - activeDuration);
               minDiff = diffEndStart;
             }
-
-            // 4. Snap My End to Their End
             const diffEndEnd = Math.abs(myEnd - itemEnd);
             if (diffEndEnd < minDiff) {
               newStartTime = Math.max(0, itemEnd - activeDuration);
@@ -761,7 +697,6 @@ function StudioContent() {
       }
     }
 
-    // Helper: Apply Overwrite Logic (Dominate Clip)
     const applyOverwrite = (
       trackItems: TimelineItem[],
       newItem: TimelineItem,
@@ -769,21 +704,14 @@ function StudioContent() {
       const result: TimelineItem[] = [];
       const start = newItem.startTime;
       const end = newItem.startTime + (newItem.duration || 0);
-
       for (const item of trackItems) {
         if (item.timelineId === newItem.timelineId) continue;
-
         const itemStart = item.startTime;
         const itemEnd = item.startTime + (item.duration || 0);
-
-        // Check overlap
         if (start < itemEnd && end > itemStart) {
-          // 1. Enveloped (New covers Old completely)
           if (start <= itemStart && end >= itemEnd) {
-            continue; // Delete old
-          }
-          // 2. Split (New is inside Old)
-          else if (start > itemStart && end < itemEnd) {
+            continue;
+          } else if (start > itemStart && end < itemEnd) {
             result.push({ ...item, duration: start - itemStart });
             result.push({
               ...item,
@@ -792,13 +720,9 @@ function StudioContent() {
               duration: itemEnd - end,
               trimStart: (item.trimStart || 0) + (end - itemStart),
             });
-          }
-          // 3. Overlap Tail (New covers end of Old)
-          else if (start > itemStart && start < itemEnd) {
+          } else if (start > itemStart && start < itemEnd) {
             result.push({ ...item, duration: start - itemStart });
-          }
-          // 4. Overlap Head (New covers start of Old)
-          else if (end > itemStart && end < itemEnd) {
+          } else if (end > itemStart && end < itemEnd) {
             const cut = end - itemStart;
             result.push({
               ...item,
@@ -815,7 +739,6 @@ function StudioContent() {
       return result;
     };
 
-    // ✅ Library -> Timeline: ALWAYS APPEND to end of target track
     const isLibraryItem =
       active.data.current?.type === "shot" ||
       shots.some((s) => s.id === active.id);
@@ -829,10 +752,9 @@ function StudioContent() {
         timelineId: crypto.randomUUID(),
         duration: shotData.duration || 4,
         trackIndex: targetTrackIndex,
-        maxDuration: shotData.duration || 4, // Set limit to original duration
-        startTime: newStartTime, // Use calculated time
+        maxDuration: shotData.duration || 4,
+        startTime: newStartTime,
       };
-
       recordHistory();
       setTracks((prev) => {
         const newTracks = [...prev];
@@ -842,22 +764,17 @@ function StudioContent() {
         );
         return newTracks;
       });
-
       return;
     }
 
-    // Timeline Move (Same or Different Track)
     const activeContainer = findContainer(active.id as string, tracks);
-
     if (activeContainer) {
       const sourceTrackIndex = parseInt(
         activeContainer.replace("timeline-track-", ""),
       );
-
       recordHistory();
       setTracks((prev) => {
         const newTracks = [...prev];
-        // Remove from source
         if (!newTracks[sourceTrackIndex]) return prev;
         const sourceTrack = [...newTracks[sourceTrackIndex]];
         const itemIndex = sourceTrack.findIndex(
@@ -868,11 +785,9 @@ function StudioContent() {
         const [movedItem] = sourceTrack.splice(itemIndex, 1);
         newTracks[sourceTrackIndex] = sourceTrack;
 
-        // Add to target with new time
         movedItem.trackIndex = targetTrackIndex;
         movedItem.startTime = newStartTime;
 
-        // Ensure target track array exists (it should)
         newTracks[targetTrackIndex] = applyOverwrite(
           newTracks[targetTrackIndex],
           movedItem,
@@ -1050,7 +965,7 @@ function StudioContent() {
             <div
               style={{
                 width: (activeDragItem.duration || 4) * zoom,
-                height: "96px", // Match track height (h-24)
+                height: "96px",
               }}
               className="relative flex flex-col overflow-hidden bg-[#375a6c] border border-[#213845] rounded-sm shadow-xl cursor-grabbing opacity-90"
             >

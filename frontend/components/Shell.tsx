@@ -7,15 +7,17 @@ import { WindowMaximise, WindowUnmaximise } from "../wailsjs/runtime/runtime";
 
 export default function Shell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
-
-  // Logic: If we are on the Home page ("/"), we DO NOT show the sidebar.
   const isDashboard = pathname === "/";
 
   useEffect(() => {
-    if (isDashboard) {
-      WindowUnmaximise();
-    } else {
-      WindowMaximise();
+    // FIX: Check if the Wails runtime exists before calling it
+    // This prevents crashes during browser refreshes or dev mode
+    if ((window as any).runtime) {
+      if (isDashboard) {
+        WindowUnmaximise();
+      } else {
+        WindowMaximise();
+      }
     }
   }, [isDashboard]);
 
@@ -30,9 +32,6 @@ export default function Shell({ children }: { children: React.ReactNode }) {
         {children}
       </div>
 
-      {/* FIX: Wrap BottomBar in Suspense.
-        This prevents the "useSearchParams" build error on static pages like 404.
-      */}
       <Suspense
         fallback={
           <div className="h-14 bg-[#09090b] border-t border-zinc-800 w-full" />

@@ -49,6 +49,9 @@ export namespace main {
 	    sceneId: string;
 	    name: string;
 	    sourceImage: string;
+	    audioPath: string;
+	    audioStart: number;
+	    audioDuration: number;
 	    prompt: string;
 	    motionStrength: number;
 	    seed: number;
@@ -66,6 +69,9 @@ export namespace main {
 	        this.sceneId = source["sceneId"];
 	        this.name = source["name"];
 	        this.sourceImage = source["sourceImage"];
+	        this.audioPath = source["audioPath"];
+	        this.audioStart = source["audioStart"];
+	        this.audioDuration = source["audioDuration"];
 	        this.prompt = source["prompt"];
 	        this.motionStrength = source["motionStrength"];
 	        this.seed = source["seed"];
@@ -126,6 +132,7 @@ export namespace main {
 	export class Workflow {
 	    id: string;
 	    name: string;
+	    hasAudio: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new Workflow(source);
@@ -135,6 +142,7 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
 	        this.name = source["name"];
+	        this.hasAudio = source["hasAudio"];
 	    }
 	}
 

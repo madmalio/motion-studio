@@ -13,12 +13,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"       // <--- NEW
+	"github.com/gorilla/websocket" // <--- NEW
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
@@ -26,12 +27,14 @@ import (
 type App struct {
 	ctx      context.Context
 	comfyURL string
+	clientID string // <--- NEW: For WebSocket connection
 }
 
 // NewApp creates a new App application struct
 func NewApp() *App {
 	return &App{
 		comfyURL: "http://127.0.0.1:8188",
+		clientID: uuid.New().String(), // <--- Generate ID on startup
 	}
 }
 
@@ -105,6 +108,9 @@ type Shot struct {
 	SceneID        string  `json:"sceneId"`
 	Name           string  `json:"name"`
 	SourceImage    string  `json:"sourceImage"`    // Path to input image
+	AudioPath      string  `json:"audioPath"`      // Path to audio file
+	AudioStart     float64 `json:"audioStart"`     // Start trim time
+	AudioDuration  float64 `json:"audioDuration"`  // Duration to keep
 	Prompt         string  `json:"prompt"`         // AI Prompt
 	MotionStrength int     `json:"motionStrength"` // 1-127
 	Seed           int64   `json:"seed"`
@@ -129,8 +135,9 @@ type TimelineData struct {
 }
 
 type Workflow struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	HasAudio bool   `json:"hasAudio"` // Flag for UI
 }
 
 // --- HELPER FUNCTIONS ---
@@ -393,15 +400,42 @@ func (a *App) GetWorkflows() []Workflow {
 	var workflows []Workflow
 	for _, e := range entries {
 		if !e.IsDir() && strings.HasSuffix(e.Name(), ".json") {
+			// Read file to detect audio nodes
+			hasAudio := false
+			content, err := os.ReadFile(filepath.Join(dir, e.Name()))
+			if err == nil {
+				var workflowData map[string]interface{}
+				// Check inside the JSON for specific nodes
+				if json.Unmarshal(content, &workflowData) == nil {
+					for _, nodeData := range workflowData {
+						if nodeMap, ok := nodeData.(map[string]interface{}); ok {
+							if classType, ok := nodeMap["class_type"].(string); ok {
+								lowerType := strings.ToLower(classType)
+								// Detect standard audio loading nodes
+								if strings.Contains(lowerType, "loadaudio") ||
+									strings.Contains(lowerType, "audioloader") {
+									hasAudio = true
+									break
+								}
+							}
+						}
+					}
+				}
+			}
+
 			name := strings.TrimSuffix(e.Name(), ".json")
-			workflows = append(workflows, Workflow{ID: name, Name: name})
+			workflows = append(workflows, Workflow{
+				ID:       name,
+				Name:     name,
+				HasAudio: hasAudio, // Set the flag
+			})
 		}
 	}
 	// Ensure default exists if list is empty
 	if len(workflows) == 0 {
 		defaultPath := filepath.Join(dir, "default.json")
 		a.createDefaultWorkflow(defaultPath)
-		workflows = append(workflows, Workflow{ID: "default", Name: "default"})
+		workflows = append(workflows, Workflow{ID: "default", Name: "default", HasAudio: false})
 	}
 	return workflows
 }
@@ -515,7 +549,86 @@ func (a *App) RenderShot(projectId string, sceneId string, shotId string, workfl
 		return *shot, fmt.Errorf("source image is missing")
 	}
 
-	// 2. Ensure Workflow Template Exists
+	// ---------------------------------------------------------
+	// 1.5 HANDLE AUDIO TRIMMING & DURATION CALC
+	// ---------------------------------------------------------
+	localAudioPath := shot.AudioPath
+	finalDuration := shot.AudioDuration
+
+	// If no trim set, calculate full duration
+	if shot.AudioPath != "" && finalDuration <= 0 {
+		finalDuration = a.getVideoDuration(shot.AudioPath)
+	}
+
+	// Apply Trim if needed
+	if shot.AudioPath != "" && shot.AudioDuration > 0 {
+		tempName := fmt.Sprintf("trim_%s_%d%s", shot.ID, time.Now().Unix(), filepath.Ext(shot.AudioPath))
+		tempPath := filepath.Join(os.TempDir(), tempName)
+
+		cmd := exec.Command("ffmpeg",
+			"-y",
+			"-i", shot.AudioPath,
+			"-ss", fmt.Sprintf("%f", shot.AudioStart),
+			"-t", fmt.Sprintf("%f", shot.AudioDuration),
+			"-c", "copy",
+			tempPath,
+		)
+
+		if err := cmd.Run(); err == nil {
+			fmt.Println("Audio trimmed successfully:", tempPath)
+			localAudioPath = tempPath
+		} else {
+			fmt.Printf("Warning: Audio trim failed, using original. Error: %v\n", err)
+		}
+	}
+
+	// Calculate Max Frames
+	if finalDuration <= 0 { finalDuration = 1.0 }
+	maxFrames := int(finalDuration * 25)
+	
+	// ---------------------------------------------------------
+	// 2. UPLOAD ASSETS TO COMFYUI (The Fix)
+	// ---------------------------------------------------------
+	
+	// A. Upload Image
+	comfyImageName, err := a.uploadImageToComfy(shot.SourceImage)
+	if err != nil {
+		return *shot, fmt.Errorf("image upload failed: %v", err)
+	}
+
+	// B. Upload Audio (If exists)
+	comfyAudioName := ""
+	if localAudioPath != "" {
+		// We reuse the image upload function because ComfyUI's /upload/image endpoint 
+		// handles audio files correctly by placing them in the input folder.
+		uploadedName, err := a.uploadImageToComfy(localAudioPath)
+		if err != nil {
+			return *shot, fmt.Errorf("audio upload failed: %v", err)
+		}
+		comfyAudioName = uploadedName
+		fmt.Printf("Audio uploaded to ComfyUI as: %s\n", comfyAudioName)
+	}
+
+	// ---------------------------------------------------------
+	// 2.5 CONNECT WEBSOCKET (REAL-TIME PROGRESS)
+	// ---------------------------------------------------------
+	wsScheme := "ws"
+	if strings.HasPrefix(a.comfyURL, "https") {
+		wsScheme = "wss"
+	}
+	wsURL := strings.Replace(a.comfyURL, "http://", "", 1)
+	wsURL = strings.Replace(wsURL, "https://", "", 1)
+	wsURL = fmt.Sprintf("%s://%s/ws?clientId=%s", wsScheme, wsURL, a.clientID)
+
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		fmt.Println("WS Connection Failed, falling back to polling:", err)
+		// Don't error out, just continue without progress bars
+	} else {
+		defer conn.Close()
+	}
+
+	// 3. Ensure Workflow Template Exists
 	if workflowName == "" {
 		workflowName = "default"
 	}
@@ -528,68 +641,89 @@ func (a *App) RenderShot(projectId string, sceneId string, shotId string, workfl
 		}
 	}
 
-	// 3. Upload Image to ComfyUI
-	comfyFilename, err := a.uploadImageToComfy(shot.SourceImage)
-	if err != nil {
-		return *shot, fmt.Errorf("upload failed: %v", err)
-	}
-
 	// 4. Prepare Workflow JSON
 	workflowData, _ := os.ReadFile(workflowPath)
 	var workflow map[string]interface{}
 	json.Unmarshal(workflowData, &workflow)
 
-	// 5. Inject Values (Smart Node Lookup)
-	// We iterate over nodes to find specific types to update
+	// 5. Inject Values
 	imageInjected := false
-	for key, node := range workflow {
+	
+	// *** FIX: Use '_' to ignore the key since we don't use it in Printf anymore ***
+	for _, node := range workflow {
 		nodeMap, ok := node.(map[string]interface{})
-		if !ok {
-			continue
-		}
+		if !ok { continue }
 
 		classType, _ := nodeMap["class_type"].(string)
 		inputs, _ := nodeMap["inputs"].(map[string]interface{})
 
-		// Update Input Image
+		// Inject Image
 		if classType == "LoadImage" {
-			fmt.Printf("Injecting Image into Node %s\n", key)
-			inputs["image"] = comfyFilename
+			inputs["image"] = comfyImageName
 			imageInjected = true
 		}
 
-		// Update Seed (KSampler or SVD Conditioning)
+		// Inject Audio (Use the uploaded filename, NOT the local path)
+		if (strings.Contains(classType, "LoadAudio") || classType == "AudioLoader") && comfyAudioName != "" {
+			if _, exists := inputs["audio_file"]; exists {
+				inputs["audio_file"] = comfyAudioName
+			} else if _, exists := inputs["filename"]; exists {
+				inputs["filename"] = comfyAudioName
+			} else {
+				inputs["audio"] = comfyAudioName
+			}
+		}
+
+		// Inject Max Frames (InfiniteTalk/LipSync)
+		if comfyAudioName != "" {
+			if _, ok := inputs["max_frames"]; ok {
+				inputs["max_frames"] = maxFrames
+			}
+			if _, ok := inputs["frame_count"]; ok {
+				inputs["frame_count"] = maxFrames
+			}
+		}
+
+		// Inject Seed
 		if classType == "KSampler" || classType == "SVD_img2vid_Conditioning" {
 			if _, ok := inputs["seed"]; ok {
-				fmt.Printf("Injecting Seed %d into Node %s\n", shot.Seed, key)
 				inputs["seed"] = shot.Seed
 			}
 			if _, ok := inputs["noise_seed"]; ok {
-				fmt.Printf("Injecting Noise Seed %d into Node %s\n", shot.Seed, key)
 				inputs["noise_seed"] = shot.Seed
 			}
 		}
 
-		// Update Motion Bucket (SVD)
+		// Inject Motion Bucket
 		if classType == "SVD_img2vid_Conditioning" {
-			fmt.Printf("Injecting Motion %d into Node %s\n", shot.MotionStrength, key)
 			inputs["motion_bucket_id"] = shot.MotionStrength
 		}
 
-		// Update Prompt (CLIP Text Encode) - Optional, if you use text-to-video
+		// Inject Prompt
 		if classType == "CLIPTextEncode" {
-			fmt.Printf("Injecting Prompt into Node %s\n", key)
 			inputs["text"] = shot.Prompt
+		}
+
+		// Inject Prompt (SDXL Support)
+		if classType == "CLIPTextEncodeSDXL" {
+			inputs["text_g"] = shot.Prompt
+			inputs["text_l"] = shot.Prompt
+		}
+
+		// Inject Prompt (WanVideo Support)
+		if classType == "WanVideoTextEncodeCached" {
+			inputs["positive_prompt"] = shot.Prompt
 		}
 	}
 
 	if !imageInjected {
-		fmt.Println("WARNING: No 'LoadImage' node found in workflow. Source image was NOT injected.")
+		fmt.Println("WARNING: No 'LoadImage' node found.")
 	}
 
-	// 6. Queue Prompt
+	// 6. Queue Prompt with Client ID
 	promptReq := map[string]interface{}{
-		"prompt": workflow,
+		"prompt":    workflow,
+		"client_id": a.clientID, // <--- Key for WebSocket
 	}
 	promptBytes, _ := json.Marshal(promptReq)
 	resp, err := http.Post(a.comfyURL+"/prompt", "application/json", bytes.NewBuffer(promptBytes))
@@ -607,143 +741,146 @@ func (a *App) RenderShot(projectId string, sceneId string, shotId string, workfl
 	json.NewDecoder(resp.Body).Decode(&promptResp)
 	promptID := promptResp["prompt_id"].(string)
 
-	// 7. Poll for Completion
-	// In a real app, use WebSockets. For MVP, we poll history.
+	// 7. LISTEN FOR WEBSOCKET PROGRESS
 	outputFilename := ""
 	outputSubfolder := ""
 	outputType := ""
-	timeout := time.After(10 * time.Minute) // Increased timeout for slower renders
-	var histMap map[string]interface{}
 
+	// We use a channel to signal completion from the WS loop
+	doneChan := make(chan bool)
+
+	if conn != nil {
+		go func() {
+			for {
+				_, message, err := conn.ReadMessage()
+				if err != nil {
+					close(doneChan)
+					return
+				}
+
+				var msg map[string]interface{}
+				json.Unmarshal(message, &msg)
+				msgType, _ := msg["type"].(string)
+				data, _ := msg["data"].(map[string]interface{})
+
+				// Emit Progress
+				if msgType == "progress" {
+					val := data["value"].(float64)
+					max := data["max"].(float64)
+					percentage := int((val / max) * 100)
+					runtime.EventsEmit(a.ctx, "comfy:progress", percentage)
+				}
+
+				// Emit Status Text
+				if msgType == "executing" {
+					node := data["node"]
+					if node == nil {
+						// execution finished (node is null)
+					} else {
+						runtime.EventsEmit(a.ctx, "comfy:status", fmt.Sprintf("Executing Node %v", node))
+					}
+				}
+
+				// Execution Finished
+				if msgType == "execution_success" {
+					sid, _ := data["prompt_id"].(string)
+					if sid == promptID {
+						close(doneChan)
+						return
+					}
+				}
+			}
+		}()
+	} else {
+		// Fallback for no WS: just close doneChan immediately to trigger polling
+		close(doneChan)
+	}
+
+	// Wait for WS completion or Timeout
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+loop:
 	for {
 		select {
-		case <-timeout:
-			return *shot, fmt.Errorf("rendering timed out")
-		default:
+		case <-doneChan:
+			break loop
+		case <-ticker.C:
+			// Fallback: Check history API in case WS missed the event (e.g. sleep)
+			if resp, err := http.Get(a.comfyURL + "/history/" + promptID); err == nil {
+				var h map[string]interface{}
+				json.NewDecoder(resp.Body).Decode(&h)
+				resp.Body.Close()
+				if _, ok := h[promptID]; ok {
+					break loop
+				}
+			}
+		case <-time.After(10 * time.Minute):
+			return *shot, fmt.Errorf("timeout")
 		}
+	}
 
-		time.Sleep(1 * time.Second)
-		histResp, err := http.Get(a.comfyURL + "/history/" + promptID)
-		if err != nil {
-			continue
-		}
-
-		histMap = make(map[string]interface{})
+	// 8. Poll History ONCE to get the filename (reliable)
+	histResp, err := http.Get(a.comfyURL + "/history/" + promptID)
+	if err == nil {
+		var histMap map[string]interface{}
 		json.NewDecoder(histResp.Body).Decode(&histMap)
 		histResp.Body.Close()
 
-		if len(histMap) > 0 {
-			// Job done! Find output filename
-			data, ok := histMap[promptID].(map[string]interface{})
-			if !ok {
-				break
-			}
-
-			// Check for execution errors
-			if status, ok := data["status"].(map[string]interface{}); ok {
-				if statusStr, ok := status["status_str"].(string); ok && statusStr == "error" {
-					return *shot, fmt.Errorf("ComfyUI execution failed")
-				}
-			}
-
-			outputs, ok := data["outputs"].(map[string]interface{})
-			if !ok {
-				break
-			}
-			for _, outNode := range outputs {
-				outNodeMap, ok := outNode.(map[string]interface{})
-				if !ok {
-					continue
-				}
-
-				// Check for "images" (Standard SaveImage)
-				if images, ok := outNodeMap["images"].([]interface{}); ok && len(images) > 0 {
-					if imgData, ok := images[0].(map[string]interface{}); ok {
-						if filename, ok := imgData["filename"].(string); ok {
-							outputFilename = filename
-							if sub, ok := imgData["subfolder"].(string); ok {
-								outputSubfolder = sub
-							}
-							if typ, ok := imgData["type"].(string); ok {
-								outputType = typ
-							}
-							break
-						}
+		if data, ok := histMap[promptID].(map[string]interface{}); ok {
+			if outputs, ok := data["outputs"].(map[string]interface{}); ok {
+				for _, outNode := range outputs {
+					outNodeMap, ok := outNode.(map[string]interface{})
+					if !ok {
+						continue
 					}
-				}
-				// Check for "videos" (VHS / Video Helper Suite)
-				if videos, ok := outNodeMap["videos"].([]interface{}); ok && len(videos) > 0 {
-					if vidData, ok := videos[0].(map[string]interface{}); ok {
-						if filename, ok := vidData["filename"].(string); ok {
-							outputFilename = filename
-							if sub, ok := vidData["subfolder"].(string); ok {
-								outputSubfolder = sub
-							}
-							if typ, ok := vidData["type"].(string); ok {
-								outputType = typ
-							}
-							break
-						}
-					}
-				}
-				// Check for "gifs"
-				if gifs, ok := outNodeMap["gifs"].([]interface{}); ok && len(gifs) > 0 {
-					if gifData, ok := gifs[0].(map[string]interface{}); ok {
-						if filename, ok := gifData["filename"].(string); ok {
-							outputFilename = filename
-							if sub, ok := gifData["subfolder"].(string); ok {
-								outputSubfolder = sub
-							}
-							if typ, ok := gifData["type"].(string); ok {
-								outputType = typ
-							}
-							break
-						}
+					// Check images/videos/gifs
+					if items, ok := outNodeMap["videos"].([]interface{}); ok && len(items) > 0 {
+						d := items[0].(map[string]interface{})
+						outputFilename = d["filename"].(string)
+						outputSubfolder, _ = d["subfolder"].(string)
+						outputType, _ = d["type"].(string)
+					} else if items, ok := outNodeMap["images"].([]interface{}); ok && len(items) > 0 {
+						d := items[0].(map[string]interface{})
+						outputFilename = d["filename"].(string)
+						outputSubfolder, _ = d["subfolder"].(string)
+						outputType, _ = d["type"].(string)
+					} else if items, ok := outNodeMap["gifs"].([]interface{}); ok && len(items) > 0 {
+						d := items[0].(map[string]interface{})
+						outputFilename = d["filename"].(string)
+						outputSubfolder, _ = d["subfolder"].(string)
+						outputType, _ = d["type"].(string)
 					}
 				}
 			}
-			break
 		}
 	}
 
 	if outputFilename == "" {
-		// Debugging: Print raw outputs to help diagnose
-		if len(histMap) > 0 {
-			if data, ok := histMap[promptID].(map[string]interface{}); ok {
-				if outputs, ok := data["outputs"]; ok {
-					outBytes, _ := json.MarshalIndent(outputs, "", "  ")
-					fmt.Printf("DEBUG: Raw ComfyUI Outputs:\n%s\n", string(outBytes))
-				}
-			}
-		}
-		return *shot, fmt.Errorf("job finished but no output file was found in history")
+		return *shot, fmt.Errorf("job finished but no output file was found")
 	}
 
-	// 8. Download Result
-	if outputFilename != "" {
-		outPath := filepath.Join(a.getAppDir(), projectId, "scenes", sceneId, shotId+".mp4")
-
-		// ComfyUI View Endpoint
-		// http://.../view?filename=...&subfolder=&type=output
-		query := fmt.Sprintf("filename=%s&subfolder=%s&type=%s", outputFilename, outputSubfolder, outputType)
-		vidResp, err := http.Get(fmt.Sprintf("%s/view?%s", a.comfyURL, query))
-		if err == nil {
-			defer vidResp.Body.Close()
-			if vidResp.StatusCode != 200 {
-				return *shot, fmt.Errorf("download failed (Status %d)", vidResp.StatusCode)
-			}
-
-			outFile, _ := os.Create(outPath)
-			defer outFile.Close()
-			io.Copy(outFile, vidResp.Body)
-
-			shot.OutputVideo = outPath
-			shot.Status = "DONE"
-			shot.Duration = a.getVideoDuration(outPath)
-			a.SaveShots(projectId, sceneId, shots)
-		} else {
-			return *shot, fmt.Errorf("failed to download result: %v", err)
+	// 9. Download Result
+	outPath := filepath.Join(a.getAppDir(), projectId, "scenes", sceneId, shotId+".mp4")
+	query := fmt.Sprintf("filename=%s&subfolder=%s&type=%s", outputFilename, outputSubfolder, outputType)
+	vidResp, err := http.Get(fmt.Sprintf("%s/view?%s", a.comfyURL, query))
+	
+	if err == nil {
+		defer vidResp.Body.Close()
+		if vidResp.StatusCode != 200 {
+			return *shot, fmt.Errorf("download failed (Status %d)", vidResp.StatusCode)
 		}
+
+		outFile, _ := os.Create(outPath)
+		io.Copy(outFile, vidResp.Body)
+		outFile.Close()
+
+		shot.OutputVideo = outPath
+		shot.Status = "DONE"
+		shot.Duration = a.getVideoDuration(outPath)
+		a.SaveShots(projectId, sceneId, shots)
+	} else {
+		return *shot, fmt.Errorf("failed to download result: %v", err)
 	}
 
 	return *shot, nil
@@ -856,6 +993,20 @@ func (a *App) SelectImage() string {
 		Title: "Select Image",
 		Filters: []runtime.FileFilter{
 			{DisplayName: "Images", Pattern: "*.png;*.jpg;*.jpeg;*.webp"},
+		},
+	})
+	if err != nil {
+		return ""
+	}
+	return selection
+}
+
+// SelectAudio opens the file dialog for audio files
+func (a *App) SelectAudio() string {
+	selection, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
+		Title: "Select Audio File",
+		Filters: []runtime.FileFilter{
+			{DisplayName: "Audio", Pattern: "*.mp3;*.wav;*.ogg;*.m4a;*.flac"},
 		},
 	})
 	if err != nil {
@@ -1055,11 +1206,6 @@ func (s *StreamServer) StartStreamHandler(w http.ResponseWriter, r *http.Request
 			}
 		}
 	}
-}
-
-// GetVideoDuration returns the duration (seconds) of a video file using ffprobe.
-func (a *App) GetVideoDuration(path string) float64 {
-	return a.getVideoDuration(path)
 }
 
 func StartStreamServer() {

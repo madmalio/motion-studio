@@ -62,10 +62,6 @@ export function GetTimeline(arg1, arg2) {
   return window['go']['main']['App']['GetTimeline'](arg1, arg2);
 }
 
-export function GetVideoDuration(arg1) {
-  return window['go']['main']['App']['GetVideoDuration'](arg1);
-}
-
 export function GetWorkflows() {
   return window['go']['main']['App']['GetWorkflows']();
 }
@@ -96,6 +92,10 @@ export function SaveTimeline(arg1, arg2, arg3) {
 
 export function SelectAndSaveWorkflow() {
   return window['go']['main']['App']['SelectAndSaveWorkflow']();
+}
+
+export function SelectAudio() {
+  return window['go']['main']['App']['SelectAudio']();
 }
 
 export function SelectImage() {

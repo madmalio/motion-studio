@@ -51,7 +51,7 @@ export default function BottomBar() {
 
       {/* 4. SETTINGS */}
       <button
-        onClick={openSettings}
+        onClick={() => openSettings()}
         className="text-zinc-600 hover:text-[#D2FF44] transition-colors"
       >
         <Settings size={18} />
