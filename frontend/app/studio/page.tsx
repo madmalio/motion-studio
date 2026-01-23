@@ -37,7 +37,8 @@ import {
   SaveShots,
   GetShots,
   DeleteShot,
-  UpdateTimeline,
+  SaveTimeline,
+  GetTimeline,
 } from "../../wailsjs/go/main/App";
 
 // --- TYPES ---
@@ -106,14 +107,150 @@ function StudioContent() {
   const [shots, setShots] = useState<Shot[]>([]);
   const [activeShotId, setActiveShotId] = useState<string | null>(null);
   const [isRendering, setIsRendering] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
 
   // Timeline & Playback State
   const [tracks, setTracks] = useState<TimelineItem[][]>([[]]);
+  const [trackSettings, setTrackSettings] = useState<
+    { locked: boolean; visible: boolean; name: string; height?: number }[]
+  >([{ locked: false, visible: true, name: "Track 1", height: 96 }]);
   const [activeDragItem, setActiveDragItem] = useState<any>(null);
   const [zoom, setZoom] = useState(10); // px/second
 
+  // --- LAYOUT STATE ---
+  const [generatorWidth, setGeneratorWidth] = useState(320);
+  const [libraryWidth, setLibraryWidth] = useState(320);
+  const [timelineHeight, setTimelineHeight] = useState(300);
+
+  const isResizingGen = useRef(false);
+  const isResizingLib = useRef(false);
+  const isResizingTime = useRef(false);
+  const generatorWidthRef = useRef(generatorWidth);
+
+  useEffect(() => {
+    generatorWidthRef.current = generatorWidth;
+  }, [generatorWidth]);
+
+  useEffect(() => {
+    const handlePointerMove = (e: PointerEvent) => {
+      if (isResizingGen.current) {
+        const newW = Math.max(200, Math.min(600, e.clientX));
+        setGeneratorWidth(newW);
+        document.body.style.cursor = "col-resize";
+      }
+      if (isResizingLib.current) {
+        const newW = Math.max(
+          200,
+          Math.min(800, e.clientX - generatorWidthRef.current),
+        );
+        setLibraryWidth(newW);
+        document.body.style.cursor = "col-resize";
+      }
+      if (isResizingTime.current) {
+        const newH = Math.max(
+          150,
+          Math.min(800, window.innerHeight - e.clientY),
+        );
+        setTimelineHeight(newH);
+        document.body.style.cursor = "row-resize";
+      }
+    };
+
+    const handlePointerUp = () => {
+      isResizingGen.current = false;
+      isResizingLib.current = false;
+      isResizingTime.current = false;
+      document.body.style.cursor = "default";
+    };
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+    };
+  }, []);
+
+  const [videoBlobs, setVideoBlobs] = useState<Map<string, string>>(new Map());
   const initialized = useRef(false);
   const videoCache = useRef<Map<string, string>>(new Map());
+  const isCtrlPressed = useRef(false);
+
+  // --- UNDO / REDO ---
+  const [history, setHistory] = useState<
+    {
+      tracks: TimelineItem[][];
+      shots: Shot[];
+      trackSettings: {
+        locked: boolean;
+        visible: boolean;
+        name: string;
+        height?: number;
+      }[];
+    }[]
+  >([]);
+  const [redoStack, setRedoStack] = useState<
+    {
+      tracks: TimelineItem[][];
+      shots: Shot[];
+      trackSettings: {
+        locked: boolean;
+        visible: boolean;
+        name: string;
+        height?: number;
+      }[];
+    }[]
+  >([]);
+
+  const recordHistory = () => {
+    setHistory((prev) => [
+      ...prev,
+      {
+        tracks: JSON.parse(JSON.stringify(tracks)),
+        shots: JSON.parse(JSON.stringify(shots)),
+        trackSettings: JSON.parse(JSON.stringify(trackSettings)),
+      },
+    ]);
+    setRedoStack([]);
+  };
+
+  const undo = () => {
+    if (history.length === 0) return;
+    const previous = history[history.length - 1];
+    const newHistory = history.slice(0, -1);
+
+    setRedoStack((prev) => [
+      ...prev,
+      {
+        tracks: JSON.parse(JSON.stringify(tracks)),
+        shots: JSON.parse(JSON.stringify(shots)),
+        trackSettings: JSON.parse(JSON.stringify(trackSettings)),
+      },
+    ]);
+    setHistory(newHistory);
+    setTracks(previous.tracks);
+    setShots(previous.shots);
+    setTrackSettings(previous.trackSettings);
+  };
+
+  const redo = () => {
+    if (redoStack.length === 0) return;
+    const next = redoStack[redoStack.length - 1];
+    const newRedo = redoStack.slice(0, -1);
+
+    setHistory((prev) => [
+      ...prev,
+      {
+        tracks: JSON.parse(JSON.stringify(tracks)),
+        shots: JSON.parse(JSON.stringify(shots)),
+        trackSettings: JSON.parse(JSON.stringify(trackSettings)),
+      },
+    ]);
+    setRedoStack(newRedo);
+    setTracks(next.tracks);
+    setShots(next.shots);
+    setTrackSettings(next.trackSettings);
+  };
 
   // Keep your existing behavior here
   const totalDuration = Math.max(
@@ -127,13 +264,16 @@ function StudioContent() {
   const {
     primaryVideoRef,
     secondaryVideoRef,
+    canvasRef,
     isPlaying,
     togglePlay,
     currentTime,
     seekTo,
   } = useGaplessPlayback({
     tracks,
+    trackSettings,
     totalDuration,
+    videoBlobs,
   });
 
   // --- AUTO-SAVE ---
@@ -144,12 +284,56 @@ function StudioContent() {
     }
   }, [shots, projectId, sceneId]);
 
+  // --- AUTO-SAVE TIMELINE ---
+  useEffect(() => {
+    if (projectId && sceneId && initialized.current) {
+      const cleanTracks = tracks.map((track) =>
+        track.map(({ previewBase64, ...rest }) => rest),
+      );
+      SaveTimeline(projectId, sceneId, {
+        tracks: cleanTracks,
+        trackSettings,
+      } as any);
+    }
+  }, [tracks, trackSettings, projectId, sceneId]);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Control") isCtrlPressed.current = true;
+
+      if (
+        e.target instanceof HTMLInputElement ||
+        e.target instanceof HTMLTextAreaElement
+      )
+        return;
+
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
+        e.preventDefault();
+        if (e.shiftKey) {
+          redo();
+        } else {
+          undo();
+        }
+      }
+    };
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.key === "Control") isCtrlPressed.current = false;
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("keyup", handleKeyUp);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("keyup", handleKeyUp);
+    };
+  }, [history, redoStack, tracks, shots]);
+
   // --- LOAD DATA ---
   useEffect(() => {
     if (projectId && sceneId) loadData(projectId, sceneId);
   }, [projectId, sceneId]);
 
   const loadData = async (pId: string, sId: string) => {
+    setIsLoading(true);
     try {
       const p = await GetProject(pId);
       setProject(p);
@@ -159,6 +343,7 @@ function StudioContent() {
 
       const savedShots = await GetShots(pId, sId);
 
+      // 1. Hydrate Shots
       if (savedShots && savedShots.length > 0) {
         const hydratedShots = await Promise.all(
           savedShots.map(async (shot: any) => {
@@ -172,18 +357,69 @@ function StudioContent() {
 
         setShots(hydratedShots);
         setActiveShotId(hydratedShots[0].id);
-        initialized.current = true;
-
-        // ✅ CHANGE: START WITH A BLANK TIMELINE (no auto-populate)
-        setTracks([[]]);
-      } else {
-        if (!initialized.current) {
-          initialized.current = true;
-          handleAddShot();
-        }
       }
+
+      // 2. Load Timeline
+      try {
+        const timelineData = await GetTimeline(pId, sId);
+        if (timelineData && timelineData.tracks) {
+          const hydratedTracks = await Promise.all(
+            timelineData.tracks.map(async (track: any[]) => {
+              return Promise.all(
+                track.map(async (item: any) => {
+                  const src = item.sourceImage;
+                  if (src) {
+                    const b64 = await ReadImageBase64(src);
+                    return { ...item, previewBase64: b64 };
+                  }
+                  return item;
+                }),
+              );
+            }),
+          );
+          setTracks(hydratedTracks);
+          if (timelineData.trackSettings) {
+            setTrackSettings(timelineData.trackSettings);
+          }
+
+          // 3. Pre-load Video Clips (Fix Black Flashes)
+          const uniquePaths = new Set<string>();
+          hydratedTracks.flat().forEach((item: any) => {
+            if (item.outputVideo) uniquePaths.add(item.outputVideo);
+          });
+
+          const blobMap = new Map<string, string>();
+          await Promise.all(
+            Array.from(uniquePaths).map(async (path) => {
+              try {
+                const url = `http://localhost:3456/video/${path.replace(/\\/g, "/")}`;
+                const res = await fetch(url);
+                const blob = await res.blob();
+                blobMap.set(path, URL.createObjectURL(blob));
+              } catch (e) {
+                console.error("Failed to preload clip:", path, e);
+              }
+            }),
+          );
+          setVideoBlobs(blobMap);
+        } else {
+          setTracks([[]]);
+          setTrackSettings([
+            { locked: false, visible: true, name: "Track 1", height: 96 },
+          ]);
+        }
+      } catch (e) {
+        setTracks([[]]);
+        setTrackSettings([
+          { locked: false, visible: true, name: "Track 1", height: 96 },
+        ]);
+      }
+
+      initialized.current = true;
     } catch (err) {
       console.error(err);
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -193,6 +429,7 @@ function StudioContent() {
 
   const handleAddShot = () => {
     if (!sceneId) return;
+    recordHistory();
     setShots((prev) => {
       const newShot: Shot = {
         id: crypto.randomUUID(),
@@ -217,6 +454,7 @@ function StudioContent() {
     const lastFramePath = await ExtractLastFrame(sourcePath);
     if (!lastFramePath) return;
     const b64 = await ReadImageBase64(lastFramePath);
+    recordHistory();
     setShots((prev) => {
       const newShot: Shot = {
         ...originalShot,
@@ -239,6 +477,7 @@ function StudioContent() {
       message: "This will permanently remove the shot.",
       variant: "danger",
       onConfirm: async () => {
+        recordHistory();
         if (project && scene) await DeleteShot(project.id, scene.id, id);
         setShots((prev) => prev.filter((s) => s.id !== id));
       },
@@ -261,6 +500,7 @@ function StudioContent() {
   };
 
   const handleUpdateItem = (id: string, updates: Partial<TimelineItem>) => {
+    recordHistory();
     setTracks((prev) =>
       prev.map((track) =>
         track.map((item) =>
@@ -270,40 +510,24 @@ function StudioContent() {
     );
   };
 
-  const handleSplit = () => {
+  const handleSplit = (itemId: string, splitTime: number) => {
+    if (!itemId || splitTime === undefined) return;
+    recordHistory();
+
     setTracks((prev) => {
       const newTracks = [...prev];
       let targetTrackIndex = -1;
       let targetItemIndex = -1;
 
-      // Helper: Check if playhead is inside a clip (with safety buffer)
-      const isInside = (item: TimelineItem) =>
-        currentTime > item.startTime + 0.05 &&
-        currentTime < item.startTime + (item.duration || 0) - 0.05;
-
-      // 1. Priority: Try to find a clip under playhead that matches the currently selected Shot ID
-      if (activeShotId) {
-        for (let t = 0; t < newTracks.length; t++) {
-          const idx = newTracks[t].findIndex(
-            (item) => item.id === activeShotId && isInside(item),
-          );
-          if (idx !== -1) {
-            targetTrackIndex = t;
-            targetItemIndex = idx;
-            break;
-          }
-        }
-      }
-
-      // 2. Fallback: If no selection match, find ANY clip under the playhead (Top-most track first)
-      if (targetTrackIndex === -1) {
-        for (let t = newTracks.length - 1; t >= 0; t--) {
-          const idx = newTracks[t].findIndex((item) => isInside(item));
-          if (idx !== -1) {
-            targetTrackIndex = t;
-            targetItemIndex = idx;
-            break;
-          }
+      // Find the specific item by timelineId
+      for (let t = 0; t < newTracks.length; t++) {
+        const idx = newTracks[t].findIndex(
+          (item) => item.timelineId === itemId,
+        );
+        if (idx !== -1) {
+          targetTrackIndex = t;
+          targetItemIndex = idx;
+          break;
         }
       }
 
@@ -311,13 +535,22 @@ function StudioContent() {
       if (targetTrackIndex !== -1 && targetItemIndex !== -1) {
         const track = newTracks[targetTrackIndex];
         const item = track[targetItemIndex];
-        const splitOffset = currentTime - item.startTime;
+
+        // Validate split time (must be within clip with buffer)
+        if (
+          splitTime <= item.startTime + 0.05 ||
+          splitTime >= item.startTime + (item.duration || 0) - 0.05
+        ) {
+          return prev;
+        }
+
+        const splitOffset = splitTime - item.startTime;
 
         const leftItem = { ...item, duration: splitOffset };
         const rightItem: TimelineItem = {
           ...item,
           timelineId: crypto.randomUUID(),
-          startTime: currentTime,
+          startTime: splitTime,
           duration: (item.duration || 0) - splitOffset,
           trimStart: (item.trimStart || 0) + splitOffset,
         };
@@ -331,6 +564,51 @@ function StudioContent() {
 
       return prev;
     });
+  };
+
+  // --- TRACK MANAGEMENT ---
+  const handleAddTrack = () => {
+    recordHistory();
+    setTracks((prev) => [...prev, []]);
+    setTrackSettings((prev) => [
+      ...prev,
+      {
+        locked: false,
+        visible: true,
+        name: `Track ${prev.length + 1}`,
+        height: 96,
+      },
+    ]);
+  };
+
+  const handleDeleteTrack = (index: number) => {
+    recordHistory();
+    setTracks((prev) => prev.filter((_, i) => i !== index));
+    setTrackSettings((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const handleRenameTrack = (index: number, newName: string) => {
+    setTrackSettings((prev) =>
+      prev.map((s, i) => (i === index ? { ...s, name: newName } : s)),
+    );
+  };
+
+  const handleResizeTrack = (index: number, newHeight: number) => {
+    setTrackSettings((prev) =>
+      prev.map((s, i) => (i === index ? { ...s, height: newHeight } : s)),
+    );
+  };
+
+  const handleToggleTrackLock = (index: number) => {
+    setTrackSettings((prev) =>
+      prev.map((s, i) => (i === index ? { ...s, locked: !s.locked } : s)),
+    );
+  };
+
+  const handleToggleTrackVisibility = (index: number) => {
+    setTrackSettings((prev) =>
+      prev.map((s, i) => (i === index ? { ...s, visible: !s.visible } : s)),
+    );
   };
 
   // --- DND LOGIC ---
@@ -394,41 +672,148 @@ function StudioContent() {
       const relativeX = activeRect.left - overRect.left;
       const rawTime = Math.max(0, relativeX / zoom);
 
-      // Snapping Logic
-      const SNAP_THRESHOLD_PX = 15;
-      const snapThreshold = SNAP_THRESHOLD_PX / zoom;
-
       newStartTime = rawTime;
-      let minDiff = snapThreshold;
 
-      // Snap to 0
-      if (Math.abs(rawTime - 0) < minDiff) {
-        newStartTime = 0;
-        minDiff = Math.abs(rawTime - 0);
+      if (!isCtrlPressed.current) {
+        // Snapping Logic
+        const SNAP_THRESHOLD_PX = 15;
+        const snapThreshold = SNAP_THRESHOLD_PX / zoom;
+
+        // Determine active item duration for end-snapping
+        let activeDuration = 4;
+        let foundItem: any;
+
+        // Check tracks first (moving existing item)
+        for (const t of tracks) {
+          const i = t.find((it) => it.timelineId === active.id);
+          if (i) {
+            foundItem = i;
+            break;
+          }
+        }
+        // Check shots if not found (dragging from library)
+        if (!foundItem) {
+          foundItem = shots.find((s) => s.id === active.id);
+        }
+
+        if (foundItem) {
+          activeDuration = foundItem.duration || 4;
+        }
+
+        let minDiff = snapThreshold;
+
+        // Snap to 0
+        if (Math.abs(rawTime - 0) < minDiff) {
+          newStartTime = 0;
+          minDiff = Math.abs(rawTime - 0);
+        }
+
+        // Snap to Playhead (Start)
+        if (Math.abs(rawTime - currentTime) < minDiff) {
+          newStartTime = currentTime;
+          minDiff = Math.abs(rawTime - currentTime);
+        }
+
+        // Snap to Playhead (End)
+        if (Math.abs(rawTime + activeDuration - currentTime) < minDiff) {
+          newStartTime = Math.max(0, currentTime - activeDuration);
+          minDiff = Math.abs(rawTime + activeDuration - currentTime);
+        }
+
+        // Snap to other clips on ALL tracks
+        tracks.forEach((track) => {
+          track.forEach((item) => {
+            if (item.timelineId === active.id) return; // Don't snap to self
+
+            const itemStart = item.startTime;
+            const itemEnd = item.startTime + (item.duration || 4);
+
+            // 1. Snap My Start to Their Start
+            const diffStartStart = Math.abs(rawTime - itemStart);
+            if (diffStartStart < minDiff) {
+              newStartTime = itemStart;
+              minDiff = diffStartStart;
+            }
+
+            // 2. Snap My Start to Their End
+            const diffStartEnd = Math.abs(rawTime - itemEnd);
+            if (diffStartEnd < minDiff) {
+              newStartTime = itemEnd;
+              minDiff = diffStartEnd;
+            }
+
+            // 3. Snap My End to Their Start
+            const myEnd = rawTime + activeDuration;
+            const diffEndStart = Math.abs(myEnd - itemStart);
+            if (diffEndStart < minDiff) {
+              newStartTime = Math.max(0, itemStart - activeDuration);
+              minDiff = diffEndStart;
+            }
+
+            // 4. Snap My End to Their End
+            const diffEndEnd = Math.abs(myEnd - itemEnd);
+            if (diffEndEnd < minDiff) {
+              newStartTime = Math.max(0, itemEnd - activeDuration);
+              minDiff = diffEndEnd;
+            }
+          });
+        });
       }
-
-      // Snap to other clips on the same track
-      tracks[targetTrackIndex].forEach((item) => {
-        if (item.timelineId === active.id) return; // Don't snap to self
-
-        // Snap to Start
-        const diffStart = Math.abs(rawTime - item.startTime);
-        if (diffStart < minDiff) {
-          newStartTime = item.startTime;
-          minDiff = diffStart;
-        }
-
-        // Snap to End
-        const itemEnd = item.startTime + (item.duration || 4);
-        const diffEnd = Math.abs(rawTime - itemEnd);
-        if (diffEnd < minDiff) {
-          newStartTime = itemEnd;
-          minDiff = diffEnd;
-        }
-
-        // Optional: Snap my End to their Start/End? (requires active duration)
-      });
     }
+
+    // Helper: Apply Overwrite Logic (Dominate Clip)
+    const applyOverwrite = (
+      trackItems: TimelineItem[],
+      newItem: TimelineItem,
+    ) => {
+      const result: TimelineItem[] = [];
+      const start = newItem.startTime;
+      const end = newItem.startTime + (newItem.duration || 0);
+
+      for (const item of trackItems) {
+        if (item.timelineId === newItem.timelineId) continue;
+
+        const itemStart = item.startTime;
+        const itemEnd = item.startTime + (item.duration || 0);
+
+        // Check overlap
+        if (start < itemEnd && end > itemStart) {
+          // 1. Enveloped (New covers Old completely)
+          if (start <= itemStart && end >= itemEnd) {
+            continue; // Delete old
+          }
+          // 2. Split (New is inside Old)
+          else if (start > itemStart && end < itemEnd) {
+            result.push({ ...item, duration: start - itemStart });
+            result.push({
+              ...item,
+              timelineId: crypto.randomUUID(),
+              startTime: end,
+              duration: itemEnd - end,
+              trimStart: (item.trimStart || 0) + (end - itemStart),
+            });
+          }
+          // 3. Overlap Tail (New covers end of Old)
+          else if (start > itemStart && start < itemEnd) {
+            result.push({ ...item, duration: start - itemStart });
+          }
+          // 4. Overlap Head (New covers start of Old)
+          else if (end > itemStart && end < itemEnd) {
+            const cut = end - itemStart;
+            result.push({
+              ...item,
+              startTime: end,
+              duration: (item.duration || 0) - cut,
+              trimStart: (item.trimStart || 0) + cut,
+            });
+          }
+        } else {
+          result.push(item);
+        }
+      }
+      result.push(newItem);
+      return result;
+    };
 
     // ✅ Library -> Timeline: ALWAYS APPEND to end of target track
     const isLibraryItem =
@@ -448,9 +833,13 @@ function StudioContent() {
         startTime: newStartTime, // Use calculated time
       };
 
+      recordHistory();
       setTracks((prev) => {
         const newTracks = [...prev];
-        newTracks[targetTrackIndex] = [...newTracks[targetTrackIndex], newItem]; // ✅ append
+        newTracks[targetTrackIndex] = applyOverwrite(
+          newTracks[targetTrackIndex],
+          newItem,
+        );
         return newTracks;
       });
 
@@ -465,6 +854,7 @@ function StudioContent() {
         activeContainer.replace("timeline-track-", ""),
       );
 
+      recordHistory();
       setTracks((prev) => {
         const newTracks = [...prev];
         // Remove from source
@@ -483,17 +873,17 @@ function StudioContent() {
         movedItem.startTime = newStartTime;
 
         // Ensure target track array exists (it should)
-        newTracks[targetTrackIndex] = [
-          ...newTracks[targetTrackIndex],
+        newTracks[targetTrackIndex] = applyOverwrite(
+          newTracks[targetTrackIndex],
           movedItem,
-        ];
+        );
 
         return newTracks;
       });
     }
   };
 
-  if (!project || !scene)
+  if (isLoading || !project || !scene)
     return (
       <div className="h-full w-full flex items-center justify-center bg-[#09090b] text-[#D2FF44] gap-2">
         <Loader2 className="animate-spin" /> Loading Studio...
@@ -521,7 +911,10 @@ function StudioContent() {
         <div className="flex-1 flex flex-col overflow-hidden">
           <div className="flex-1 flex overflow-hidden min-h-0">
             {/* GENERATOR */}
-            <div className="w-80 border-r border-zinc-800 bg-[#09090b] flex flex-col min-h-0">
+            <div
+              style={{ width: generatorWidth }}
+              className="border-r border-zinc-800 bg-[#09090b] flex flex-col min-h-0 shrink-0"
+            >
               <GeneratorPanel
                 activeShot={activeShot}
                 updateActiveShot={updateActiveShot}
@@ -536,8 +929,23 @@ function StudioContent() {
               />
             </div>
 
+            {/* RESIZE HANDLE GEN */}
+            <div
+              className="w-1 hover:w-1.5 bg-zinc-900 hover:bg-[#D2FF44] cursor-col-resize transition-all z-50 flex-shrink-0"
+              onPointerDown={(e) => {
+                isResizingGen.current = true;
+                e.currentTarget.setPointerCapture(e.pointerId);
+              }}
+              onPointerUp={(e) =>
+                e.currentTarget.releasePointerCapture(e.pointerId)
+              }
+            />
+
             {/* LIBRARY */}
-            <div className="w-80 border-r border-zinc-800 bg-[#09090b] flex flex-col min-h-0">
+            <div
+              style={{ width: libraryWidth }}
+              className="border-r border-zinc-800 bg-[#09090b] flex flex-col min-h-0 shrink-0"
+            >
               <LibraryPanel
                 shots={shots}
                 activeShotId={activeShotId}
@@ -548,6 +956,18 @@ function StudioContent() {
               />
             </div>
 
+            {/* RESIZE HANDLE LIB */}
+            <div
+              className="w-1 hover:w-1.5 bg-zinc-900 hover:bg-[#D2FF44] cursor-col-resize transition-all z-50 flex-shrink-0"
+              onPointerDown={(e) => {
+                isResizingLib.current = true;
+                e.currentTarget.setPointerCapture(e.pointerId);
+              }}
+              onPointerUp={(e) =>
+                e.currentTarget.releasePointerCapture(e.pointerId)
+              }
+            />
+
             {/* VIEWER */}
             <div className="flex-1 min-w-0 bg-black min-h-0">
               <ViewerPanel
@@ -555,22 +975,39 @@ function StudioContent() {
                 onTogglePlay={togglePlay}
                 primaryVideoRef={primaryVideoRef}
                 secondaryVideoRef={secondaryVideoRef}
+                canvasRef={canvasRef}
               />
             </div>
           </div>
 
+          {/* RESIZE HANDLE TIMELINE */}
+          <div
+            className="h-1 hover:h-1.5 bg-zinc-900 hover:bg-[#D2FF44] cursor-row-resize transition-all z-50 shrink-0"
+            onPointerDown={(e) => {
+              isResizingTime.current = true;
+              e.currentTarget.setPointerCapture(e.pointerId);
+            }}
+            onPointerUp={(e) =>
+              e.currentTarget.releasePointerCapture(e.pointerId)
+            }
+          />
+
           {/* TIMELINE */}
-          <div className="h-[300px] border-t border-zinc-800 bg-[#1e1e20] shrink-0">
+          <div
+            style={{ height: timelineHeight }}
+            className="border-t border-zinc-800 bg-[#1e1e20] shrink-0"
+          >
             <TimelinePanel
               tracks={tracks}
               onRemoveItem={(id: string) => {
+                recordHistory();
                 setTracks((prev) =>
                   prev.map((t) => t.filter((i) => i.timelineId !== id)),
                 );
                 if (isPlaying) togglePlay();
               }}
               onUpdateItem={handleUpdateItem}
-              onAddTrack={() => setTracks((prev) => [...prev, []])}
+              onAddTrack={handleAddTrack}
               isPlaying={isPlaying}
               togglePlay={togglePlay}
               currentTime={currentTime}
@@ -582,6 +1019,16 @@ function StudioContent() {
               zoom={zoom}
               setZoom={setZoom}
               onSplit={handleSplit}
+              onUndo={undo}
+              onRedo={redo}
+              canUndo={history.length > 0}
+              canRedo={redoStack.length > 0}
+              trackSettings={trackSettings}
+              onDeleteTrack={handleDeleteTrack}
+              onRenameTrack={handleRenameTrack}
+              onResizeTrack={handleResizeTrack}
+              onToggleTrackLock={handleToggleTrackLock}
+              onToggleTrackVisibility={handleToggleTrackVisibility}
             />
           </div>
         </div>

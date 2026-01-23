@@ -20,33 +20,33 @@ export default function BottomBar() {
   return (
     <footer className="h-14 bg-[#09090b] border-t border-zinc-800 flex flex-row items-center px-6 gap-6 shrink-0 z-50 w-full justify-between">
       <div className="flex flex-row items-center gap-6">
-          {/* 1. HOME (Exits Project) */}
-          <button
-            onClick={() => router.push("/")}
-            className="p-2 rounded-xl bg-zinc-900 text-zinc-400 hover:text-white hover:bg-zinc-800 transition-all border border-zinc-800"
-            title="Back to Dashboard"
-          >
-            <Home size={18} />
-          </button>
+        {/* 1. HOME (Exits Project) */}
+        <button
+          onClick={() => router.push("/")}
+          className="p-2 rounded-xl bg-zinc-900 text-zinc-400 hover:text-white hover:bg-zinc-800 transition-all border border-zinc-800"
+          title="Back to Dashboard"
+        >
+          <Home size={18} />
+        </button>
 
-          <div className="w-px h-8 bg-zinc-800" />
+        <div className="w-px h-8 bg-zinc-800" />
 
-          {/* 2. SCENES (Project Root) */}
-          <NavButton
-            active={pathname.includes("/scenes")}
-            onClick={() => router.push(`/scenes?projectId=${projectId}`)}
-            icon={<Layers size={18} />}
-            label="Scenes"
-          />
+        {/* 2. SCENES (Project Root) */}
+        <NavButton
+          active={pathname.includes("/scenes")}
+          onClick={() => router.push(`/scenes?projectId=${projectId}`)}
+          icon={<Layers size={18} />}
+          label="Scenes"
+        />
 
-          {/* 3. STUDIO (Editor) */}
-          <NavButton
-            active={pathname.includes("/studio")}
-            onClick={() => {}} // User clicks specific scene to enter
-            icon={<Clapperboard size={18} />}
-            label="Studio"
-            disabled={!pathname.includes("/studio")}
-          />
+        {/* 3. STUDIO (Editor) */}
+        <NavButton
+          active={pathname.includes("/studio")}
+          onClick={() => {}} // User clicks specific scene to enter
+          icon={<Clapperboard size={18} />}
+          label="Studio"
+          disabled={!pathname.includes("/studio")}
+        />
       </div>
 
       {/* 4. SETTINGS */}
@@ -76,7 +76,9 @@ function NavButton({ active, onClick, icon, disabled = false, label }: any) {
       `}
     >
       {icon}
-      <span className={`text-xs font-medium ${active ? "text-black" : "text-zinc-400 group-hover:text-zinc-200"}`}>
+      <span
+        className={`text-xs font-medium ${active ? "text-black" : "text-zinc-400 group-hover:text-zinc-200"}`}
+      >
         {label}
       </span>
     </button>

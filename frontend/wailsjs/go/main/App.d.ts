@@ -16,6 +16,8 @@ export function DeleteScene(arg1:string,arg2:string):Promise<void>;
 
 export function DeleteShot(arg1:string,arg2:string,arg3:string):Promise<void>;
 
+export function DeleteWorkflow(arg1:string):Promise<string>;
+
 export function ExtractLastFrame(arg1:string):Promise<string>;
 
 export function GetComfyURL():Promise<string>;
@@ -28,13 +30,23 @@ export function GetScenes(arg1:string):Promise<Array<main.Scene>>;
 
 export function GetShots(arg1:string,arg2:string):Promise<Array<main.Shot>>;
 
+export function GetTimeline(arg1:string,arg2:string):Promise<main.TimelineData>;
+
 export function GetVideoDuration(arg1:string):Promise<number>;
+
+export function GetWorkflows():Promise<Array<main.Workflow>>;
+
+export function ImportWorkflow(arg1:string):Promise<string>;
 
 export function ReadImageBase64(arg1:string):Promise<string>;
 
-export function RenderShot(arg1:string,arg2:string,arg3:string):Promise<main.Shot>;
+export function RenameWorkflow(arg1:string,arg2:string):Promise<string>;
+
+export function RenderShot(arg1:string,arg2:string,arg3:string,arg4:string):Promise<main.Shot>;
 
 export function SaveShots(arg1:string,arg2:string,arg3:Array<main.Shot>):Promise<void>;
+
+export function SaveTimeline(arg1:string,arg2:string,arg3:main.TimelineData):Promise<void>;
 
 export function SelectAndSaveWorkflow():Promise<string>;
 

@@ -117,12 +117,35 @@ type Config struct {
 	ComfyURL string `json:"comfyUrl"`
 }
 
+type TrackSetting struct {
+	Locked  bool   `json:"locked"`
+	Visible bool   `json:"visible"`
+	Name    string `json:"name"`
+}
+
+type TimelineData struct {
+	Tracks        [][]map[string]interface{} `json:"tracks"`
+	TrackSettings []TrackSetting             `json:"trackSettings"`
+}
+
+type Workflow struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
 // --- HELPER FUNCTIONS ---
 
 // getAppDir returns the path to "Documents/MotionStudio"
 func (a *App) getAppDir() string {
 	homeDir, _ := os.UserHomeDir()
 	return filepath.Join(homeDir, "Documents", "MotionStudio")
+}
+
+// getWorkflowsDir returns the path to "Documents/MotionStudio/workflows"
+func (a *App) getWorkflowsDir() string {
+	dir := filepath.Join(a.getAppDir(), "workflows")
+	os.MkdirAll(dir, 0755)
+	return dir
 }
 
 func (a *App) saveProjectFile(p Project) {
@@ -320,6 +343,25 @@ func (a *App) CreateShot(sceneId string) Shot {
 	}
 }
 
+// --- TIMELINE FUNCTIONS ---
+
+func (a *App) SaveTimeline(projectId string, sceneId string, timeline TimelineData) {
+	path := filepath.Join(a.getAppDir(), projectId, "scenes", sceneId, "timeline.json")
+	data, _ := json.MarshalIndent(timeline, "", "  ")
+	os.WriteFile(path, data, 0644)
+}
+
+func (a *App) GetTimeline(projectId string, sceneId string) TimelineData {
+	path := filepath.Join(a.getAppDir(), projectId, "scenes", sceneId, "timeline.json")
+	data, err := os.ReadFile(path)
+	var timeline TimelineData
+	if err != nil {
+		return timeline
+	}
+	json.Unmarshal(data, &timeline)
+	return timeline
+}
+
 // GetComfyURL returns the current ComfyUI endpoint
 func (a *App) GetComfyURL() string {
 	return a.comfyURL
@@ -345,15 +387,28 @@ func (a *App) TestComfyConnection() bool {
 	return resp.StatusCode == 200
 }
 
-func (a *App) CheckWorkflowExists() bool {
-	path := filepath.Join(a.getAppDir(), "workflow.json")
-	_, err := os.Stat(path)
-	return err == nil
+func (a *App) GetWorkflows() []Workflow {
+	dir := a.getWorkflowsDir()
+	entries, _ := os.ReadDir(dir)
+	var workflows []Workflow
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".json") {
+			name := strings.TrimSuffix(e.Name(), ".json")
+			workflows = append(workflows, Workflow{ID: name, Name: name})
+		}
+	}
+	// Ensure default exists if list is empty
+	if len(workflows) == 0 {
+		defaultPath := filepath.Join(dir, "default.json")
+		a.createDefaultWorkflow(defaultPath)
+		workflows = append(workflows, Workflow{ID: "default", Name: "default"})
+	}
+	return workflows
 }
 
-// SelectAndSaveWorkflow opens a file dialog for the user to select a workflow.json
-// and copies it to the app directory.
-func (a *App) SelectAndSaveWorkflow() string {
+// ImportWorkflow opens a file dialog for the user to select a workflow.json
+// and copies it to the workflows directory with the given name.
+func (a *App) ImportWorkflow(name string) string {
 	selection, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
 		Title: "Select ComfyUI Workflow (API Format)",
 		Filters: []runtime.FileFilter{
@@ -369,7 +424,18 @@ func (a *App) SelectAndSaveWorkflow() string {
 		return "Error reading file"
 	}
 
-	dest := filepath.Join(a.getAppDir(), "workflow.json")
+	// Simple sanitization
+	safeName := strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			return r
+		}
+		return '_'
+	}, name)
+	if safeName == "" {
+		safeName = "workflow_" + fmt.Sprintf("%d", time.Now().Unix())
+	}
+
+	dest := filepath.Join(a.getWorkflowsDir(), safeName+".json")
 	err = os.WriteFile(dest, data, 0644)
 	if err != nil {
 		return "Error saving workflow"
@@ -378,11 +444,60 @@ func (a *App) SelectAndSaveWorkflow() string {
 	return "Success"
 }
 
+func (a *App) RenameWorkflow(oldName, newName string) string {
+	dir := a.getWorkflowsDir()
+	oldPath := filepath.Join(dir, oldName+".json")
+
+	// Simple sanitization
+	safeName := strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			return r
+		}
+		return '_'
+	}, newName)
+	if safeName == "" {
+		return "Invalid name"
+	}
+
+	newPath := filepath.Join(dir, safeName+".json")
+	if _, err := os.Stat(newPath); err == nil {
+		return "Name already exists"
+	}
+
+	err := os.Rename(oldPath, newPath)
+	if err != nil {
+		return "Error renaming file"
+	}
+	return "Success"
+}
+
+func (a *App) DeleteWorkflow(name string) string {
+	if name == "default" {
+		return "Cannot delete default workflow"
+	}
+	dir := a.getWorkflowsDir()
+	path := filepath.Join(dir, name+".json")
+	err := os.Remove(path)
+	if err != nil {
+		return "Error deleting file"
+	}
+	return "Success"
+}
+
+// --- LEGACY SUPPORT (Fixes build errors in SettingsProvider) ---
+
+func (a *App) CheckWorkflowExists() bool {
+	return len(a.GetWorkflows()) > 0
+}
+
+func (a *App) SelectAndSaveWorkflow() string {
+	return a.ImportWorkflow("imported_workflow")
+}
 
 // --- COMFYUI INTEGRATION ---
 
 // RenderShot orchestrates the ComfyUI generation
-func (a *App) RenderShot(projectId string, sceneId string, shotId string) (Shot, error) {
+func (a *App) RenderShot(projectId string, sceneId string, shotId string, workflowName string) (Shot, error) {
 	// 1. Get Shot
 	shots := a.GetShots(projectId, sceneId)
 	var shot *Shot
@@ -401,9 +516,16 @@ func (a *App) RenderShot(projectId string, sceneId string, shotId string) (Shot,
 	}
 
 	// 2. Ensure Workflow Template Exists
-	workflowPath := filepath.Join(a.getAppDir(), "workflow.json")
+	if workflowName == "" {
+		workflowName = "default"
+	}
+	workflowPath := filepath.Join(a.getWorkflowsDir(), workflowName+".json")
 	if _, err := os.Stat(workflowPath); os.IsNotExist(err) {
-		a.createDefaultWorkflow(workflowPath)
+		if workflowName == "default" {
+			a.createDefaultWorkflow(workflowPath)
+		} else {
+			return *shot, fmt.Errorf("workflow %s not found", workflowName)
+		}
 	}
 
 	// 3. Upload Image to ComfyUI
@@ -958,7 +1080,14 @@ func StartStreamServer() {
 		http.ServeFile(w, r, path)
 	})
 
+	// Serve local video files for pre-loading
+	mux.HandleFunc("/video/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		// /video/C:/Path/To/File.mp4 -> C:/Path/To/File.mp4
+		path := strings.TrimPrefix(r.URL.Path, "/video/")
+		http.ServeFile(w, r, path)
+	})
+
 	fmt.Println("🎥 Video Engine listening on http://localhost:3456/stream")
 	http.ListenAndServe(":3456", mux)
 }
-

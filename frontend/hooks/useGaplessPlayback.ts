@@ -13,33 +13,47 @@ interface PlaybackShot {
 
 interface UseGaplessPlaybackProps {
   tracks: any[][]; // Accepts the tracks from your page state
+  trackSettings: { locked: boolean; visible: boolean; name: string }[];
   totalDuration: number;
+  videoBlobs?: Map<string, string>;
 }
 
 // HELPER: Convert local file path to a browser-accessible URL
 const convertFileSrc = (filePath: string) => {
   if (!filePath) return "";
   if (filePath.startsWith("http")) return filePath;
+  if (filePath.startsWith("blob:")) return filePath;
 
   // IMPORTANT: We prepend "/video/" so the Go Handler knows to pick this up.
   // We do NOT encodeURIComponent the whole path because Windows drive colons (C:)
   // sometimes get messy if over-encoded.
   // If your paths have spaces, you might need encodeURI(filePath).
-  return "/video/" + filePath;
+  // ✅ Use the Go server explicitly to ensure we hit the file handler
+  return `http://localhost:3456/video/${filePath.replace(/\\/g, "/")}`;
 };
 
 export function useGaplessPlayback({
   tracks,
+  trackSettings,
   totalDuration,
+  videoBlobs,
 }: UseGaplessPlaybackProps) {
   const primaryVideoRef = useRef<HTMLVideoElement>(null);
   const secondaryVideoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const currentTimeRef = useRef(0);
+  const activePlayerRef = useRef<"primary" | "secondary">("primary");
 
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [activePlayer, setActivePlayer] = useState<"primary" | "secondary">(
     "primary",
   );
+
+  const updateActivePlayer = (p: "primary" | "secondary") => {
+    activePlayerRef.current = p;
+    setActivePlayer(p);
+  };
 
   // Track loaded state to avoid thrashing src
   const loadedShotIds = useRef<{
@@ -57,6 +71,9 @@ export function useGaplessPlayback({
     (time: number) => {
       // Iterate tracks from TOP (highest index) to BOTTOM (0)
       for (let t = tracks.length - 1; t >= 0; t--) {
+        // Skip disabled tracks
+        if (trackSettings[t] && !trackSettings[t].visible) continue;
+
         const track = tracks[t];
         if (!track) continue;
 
@@ -76,13 +93,15 @@ export function useGaplessPlayback({
       }
       return null;
     },
-    [tracks],
+    [tracks, trackSettings],
   );
 
   // 2. LOAD VIDEO (No Base64!)
   const loadShot = (
     shot: PlaybackShot,
     playerType: "primary" | "secondary",
+    startOffset: number = 0,
+    forceSeek: boolean = false,
   ) => {
     const videoEl =
       playerType === "primary"
@@ -90,47 +109,108 @@ export function useGaplessPlayback({
         : secondaryVideoRef.current;
     if (!videoEl) return;
 
-    if (loadedShotIds.current[playerType] === shot.id) return; // Already loaded
+    const isNewSource = loadedShotIds.current[playerType] !== shot.id;
 
-    // DIRECT FILE SOURCE
-    // This removes the massive CPU spike of Base64 decoding
-    const src = convertFileSrc(shot.outputVideo);
+    if (isNewSource) {
+      // DIRECT FILE SOURCE
+      // ✅ Use Blob URL if available (Pre-loaded), otherwise fallback to file server
+      const blobUrl = videoBlobs?.get(shot.outputVideo);
+      const src = blobUrl || convertFileSrc(shot.outputVideo);
 
-    videoEl.src = src;
-    videoEl.load();
-    loadedShotIds.current[playerType] = shot.id;
+      videoEl.src = src;
+      videoEl.load();
+      loadedShotIds.current[playerType] = shot.id;
+
+      // ✅ AGGRESSIVE PRE-SEEK: Set time immediately so buffer starts at correct point
+      try {
+        videoEl.currentTime = startOffset;
+      } catch (e) {
+        // Ignore if metadata not loaded yet, event listener will catch it
+      }
+
+      const onLoaded = () => {
+        videoEl.currentTime = startOffset;
+      };
+      videoEl.addEventListener("loadedmetadata", onLoaded, { once: true });
+    } else if (forceSeek) {
+      // If reusing the player (e.g. looping same shot), ensure we seek to the new start
+      if (Math.abs(videoEl.currentTime - startOffset) > 0.05) {
+        videoEl.currentTime = startOffset;
+      }
+    }
   };
+
+  // HELPER: Draw to Canvas
+  const renderFrame = useCallback(
+    (time: number, force: boolean = false) => {
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const ctx = canvas.getContext("2d", { alpha: false }); // Optimize for no transparency
+      if (!ctx) return;
+
+      // Check if we are in a gap
+      const activeData = getShotAtTime(time);
+
+      if (!activeData) {
+        // GAP: Draw Black
+        ctx.fillStyle = "black";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        return;
+      }
+
+      const activeEl =
+        activePlayerRef.current === "primary"
+          ? primaryVideoRef.current
+          : secondaryVideoRef.current;
+
+      // ✅ PREVENT FLASHING:
+      // If playing, wait for HAVE_FUTURE_DATA (3) to ensure smooth playback.
+      // If paused (scrubbing), HAVE_CURRENT_DATA (2) is sufficient.
+      // If forced (seeked event), accept 2 to show frame immediately.
+      const minReady = isPlaying && !force ? 3 : 2;
+
+      if (activeEl && activeEl.readyState >= minReady) {
+        ctx.drawImage(activeEl, 0, 0, canvas.width, canvas.height);
+      }
+    },
+    [getShotAtTime, isPlaying],
+  );
 
   // 3. PLAYBACK LOOP (Animation Frame)
   useEffect(() => {
+    if (!isPlaying) return;
+
     let animationFrameId: number;
     let lastTick = performance.now();
 
-    const loop = (now: number) => {
-      if (!isPlaying) return;
+    // Sync ref on start
+    currentTimeRef.current = currentTime;
 
+    const loop = (now: number) => {
       const delta = (now - lastTick) / 1000; // Seconds passed
       lastTick = now;
 
-      setCurrentTime((prev) => {
-        const nextTime = prev + delta;
-        if (nextTime >= totalDuration && totalDuration > 0) {
-          setIsPlaying(false);
-          return totalDuration;
-        }
-        return nextTime;
-      });
+      let nextTime = currentTimeRef.current + delta;
 
+      if (nextTime >= totalDuration && totalDuration > 0) {
+        setIsPlaying(false);
+        loadedShotIds.current = { primary: null, secondary: null };
+        return;
+      }
+
+      currentTimeRef.current = nextTime;
+      setCurrentTime(nextTime);
+
+      renderFrame(nextTime); // Draw every frame during playback
       animationFrameId = requestAnimationFrame(loop);
     };
 
-    if (isPlaying) {
-      lastTick = performance.now();
-      animationFrameId = requestAnimationFrame(loop);
-    }
+    animationFrameId = requestAnimationFrame(loop);
 
     return () => cancelAnimationFrame(animationFrameId);
-  }, [isPlaying, totalDuration]);
+    // Note: currentTime is intentionally omitted from deps to prevent loop restart on every frame
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPlaying, totalDuration, renderFrame]);
 
   // 4. SYNC PLAYERS
   useEffect(() => {
@@ -155,10 +235,12 @@ export function useGaplessPlayback({
         // Not loaded anywhere? Load into the 'other' player to prepare for switch
         // or fallback to switching immediately if we missed the preload window.
         targetPlayer = activePlayer === "primary" ? "secondary" : "primary";
-        loadShot(shot, targetPlayer);
+        loadShot(shot, targetPlayer, offset, true);
       }
 
-      if (activePlayer !== targetPlayer) setActivePlayer(targetPlayer);
+      if (activePlayer !== targetPlayer) {
+        updateActivePlayer(targetPlayer);
+      }
 
       const activeEl = targetPlayer === "primary" ? p : s;
       const otherEl = targetPlayer === "primary" ? s : p;
@@ -166,8 +248,13 @@ export function useGaplessPlayback({
       // Sync Active Player
       if (activeEl) {
         const drift = Math.abs(activeEl.currentTime - offset);
-        if (!isPlaying || drift > 0.2) {
-          if (Number.isFinite(offset)) activeEl.currentTime = offset;
+        // ✅ RELAX DRIFT CHECK: Prevent micro-stutters during playback
+        // If playing, allow more drift (0.25s) before forcing a seek.
+        const tolerance = isPlaying ? 0.5 : 0.05;
+        if (drift > tolerance) {
+          if (Number.isFinite(offset) && activeEl.readyState >= 1) {
+            activeEl.currentTime = offset;
+          }
         }
 
         if (isPlaying && activeEl.paused) {
@@ -176,15 +263,18 @@ export function useGaplessPlayback({
           activeEl.pause();
         }
 
-        activeEl.style.opacity = "1";
-        activeEl.style.zIndex = "10";
+        activeEl.muted = false;
+
+        // Force a draw immediately after sync (for scrubbing/pausing)
+        if (!isPlaying) {
+          requestAnimationFrame(() => renderFrame(currentTime));
+        }
       }
 
       // Sync Inactive Player (Pause & Hide)
       if (otherEl) {
-        otherEl.style.opacity = "0";
-        otherEl.style.zIndex = "0";
         otherEl.pause();
+        otherEl.muted = true;
       }
     } else {
       // GAP: Hide both
@@ -193,6 +283,10 @@ export function useGaplessPlayback({
         p.pause();
       }
       if (s) {
+        // Ensure canvas is cleared during gaps when scrubbing
+        if (!isPlaying) {
+          requestAnimationFrame(() => renderFrame(currentTime));
+        }
         s.style.opacity = "0";
         s.pause();
       }
@@ -203,11 +297,14 @@ export function useGaplessPlayback({
     let nextShot: PlaybackShot | null = null;
     let minDiff = Infinity;
 
-    for (const track of tracks) {
+    for (let t = 0; t < tracks.length; t++) {
+      if (trackSettings[t] && !trackSettings[t].visible) continue;
+
+      const track = tracks[t];
       for (const shot of track) {
         const sTime = shot.startTime ?? 0;
         // Look for shots starting in the future (relative to current clip end)
-        if (sTime >= currentShotEnd - 0.05) {
+        if (sTime >= currentShotEnd - 0.5) {
           // Don't preload the current shot again
           if (activeData && shot.id === activeData.shot.id) continue;
 
@@ -225,21 +322,63 @@ export function useGaplessPlayback({
       const preloadPlayer =
         targetPlayer === "primary" ? "secondary" : "primary";
       if (loadedShotIds.current[preloadPlayer] !== nextShot.id) {
-        loadShot(nextShot, preloadPlayer);
+        loadShot(nextShot, preloadPlayer, nextShot.trimStart || 0, true);
       }
     }
-  }, [currentTime, isPlaying, getShotAtTime, activePlayer, tracks]);
+  }, [
+    currentTime,
+    isPlaying,
+    getShotAtTime,
+    activePlayer,
+    tracks,
+    trackSettings,
+    videoBlobs,
+    renderFrame,
+  ]);
+
+  // 5. EVENT LISTENERS (NEW)
+  useEffect(() => {
+    const onFrameReady = () => {
+      // Force a draw when new data is available (seek complete, or initial load)
+      requestAnimationFrame(() => renderFrame(currentTimeRef.current, true));
+    };
+
+    const p = primaryVideoRef.current;
+    const s = secondaryVideoRef.current;
+
+    if (p) {
+      p.addEventListener("seeked", onFrameReady);
+      p.addEventListener("loadeddata", onFrameReady); // ✅ Catch initial load
+    }
+    if (s) {
+      s.addEventListener("seeked", onFrameReady);
+      s.addEventListener("loadeddata", onFrameReady); // ✅ Catch initial load
+    }
+
+    return () => {
+      if (p) {
+        p.removeEventListener("seeked", onFrameReady);
+        p.removeEventListener("loadeddata", onFrameReady);
+      }
+      if (s) {
+        s.removeEventListener("seeked", onFrameReady);
+        s.removeEventListener("loadeddata", onFrameReady);
+      }
+    };
+  }, [renderFrame]);
 
   const togglePlay = () => setIsPlaying(!isPlaying);
 
   const seekTo = (time: number) => {
     const t = Math.max(0, Math.min(time, totalDuration));
     setCurrentTime(t);
+    currentTimeRef.current = t;
   };
 
   return {
     primaryVideoRef,
     secondaryVideoRef,
+    canvasRef,
     activePlayer,
     isPlaying,
     togglePlay,

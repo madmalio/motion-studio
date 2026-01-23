@@ -30,6 +30,10 @@ export function DeleteShot(arg1, arg2, arg3) {
   return window['go']['main']['App']['DeleteShot'](arg1, arg2, arg3);
 }
 
+export function DeleteWorkflow(arg1) {
+  return window['go']['main']['App']['DeleteWorkflow'](arg1);
+}
+
 export function ExtractLastFrame(arg1) {
   return window['go']['main']['App']['ExtractLastFrame'](arg1);
 }
@@ -54,20 +58,40 @@ export function GetShots(arg1, arg2) {
   return window['go']['main']['App']['GetShots'](arg1, arg2);
 }
 
+export function GetTimeline(arg1, arg2) {
+  return window['go']['main']['App']['GetTimeline'](arg1, arg2);
+}
+
 export function GetVideoDuration(arg1) {
   return window['go']['main']['App']['GetVideoDuration'](arg1);
+}
+
+export function GetWorkflows() {
+  return window['go']['main']['App']['GetWorkflows']();
+}
+
+export function ImportWorkflow(arg1) {
+  return window['go']['main']['App']['ImportWorkflow'](arg1);
 }
 
 export function ReadImageBase64(arg1) {
   return window['go']['main']['App']['ReadImageBase64'](arg1);
 }
 
-export function RenderShot(arg1, arg2, arg3) {
-  return window['go']['main']['App']['RenderShot'](arg1, arg2, arg3);
+export function RenameWorkflow(arg1, arg2) {
+  return window['go']['main']['App']['RenameWorkflow'](arg1, arg2);
+}
+
+export function RenderShot(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['RenderShot'](arg1, arg2, arg3, arg4);
 }
 
 export function SaveShots(arg1, arg2, arg3) {
   return window['go']['main']['App']['SaveShots'](arg1, arg2, arg3);
+}
+
+export function SaveTimeline(arg1, arg2, arg3) {
+  return window['go']['main']['App']['SaveTimeline'](arg1, arg2, arg3);
 }
 
 export function SelectAndSaveWorkflow() {

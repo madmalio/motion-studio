@@ -107,6 +107,16 @@ const LibraryPanel = memo(function LibraryPanel({
               onDelete={(e: any) => handleDeleteShot(e, shot.id)}
             />
           ))}
+          <button
+            onClick={handleAddShot}
+            className="aspect-video rounded border border-zinc-800 border-dashed bg-zinc-900/30 hover:bg-zinc-900 hover:border-[#D2FF44] hover:text-[#D2FF44] flex flex-col items-center justify-center gap-2 text-zinc-600 transition-all group"
+          >
+            <Plus
+              size={24}
+              className="group-hover:scale-110 transition-transform"
+            />
+            <span className="text-xs font-medium">Add Shot</span>
+          </button>
         </div>
       </div>
     </div>

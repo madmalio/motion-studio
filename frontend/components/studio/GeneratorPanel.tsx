@@ -1,12 +1,13 @@
 "use client";
 
-import { ImageIcon, Wand2, Settings, Loader2, Play } from "lucide-react";
-import { memo } from "react";
+import { ImageIcon, Wand2, Loader2, Play, FileJson } from "lucide-react";
+import { memo, useEffect, useState } from "react";
 import {
   SelectImage,
   ReadImageBase64,
   RenderShot,
   SetProjectThumbnail,
+  GetWorkflows,
 } from "../../wailsjs/go/main/App";
 
 const GeneratorPanel = memo(function GeneratorPanel({
@@ -19,6 +20,21 @@ const GeneratorPanel = memo(function GeneratorPanel({
   setVideoCache,
   setVideoSrc,
 }: any) {
+  const [workflows, setWorkflows] = useState<{ id: string; name: string }[]>(
+    [],
+  );
+  const [selectedWorkflow, setSelectedWorkflow] = useState<string>("");
+
+  useEffect(() => {
+    loadWorkflows();
+  }, []);
+
+  const loadWorkflows = async () => {
+    const wfs = await GetWorkflows();
+    setWorkflows(wfs);
+    if (wfs.length > 0 && !selectedWorkflow) setSelectedWorkflow(wfs[0].id);
+  };
+
   const handleUpload = async () => {
     const path = await SelectImage();
     if (path) {
@@ -37,7 +53,12 @@ const GeneratorPanel = memo(function GeneratorPanel({
     if (!activeShot?.id || !project || !scene) return;
     setIsRendering(true);
     try {
-      const updatedShot = await RenderShot(project.id, scene.id, activeShot.id);
+      const updatedShot = await RenderShot(
+        project.id,
+        scene.id,
+        activeShot.id,
+        selectedWorkflow,
+      );
       if (updatedShot.outputVideo) {
         const b64 = await ReadImageBase64(updatedShot.outputVideo);
         setVideoCache(updatedShot.id, b64);
@@ -107,25 +128,21 @@ const GeneratorPanel = memo(function GeneratorPanel({
 
       {/* Settings */}
       <div className="space-y-4">
-        <h3 className="text-xs font-bold text-zinc-500 uppercase tracking-wider flex items-center gap-2">
-          <Settings size={12} /> Settings
-        </h3>
         <div className="space-y-2">
-          <div className="flex justify-between text-xs text-zinc-400">
-            <label>Motion Strength</label>
-            <span>{activeShot.motionStrength}</span>
-          </div>
-          <input
-            type="range"
-            min="1"
-            max="255"
-            className="w-full accent-[#D2FF44] h-1 bg-zinc-800 rounded appearance-none"
-            value={activeShot.motionStrength}
-            onChange={(e) =>
-              updateActiveShot({ motionStrength: parseInt(e.target.value) })
-            }
-          />
+          <label className="text-xs text-zinc-400">Workflow</label>
+          <select
+            className="w-full bg-zinc-900 border border-zinc-800 rounded px-2 py-1 text-xs text-white outline-none focus:border-[#D2FF44]"
+            value={selectedWorkflow}
+            onChange={(e) => setSelectedWorkflow(e.target.value)}
+          >
+            {workflows.map((wf) => (
+              <option key={wf.id} value={wf.id}>
+                {wf.name}
+              </option>
+            ))}
+          </select>
         </div>
+
         <div className="space-y-2">
           <div className="flex justify-between text-xs text-zinc-400">
             <label>Seed</label>

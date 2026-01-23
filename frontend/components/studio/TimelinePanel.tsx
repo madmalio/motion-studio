@@ -9,13 +9,18 @@ import {
   Plus,
   Lock,
   Eye,
+  EyeOff,
   Trash2,
+  Unlock,
   Scissors,
+  MousePointer2,
+  Undo2,
+  Redo2,
 } from "lucide-react";
 import { useDroppable, useDraggable } from "@dnd-kit/core";
 import { CSS } from "@dnd-kit/utilities";
 
-const LEFT_PANEL_W = 96; // px (w-24)
+const LEFT_PANEL_W = 160; // px
 const LEFT_PANEL_BG = "bg-[#2c2f33]";
 const LEFT_PANEL_BORDER = "border-r border-zinc-700";
 
@@ -28,21 +33,32 @@ function TimelineItemComponent({
   onUpdate,
   onClick,
   zoom,
+  activeTool,
+  onSplitItem,
+  locked,
 }: any) {
   const { attributes, listeners, setNodeRef, transform, isDragging } =
     useDraggable({
       id,
       data: { type: "timeline-item" }, // ✅ important
+      disabled: activeTool === "split" || locked,
     });
 
   const [isResizing, setIsResizing] = useState(false);
   const [localState, setLocalState] = useState({ width, left });
+  const [splitHoverX, setSplitHoverX] = useState<number | null>(null);
 
   useEffect(() => {
-    if (!isResizing) setLocalState({ width, left });
+    if (!isResizing) {
+      setLocalState((prev) => {
+        if (prev.width === width && prev.left === left) return prev;
+        return { width, left };
+      });
+    }
   }, [width, left, isResizing]);
 
   const handleResizeStart = (e: React.PointerEvent) => {
+    if (activeTool === "split" || locked) return;
     e.stopPropagation();
     e.preventDefault();
     setIsResizing(true);
@@ -73,6 +89,7 @@ function TimelineItemComponent({
   };
 
   const handleResizeStartLeft = (e: React.PointerEvent) => {
+    if (activeTool === "split" || locked) return;
     e.stopPropagation();
     e.preventDefault();
     setIsResizing(true);
@@ -147,6 +164,29 @@ function TimelineItemComponent({
     window.addEventListener("pointerup", onUp);
   };
 
+  const handlePointerMove = (e: React.PointerEvent) => {
+    if (activeTool === "split") {
+      const rect = e.currentTarget.getBoundingClientRect();
+      setSplitHoverX(e.clientX - rect.left);
+    }
+  };
+
+  const handlePointerLeave = () => {
+    if (activeTool === "split") setSplitHoverX(null);
+  };
+
+  const handleClick = (e: React.MouseEvent) => {
+    if (activeTool === "split") {
+      e.stopPropagation();
+      const rect = e.currentTarget.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const time = data.startTime + x / zoom;
+      if (onSplitItem) onSplitItem(data.timelineId, time);
+    } else {
+      onClick && onClick();
+    }
+  };
+
   const style = {
     transform: CSS.Translate.toString(transform),
     left: `${isResizing ? localState.left : left}px`,
@@ -165,9 +205,11 @@ function TimelineItemComponent({
       {...attributes}
       className={`
         absolute top-0 bottom-0 group flex flex-col select-none 
-        cursor-grab active:cursor-grabbing
+        ${activeTool === "split" ? "cursor-crosshair" : "cursor-grab active:cursor-grabbing"}
       `}
-      onClick={onClick}
+      onClick={handleClick}
+      onPointerMove={handlePointerMove}
+      onPointerLeave={handlePointerLeave}
     >
       {/* Inner Content Container */}
       <div className="absolute inset-0 flex flex-col overflow-hidden bg-[#375a6c] border border-[#213845] rounded-sm">
@@ -184,40 +226,53 @@ function TimelineItemComponent({
           {data.name} ({data.duration?.toFixed(2)}s)
         </div>
 
-        <div
-          className={`absolute inset-0 ring-inset ring-2 pointer-events-none transition-all ${
-            data.isActive ? "ring-orange-500" : "ring-transparent group-hover:ring-white/30"
-          }`}
-        />
+        <div className="absolute inset-0 ring-inset ring-2 pointer-events-none transition-all ring-transparent group-hover:ring-white/30" />
 
-        <button
-          className="absolute top-1 right-1 bg-black/60 hover:bg-red-600 text-white p-1 rounded z-50 transition-colors opacity-0 group-hover:opacity-100"
-          onPointerDown={(e) => {
-            e.stopPropagation();
-            e.preventDefault();
-            onRemove();
-          }}
-          title="Remove Clip"
-        >
-          <Trash2 size={10} />
-        </button>
+        {activeTool === "split" && splitHoverX !== null && (
+          <div
+            className="absolute top-0 bottom-0 w-px bg-red-500 z-[60] pointer-events-none"
+            style={{ left: splitHoverX }}
+          >
+            <div className="absolute -top-3 -left-1.5 text-red-500">
+              <Scissors size={12} />
+            </div>
+          </div>
+        )}
+
+        {!locked && (
+          <button
+            className="absolute top-1 right-1 bg-black/60 hover:bg-red-600 text-white p-1 rounded z-50 transition-colors opacity-0 group-hover:opacity-100"
+            onPointerDown={(e) => {
+              e.stopPropagation();
+              e.preventDefault();
+              onRemove();
+            }}
+            title="Remove Clip"
+          >
+            <Trash2 size={10} />
+          </button>
+        )}
       </div>
 
       {/* Resize Handle LEFT */}
-      <div
-        className="absolute left-0 top-0 bottom-0 w-2 -translate-x-1/2 cursor-ew-resize z-50 opacity-0 group-hover:opacity-100 hover:bg-white/20 flex items-center justify-center"
-        onPointerDown={handleResizeStartLeft}
-      >
-        <div className="w-0.5 h-4 bg-white/50 rounded-full" />
-      </div>
+      {!locked && (
+        <div
+          className="absolute left-0 top-0 bottom-0 w-2 -translate-x-1/2 cursor-ew-resize z-50 opacity-0 group-hover:opacity-100 hover:bg-white/20 flex items-center justify-center"
+          onPointerDown={handleResizeStartLeft}
+        >
+          <div className="w-0.5 h-4 bg-white/50 rounded-full" />
+        </div>
+      )}
 
       {/* Resize Handle RIGHT */}
-      <div
-        className="absolute right-0 top-0 bottom-0 w-2 translate-x-1/2 cursor-ew-resize z-50 opacity-0 group-hover:opacity-100 hover:bg-white/20 flex items-center justify-center"
-        onPointerDown={handleResizeStart}
-      >
-        <div className="w-0.5 h-4 bg-white/50 rounded-full" />
-      </div>
+      {!locked && (
+        <div
+          className="absolute right-0 top-0 bottom-0 w-2 translate-x-1/2 cursor-ew-resize z-50 opacity-0 group-hover:opacity-100 hover:bg-white/20 flex items-center justify-center"
+          onPointerDown={handleResizeStart}
+        >
+          <div className="w-0.5 h-4 bg-white/50 rounded-full" />
+        </div>
+      )}
     </div>
   );
 }
@@ -231,16 +286,21 @@ function TrackDroppable({
   onShotClick,
   zoom,
   activeShotId,
+  activeTool,
+  onSplitItem,
+  locked,
+  visible,
 }: any) {
   const { setNodeRef } = useDroppable({
     id,
     data: { type: "track", trackIndex },
+    disabled: locked,
   });
 
   return (
     <div
       ref={setNodeRef}
-      className="absolute inset-0 w-full h-full min-h-[50px]"
+      className={`absolute inset-0 w-full h-full min-h-[50px] ${!visible ? "opacity-40 grayscale" : ""}`}
     >
       {items.map((item: any) => (
         <TimelineItemComponent
@@ -258,6 +318,9 @@ function TrackDroppable({
           onUpdate={(updates: any) => onUpdateItem(item.timelineId, updates)}
           onClick={() => onShotClick && onShotClick(item.id)}
           zoom={zoom}
+          activeTool={activeTool}
+          onSplitItem={onSplitItem}
+          locked={locked}
         />
       ))}
     </div>
@@ -281,7 +344,22 @@ interface TimelinePanelProps {
   activeShotId?: string;
   onShotClick?: (id: string) => void;
   shots?: any[];
-  onSplit?: () => void;
+  onSplit?: (itemId: string, time: number) => void;
+  onUndo?: () => void;
+  onRedo?: () => void;
+  canUndo?: boolean;
+  canRedo?: boolean;
+  trackSettings?: {
+    locked: boolean;
+    visible: boolean;
+    name: string;
+    height?: number;
+  }[];
+  onDeleteTrack?: (index: number) => void;
+  onRenameTrack?: (index: number, newName: string) => void;
+  onResizeTrack?: (index: number, newHeight: number) => void;
+  onToggleTrackLock?: (index: number) => void;
+  onToggleTrackVisibility?: (index: number) => void;
 }
 
 export default function TimelinePanel({
@@ -299,7 +377,35 @@ export default function TimelinePanel({
   activeShotId,
   onSplit,
   onShotClick,
+  onUndo,
+  onRedo,
+  canUndo = false,
+  canRedo = false,
+  trackSettings,
+  onDeleteTrack,
+  onRenameTrack,
+  onResizeTrack,
+  onToggleTrackLock,
+  onToggleTrackVisibility,
 }: TimelinePanelProps) {
+  const [activeTool, setActiveTool] = useState<"select" | "split">("select");
+  const isHovering = useRef(false);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (!isHovering.current) return;
+      if (
+        e.target instanceof HTMLInputElement ||
+        e.target instanceof HTMLTextAreaElement
+      )
+        return;
+      if (e.key.toLowerCase() === "a") setActiveTool("select");
+      if (e.key.toLowerCase() === "b") setActiveTool("split");
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
+
   const formatTime = (seconds: number) => {
     const m = Math.floor(seconds / 60);
     const s = Math.floor(seconds % 60);
@@ -372,8 +478,38 @@ export default function TimelinePanel({
     seekTo(t);
   };
 
+  const handleTrackResizeStart = (
+    e: React.PointerEvent,
+    index: number,
+    startHeight: number,
+  ) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const startY = e.clientY;
+
+    const onMove = (ev: PointerEvent) => {
+      const diff = ev.clientY - startY;
+      const newHeight = Math.max(48, startHeight + diff); // Min height 48px
+      if (onResizeTrack) onResizeTrack(index, newHeight);
+    };
+
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      document.body.style.cursor = "default";
+    };
+
+    document.body.style.cursor = "row-resize";
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
+
   return (
-    <div className="h-full w-full bg-[#1e1e20] flex flex-col font-sans select-none border-t border-black">
+    <div
+      className="h-full w-full bg-[#1e1e20] flex flex-col font-sans select-none border-t border-black"
+      onMouseEnter={() => (isHovering.current = true)}
+      onMouseLeave={() => (isHovering.current = false)}
+    >
       {/* CONTROL BAR */}
       <div className="h-10 border-b border-black/40 flex items-center px-4 bg-[#262629] shrink-0 justify-between relative">
         <div className="flex items-center gap-2">
@@ -385,10 +521,54 @@ export default function TimelinePanel({
           </button>
 
           <button
-            onClick={onSplit}
-            className="flex items-center gap-1 text-[10px] bg-zinc-800 hover:bg-zinc-700 px-2 py-1 rounded text-zinc-300"
+            onClick={() => setActiveTool("select")}
+            title="Select Tool (A)"
+            className={`flex items-center gap-1 text-[10px] px-2 py-1 rounded ${
+              activeTool === "select"
+                ? "bg-[#D2FF44] text-black hover:bg-[#b8e63b]"
+                : "bg-zinc-800 text-zinc-300 hover:bg-zinc-700"
+            }`}
+          >
+            <MousePointer2 size={10} /> Select
+          </button>
+
+          <button
+            onClick={() => setActiveTool("split")}
+            title="Split Tool (B)"
+            className={`flex items-center gap-1 text-[10px] px-2 py-1 rounded ${
+              activeTool === "split"
+                ? "bg-[#D2FF44] text-black hover:bg-[#b8e63b]"
+                : "bg-zinc-800 text-zinc-300 hover:bg-zinc-700"
+            }`}
           >
             <Scissors size={10} /> Split
+          </button>
+
+          <div className="w-px h-4 bg-zinc-700 mx-2" />
+
+          <button
+            onClick={() => onUndo && onUndo()}
+            disabled={!canUndo}
+            className={`p-1 rounded ${
+              canUndo
+                ? "text-zinc-400 hover:text-white hover:bg-zinc-700"
+                : "text-zinc-600 cursor-not-allowed"
+            }`}
+            title="Undo (Ctrl+Z)"
+          >
+            <Undo2 size={14} />
+          </button>
+          <button
+            onClick={() => onRedo && onRedo()}
+            disabled={!canRedo}
+            className={`p-1 rounded ${
+              canRedo
+                ? "text-zinc-400 hover:text-white hover:bg-zinc-700"
+                : "text-zinc-600 cursor-not-allowed"
+            }`}
+            title="Redo (Ctrl+Shift+Z)"
+          >
+            <Redo2 size={14} />
           </button>
 
           <div className="flex items-center gap-1 ml-4 border-l border-zinc-700 pl-4">
@@ -420,16 +600,16 @@ export default function TimelinePanel({
           </button>
           <button
             onClick={togglePlay}
-            className={`w-8 h-8 flex items-center justify-center rounded-full transition-all ${
+            className={`w-8 h-8 flex items-center justify-center rounded-full transition-all border ${
               isPlaying
-                ? "bg-[#D2FF44] text-black scale-110"
-                : "bg-white text-black hover:bg-gray-200"
+                ? "bg-[#D2FF44] border-[#D2FF44] text-black scale-110"
+                : "bg-[#262629] border-[#D2FF44] text-[#D2FF44] hover:bg-zinc-700"
             }`}
           >
             {isPlaying ? (
               <Pause size={16} fill="black" />
             ) : (
-              <Play size={16} fill="black" className="ml-0.5" />
+              <Play size={16} fill="#D2FF44" className="ml-0.5" />
             )}
           </button>
           <button
@@ -462,26 +642,81 @@ export default function TimelinePanel({
               V1
             </div>
           ) : (
-            tracks.map((_, trackIndex: number) => (
-              <div
-                key={trackIndex}
-                className="h-24 border-b border-zinc-800 flex flex-col p-2 gap-1"
-              >
-                <div className="flex justify-between items-center text-zinc-400">
-                  <span className="font-bold text-xs">V{trackIndex + 1}</span>
-                  <div className="flex gap-1">
-                    <Lock
-                      size={12}
-                      className="cursor-pointer hover:text-white"
+            tracks.map((_, trackIndex: number) => {
+              const settings = trackSettings?.[trackIndex] || {
+                locked: false,
+                visible: true,
+                name: `Track ${trackIndex + 1}`,
+                height: 96,
+              };
+              const height = settings.height || 96;
+              return (
+                <div
+                  key={trackIndex}
+                  className="border-b border-zinc-800 flex flex-col p-2 gap-1 justify-between relative group"
+                  style={{ height }}
+                >
+                  <div className="flex justify-between items-center text-zinc-400">
+                    <input
+                      type="text"
+                      className="bg-transparent border-none text-xs font-bold text-zinc-400 focus:text-white focus:outline-none min-w-0 w-20 truncate"
+                      value={settings.name}
+                      onChange={(e) =>
+                        onRenameTrack &&
+                        onRenameTrack(trackIndex, e.target.value)
+                      }
+                      onKeyDown={(e) => e.stopPropagation()}
                     />
-                    <Eye
-                      size={12}
-                      className="cursor-pointer hover:text-white"
-                    />
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() =>
+                          onToggleTrackLock && onToggleTrackLock(trackIndex)
+                        }
+                        className={`hover:text-white ${settings.locked ? "text-red-400" : "text-zinc-500"}`}
+                        title={settings.locked ? "Unlock Track" : "Lock Track"}
+                      >
+                        {settings.locked ? (
+                          <Lock size={12} />
+                        ) : (
+                          <Unlock size={12} />
+                        )}
+                      </button>
+                      <button
+                        onClick={() =>
+                          onToggleTrackVisibility &&
+                          onToggleTrackVisibility(trackIndex)
+                        }
+                        className={`hover:text-white ${!settings.visible ? "text-zinc-600" : "text-zinc-400"}`}
+                        title={settings.visible ? "Hide Track" : "Show Track"}
+                      >
+                        {settings.visible ? (
+                          <Eye size={12} />
+                        ) : (
+                          <EyeOff size={12} />
+                        )}
+                      </button>
+                    </div>
                   </div>
+                  <div className="flex justify-end">
+                    <button
+                      onClick={() => onDeleteTrack && onDeleteTrack(trackIndex)}
+                      className="text-zinc-600 hover:text-red-500 transition-colors"
+                      title="Delete Track"
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                  </div>
+
+                  {/* Resize Handle */}
+                  <div
+                    className="absolute bottom-0 left-0 right-0 h-1 cursor-row-resize hover:bg-[#D2FF44] z-50 transition-colors opacity-0 group-hover:opacity-100"
+                    onPointerDown={(e) =>
+                      handleTrackResizeStart(e, trackIndex, height)
+                    }
+                  />
                 </div>
-              </div>
-            ))
+              );
+            })
           )}
         </div>
 
@@ -524,28 +759,36 @@ export default function TimelinePanel({
             {tracks.length === 0 ? (
               <div className="h-24 border-b border-zinc-800 bg-[#151517]" />
             ) : (
-              tracks.map((track: any[], trackIndex: number) => (
-                <div
-                  key={trackIndex}
-                  className="h-24 border-b border-zinc-800 relative bg-[#151517]"
-                >
-                  {/* PLAYHEAD through tracks */}
+              tracks.map((track: any[], trackIndex: number) => {
+                const height = trackSettings?.[trackIndex]?.height || 96;
+                return (
                   <div
-                    className="absolute top-0 bottom-0 w-px bg-red-500 z-40 pointer-events-none"
-                    style={{ left: `${currentTime * zoom}px` }}
-                  />
-                  <TrackDroppable
-                    id={`timeline-track-${trackIndex}`}
-                    items={track}
-                    trackIndex={trackIndex}
-                    onRemoveItem={onRemoveItem}
-                    onUpdateItem={onUpdateItem}
-                    onShotClick={onShotClick}
-                    zoom={zoom}
-                    activeShotId={activeShotId}
-                  />
-                </div>
-              ))
+                    key={trackIndex}
+                    className="border-b border-zinc-800 relative bg-[#151517]"
+                    style={{ height }}
+                  >
+                    {/* PLAYHEAD through tracks */}
+                    <div
+                      className="absolute top-0 bottom-0 w-px bg-red-500 z-40 pointer-events-none"
+                      style={{ left: `${currentTime * zoom}px` }}
+                    />
+                    <TrackDroppable
+                      id={`timeline-track-${trackIndex}`}
+                      items={track}
+                      trackIndex={trackIndex}
+                      onRemoveItem={onRemoveItem}
+                      onUpdateItem={onUpdateItem}
+                      onShotClick={onShotClick}
+                      zoom={zoom}
+                      activeShotId={activeShotId}
+                      activeTool={activeTool}
+                      onSplitItem={onSplit}
+                      locked={trackSettings?.[trackIndex]?.locked}
+                      visible={trackSettings?.[trackIndex]?.visible}
+                    />
+                  </div>
+                );
+              })
             )}
           </div>
         </div>
