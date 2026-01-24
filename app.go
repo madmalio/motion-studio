@@ -28,6 +28,7 @@ type App struct {
 	ctx      context.Context
 	comfyURL string
 	clientID string // <--- NEW: For WebSocket connection
+	nodeMappings map[string]map[string]string // Class -> Input -> Type
 }
 
 // NewApp creates a new App application struct
@@ -35,6 +36,7 @@ func NewApp() *App {
 	return &App{
 		comfyURL: "http://127.0.0.1:8188",
 		clientID: uuid.New().String(), // <--- Generate ID on startup
+		nodeMappings: make(map[string]map[string]string),
 	}
 }
 
@@ -54,6 +56,7 @@ func (a *App) startup(ctx context.Context) {
 	// ---------------------------------------------------------
 
 	a.loadConfig()
+	a.loadNodeMappings()
 }
 
 // --- ENGINE BRIDGE (Frontend calls this) ---
@@ -169,6 +172,86 @@ func (a *App) loadConfig() {
 		if err := json.Unmarshal(data, &config); err == nil && config.ComfyURL != "" {
 			a.comfyURL = config.ComfyURL
 		}
+	}
+}
+
+func (a *App) loadNodeMappings() {
+	path := filepath.Join(a.getAppDir(), "node_mappings.json")
+	data, err := os.ReadFile(path)
+	
+	// Default Mappings
+	defaults := map[string]map[string]string{
+		"LoadImage":                {"image": "IMAGE"},
+		"CLIPTextEncode":           {"text": "PROMPT"},
+		"CLIPTextEncodeSDXL":       {"text_g": "PROMPT", "text_l": "PROMPT"},
+		"WanVideoTextEncodeCached": {"prompt": "PROMPT", "positive_prompt": "PROMPT"},
+		"KSampler":                 {"seed": "SEED", "noise_seed": "SEED"},
+		"SVD_img2vid_Conditioning": {"seed": "SEED", "motion_bucket_id": "MOTION"},
+		"LoadAudio":                {"audio": "AUDIO", "filename": "AUDIO"},
+		"AudioLoader":              {"audio_file": "AUDIO"},
+		"EmptyLatentVideo":         {"frame_count": "MAX_FRAMES"},
+		"MultiTalkWav2VecEmbeds":   {"num_frames": "MAX_FRAMES"},
+	}
+
+	if err == nil {
+		json.Unmarshal(data, &a.nodeMappings)
+	}
+
+	// Merge defaults if missing
+	for classType, rules := range defaults {
+		if _, exists := a.nodeMappings[classType]; !exists {
+			a.nodeMappings[classType] = rules
+		}
+	}
+}
+
+func (a *App) saveNodeMappings() {
+	path := filepath.Join(a.getAppDir(), "node_mappings.json")
+	data, _ := json.MarshalIndent(a.nodeMappings, "", "  ")
+	os.WriteFile(path, data, 0644)
+}
+
+func (a *App) analyzeWorkflowForMappings(workflowData []byte) {
+	var workflow map[string]interface{}
+	if err := json.Unmarshal(workflowData, &workflow); err != nil {
+		return
+	}
+
+	updated := false
+	for _, node := range workflow {
+		if nodeMap, ok := node.(map[string]interface{}); ok {
+			if classType, ok := nodeMap["class_type"].(string); ok {
+				// Heuristics for new nodes
+				if _, known := a.nodeMappings[classType]; !known {
+					inputs, _ := nodeMap["inputs"].(map[string]interface{})
+					newRules := make(map[string]string)
+
+					for key := range inputs {
+						lowerKey := strings.ToLower(key)
+						if lowerKey == "seed" || lowerKey == "noise_seed" {
+							newRules[key] = "SEED"
+						} else if lowerKey == "text" || lowerKey == "prompt" || lowerKey == "positive" || lowerKey == "text_g" || lowerKey == "text_l" {
+							newRules[key] = "PROMPT"
+						} else if (strings.Contains(strings.ToLower(classType), "image") && lowerKey == "image") {
+							newRules[key] = "IMAGE"
+						} else if (strings.Contains(strings.ToLower(classType), "audio") && (lowerKey == "audio" || lowerKey == "filename" || lowerKey == "audio_file")) {
+							newRules[key] = "AUDIO"
+						} else if (lowerKey == "max_frames" || lowerKey == "frame_count" || lowerKey == "video_length" || lowerKey == "num_frames") {
+							newRules[key] = "MAX_FRAMES"
+						}
+					}
+
+					if len(newRules) > 0 {
+						a.nodeMappings[classType] = newRules
+						updated = true
+					}
+				}
+			}
+		}
+	}
+
+	if updated {
+		a.saveNodeMappings()
 	}
 }
 
@@ -458,6 +541,9 @@ func (a *App) ImportWorkflow(name string) string {
 		return "Error reading file"
 	}
 
+	// Analyze and update mappings
+	a.analyzeWorkflowForMappings(data)
+
 	// Simple sanitization
 	safeName := strings.Map(func(r rune) rune {
 		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
@@ -646,73 +732,61 @@ func (a *App) RenderShot(projectId string, sceneId string, shotId string, workfl
 	var workflow map[string]interface{}
 	json.Unmarshal(workflowData, &workflow)
 
-	// 5. Inject Values
+	// 5. Inject Values (Dynamic System)
 	imageInjected := false
 	
-	// *** FIX: Use '_' to ignore the key since we don't use it in Printf anymore ***
+	// Prepare Injection Values
+	injectValues := map[string]interface{}{
+		"IMAGE":  comfyImageName,
+		"PROMPT": shot.Prompt,
+		"SEED":   shot.Seed,
+		"MOTION": shot.MotionStrength,
+	}
+	
+	if comfyAudioName != "" {
+		injectValues["AUDIO"] = comfyAudioName
+		injectValues["MAX_FRAMES"] = maxFrames
+	}
+
 	for _, node := range workflow {
 		nodeMap, ok := node.(map[string]interface{})
 		if !ok { continue }
 
 		classType, _ := nodeMap["class_type"].(string)
 		inputs, _ := nodeMap["inputs"].(map[string]interface{})
+		
+		// Check if we have mappings for this node type
+		if rules, known := a.nodeMappings[classType]; known {
+			for inputKey, valueType := range rules {
+				// Only inject if the node actually has this input
+				if _, inputExists := inputs[inputKey]; inputExists {
+					// Safety: Don't overwrite existing links (arrays) with injected values
+					if _, isLink := inputs[inputKey].([]interface{}); isLink {
+						continue
+					}
 
-		// Inject Image
-		if classType == "LoadImage" {
-			inputs["image"] = comfyImageName
-			imageInjected = true
-		}
-
-		// Inject Audio (Use the uploaded filename, NOT the local path)
-		if (strings.Contains(classType, "LoadAudio") || classType == "AudioLoader") && comfyAudioName != "" {
-			if _, exists := inputs["audio_file"]; exists {
-				inputs["audio_file"] = comfyAudioName
-			} else if _, exists := inputs["filename"]; exists {
-				inputs["filename"] = comfyAudioName
-			} else {
-				inputs["audio"] = comfyAudioName
+					if val, hasVal := injectValues[valueType]; hasVal {
+						inputs[inputKey] = val
+						if valueType == "IMAGE" {
+							imageInjected = true
+						}
+					}
+				}
 			}
 		}
 
-		// Inject Max Frames (InfiniteTalk/LipSync)
-		if comfyAudioName != "" {
-			if _, ok := inputs["max_frames"]; ok {
-				inputs["max_frames"] = maxFrames
+		// Smart Fallback: Check Node Title (for generic nodes like INTConstant)
+		// This handles your specific case where "INTConstant" is named "Max frames"
+		if meta, ok := nodeMap["_meta"].(map[string]interface{}); ok {
+			if title, ok := meta["title"].(string); ok {
+				lowerTitle := strings.ToLower(title)
+				if strings.Contains(lowerTitle, "max frames") || strings.Contains(lowerTitle, "frame count") {
+					if val, hasVal := injectValues["MAX_FRAMES"]; hasVal {
+						// Inject into 'value' (standard for INTConstant/Primitive nodes)
+						if _, ok := inputs["value"]; ok { inputs["value"] = val }
+					}
+				}
 			}
-			if _, ok := inputs["frame_count"]; ok {
-				inputs["frame_count"] = maxFrames
-			}
-		}
-
-		// Inject Seed
-		if classType == "KSampler" || classType == "SVD_img2vid_Conditioning" {
-			if _, ok := inputs["seed"]; ok {
-				inputs["seed"] = shot.Seed
-			}
-			if _, ok := inputs["noise_seed"]; ok {
-				inputs["noise_seed"] = shot.Seed
-			}
-		}
-
-		// Inject Motion Bucket
-		if classType == "SVD_img2vid_Conditioning" {
-			inputs["motion_bucket_id"] = shot.MotionStrength
-		}
-
-		// Inject Prompt
-		if classType == "CLIPTextEncode" {
-			inputs["text"] = shot.Prompt
-		}
-
-		// Inject Prompt (SDXL Support)
-		if classType == "CLIPTextEncodeSDXL" {
-			inputs["text_g"] = shot.Prompt
-			inputs["text_l"] = shot.Prompt
-		}
-
-		// Inject Prompt (WanVideo Support)
-		if classType == "WanVideoTextEncodeCached" {
-			inputs["positive_prompt"] = shot.Prompt
 		}
 	}
 
@@ -820,40 +894,72 @@ loop:
 		}
 	}
 
-	// 8. Poll History ONCE to get the filename (reliable)
-	histResp, err := http.Get(a.comfyURL + "/history/" + promptID)
-	if err == nil {
-		var histMap map[string]interface{}
-		json.NewDecoder(histResp.Body).Decode(&histMap)
-		histResp.Body.Close()
+	// 8. Poll History (Retry logic to handle race conditions)
+	for i := 0; i < 5; i++ {
+		histResp, err := http.Get(a.comfyURL + "/history/" + promptID)
+		if err == nil {
+			var histMap map[string]interface{}
+			json.NewDecoder(histResp.Body).Decode(&histMap)
+			histResp.Body.Close()
 
-		if data, ok := histMap[promptID].(map[string]interface{}); ok {
-			if outputs, ok := data["outputs"].(map[string]interface{}); ok {
-				for _, outNode := range outputs {
-					outNodeMap, ok := outNode.(map[string]interface{})
-					if !ok {
-						continue
+			if data, ok := histMap[promptID].(map[string]interface{}); ok {
+				// Check for explicit errors
+				if status, ok := data["status"].(map[string]interface{}); ok {
+					if statusStr, ok := status["status_str"].(string); ok && statusStr == "error" {
+						// Try to find the error message
+						if messages, ok := status["messages"].([]interface{}); ok && len(messages) > 0 {
+							for _, msg := range messages {
+								if pair, ok := msg.([]interface{}); ok && len(pair) >= 2 {
+									if typeStr, ok := pair[0].(string); ok && typeStr == "execution_error" {
+										// Try to extract clean exception message
+										if errMap, ok := pair[1].(map[string]interface{}); ok {
+											if excMsg, ok := errMap["exception_message"].(string); ok {
+												return *shot, fmt.Errorf("ComfyUI Error: %s", excMsg)
+											}
+										}
+										return *shot, fmt.Errorf("ComfyUI Error: %v", pair[1])
+									}
+								}
+							}
+							// Fallback: return the last message
+							return *shot, fmt.Errorf("ComfyUI Error: %v", messages[len(messages)-1])
+						}
+						return *shot, fmt.Errorf("ComfyUI reported an error during execution")
 					}
-					// Check images/videos/gifs
-					if items, ok := outNodeMap["videos"].([]interface{}); ok && len(items) > 0 {
-						d := items[0].(map[string]interface{})
-						outputFilename = d["filename"].(string)
-						outputSubfolder, _ = d["subfolder"].(string)
-						outputType, _ = d["type"].(string)
-					} else if items, ok := outNodeMap["images"].([]interface{}); ok && len(items) > 0 {
-						d := items[0].(map[string]interface{})
-						outputFilename = d["filename"].(string)
-						outputSubfolder, _ = d["subfolder"].(string)
-						outputType, _ = d["type"].(string)
-					} else if items, ok := outNodeMap["gifs"].([]interface{}); ok && len(items) > 0 {
-						d := items[0].(map[string]interface{})
-						outputFilename = d["filename"].(string)
-						outputSubfolder, _ = d["subfolder"].(string)
-						outputType, _ = d["type"].(string)
+				}
+
+				if outputs, ok := data["outputs"].(map[string]interface{}); ok {
+					for _, outNode := range outputs {
+						outNodeMap, ok := outNode.(map[string]interface{})
+						if !ok {
+							continue
+						}
+						// Check images/videos/gifs
+						if items, ok := outNodeMap["videos"].([]interface{}); ok && len(items) > 0 {
+							d := items[0].(map[string]interface{})
+							outputFilename = d["filename"].(string)
+							outputSubfolder, _ = d["subfolder"].(string)
+							outputType, _ = d["type"].(string)
+						} else if items, ok := outNodeMap["images"].([]interface{}); ok && len(items) > 0 {
+							d := items[0].(map[string]interface{})
+							outputFilename = d["filename"].(string)
+							outputSubfolder, _ = d["subfolder"].(string)
+							outputType, _ = d["type"].(string)
+						} else if items, ok := outNodeMap["gifs"].([]interface{}); ok && len(items) > 0 {
+							d := items[0].(map[string]interface{})
+							outputFilename = d["filename"].(string)
+							outputSubfolder, _ = d["subfolder"].(string)
+							outputType, _ = d["type"].(string)
+						}
 					}
 				}
 			}
 		}
+
+		if outputFilename != "" {
+			break
+		}
+		time.Sleep(1 * time.Second)
 	}
 
 	if outputFilename == "" {
