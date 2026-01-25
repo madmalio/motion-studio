@@ -3,7 +3,7 @@
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useState, useRef } from "react";
 import { useConfirm } from "../../components/ConfirmProvider";
-import { Loader2 } from "lucide-react";
+import { Loader2, PanelLeft, PanelTop } from "lucide-react";
 // --- DND KIT ---
 import {
   DndContext,
@@ -39,6 +39,7 @@ import {
   DeleteShot,
   SaveTimeline,
   GetTimeline,
+  ExtractAudioPeaks, // <--- ADDED THIS
 } from "../../lib/wailsSafe";
 
 // --- TYPES ---
@@ -47,7 +48,8 @@ interface Shot {
   sceneId: string;
   name: string;
   sourceImage: string;
-  audioPath: string; // <--- NEW: Store audio file path
+  audioPath: string;
+  waveform?: number[]; // <--- ADDED THIS
   previewBase64?: string;
   prompt: string;
   motionStrength: number;
@@ -73,6 +75,8 @@ interface TimelineItem extends Shot {
   startTime: number;
   maxDuration?: number;
   trimStart?: number;
+  volume?: number;
+  muted?: boolean;
 }
 
 // --- HELPERS ---
@@ -170,11 +174,30 @@ function StudioContent() {
   const [generatorWidth, setGeneratorWidth] = useState(320);
   const [libraryWidth, setLibraryWidth] = useState(320);
   const [timelineHeight, setTimelineHeight] = useState(300);
+  const [isGeneratorFullHeight, setIsGeneratorFullHeight] = useState(true);
+  const [isLayoutLoaded, setIsLayoutLoaded] = useState(false);
 
   const isResizingGen = useRef(false);
   const isResizingLib = useRef(false);
   const isResizingTime = useRef(false);
   const generatorWidthRef = useRef(generatorWidth);
+
+  // --- PERSIST LAYOUT ---
+  useEffect(() => {
+    const saved = localStorage.getItem("motion-studio-layout-full");
+    if (saved !== null) {
+      setIsGeneratorFullHeight(saved === "true");
+    }
+    setIsLayoutLoaded(true);
+  }, []);
+
+  useEffect(() => {
+    if (!isLayoutLoaded) return;
+    localStorage.setItem(
+      "motion-studio-layout-full",
+      String(isGeneratorFullHeight),
+    );
+  }, [isGeneratorFullHeight, isLayoutLoaded]);
 
   useEffect(() => {
     generatorWidthRef.current = generatorWidth;
@@ -321,6 +344,31 @@ function StudioContent() {
     }
   }, [tracks, trackSettings, projectId, sceneId]);
 
+  // --- SYNC NEW VIDEOS TO BLOBS ---
+  useEffect(() => {
+    shots.forEach((shot) => {
+      if (shot.outputVideo && !videoBlobs.has(shot.outputVideo)) {
+        // If we have it in cache (from generation), create a blob url
+        if (videoCache.current.has(shot.id)) {
+          const b64 = videoCache.current.get(shot.id);
+          if (b64) {
+            try {
+              const byteCharacters = atob(b64);
+              const byteNumbers = new Array(byteCharacters.length);
+              for (let i = 0; i < byteCharacters.length; i++) {
+                byteNumbers[i] = byteCharacters.charCodeAt(i);
+              }
+              const byteArray = new Uint8Array(byteNumbers);
+              const blob = new Blob([byteArray], { type: "video/mp4" });
+              const url = URL.createObjectURL(blob);
+              setVideoBlobs((prev) => new Map(prev).set(shot.outputVideo, url));
+            } catch (e) {}
+          }
+        }
+      }
+    });
+  }, [shots]);
+
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Control") isCtrlPressed.current = true;
@@ -350,6 +398,28 @@ function StudioContent() {
     };
   }, [history, redoStack, tracks, shots]);
 
+  // --- HELPER: GENERATE WAVEFORM ---
+  const generateWaveform = async (shotId: string, filePath: string) => {
+    if (!filePath) return;
+
+    // 20 peaks per second gives a good balance of detail and performance
+    const peaks = await ExtractAudioPeaks(filePath, 20);
+
+    if (peaks && peaks.length > 0) {
+      setShots((prev) =>
+        prev.map((s) => (s.id === shotId ? { ...s, waveform: peaks } : s)),
+      );
+      // Also update tracks if this shot is on the timeline
+      setTracks((prev) =>
+        prev.map((track) =>
+          track.map((item) =>
+            item.id === shotId ? { ...item, waveform: peaks } : item,
+          ),
+        ),
+      );
+    }
+  };
+
   // --- LOAD DATA ---
   useEffect(() => {
     if (projectId && sceneId) loadData(projectId, sceneId);
@@ -358,9 +428,6 @@ function StudioContent() {
   const loadData = async (pId: string, sId: string) => {
     setIsLoading(true);
     try {
-      // Critical: on refresh the Wails bridge may exist but not be callable yet.
-      // This handshake prevents "backend disconnected" freezes.
-
       const p = await GetProject(pId);
       setProject(p);
       const sData = await GetScenes(pId);
@@ -374,13 +441,22 @@ function StudioContent() {
           savedShots.map(async (shot: any) => {
             if (shot.sourceImage) {
               const b64 = await ReadImageBase64(shot.sourceImage);
-              return { ...shot, previewBase64: b64 };
+              shot.previewBase64 = b64;
             }
             return shot;
           }),
         );
         setShots(hydratedShots);
         setActiveShotId(hydratedShots[0].id);
+
+        // --- BACKFILL WAVEFORMS ---
+        // If shots have video but no waveform, generate it now
+        hydratedShots.forEach((shot) => {
+          const path = shot.outputVideo || shot.audioPath;
+          if (path && (!shot.waveform || shot.waveform.length === 0)) {
+            generateWaveform(shot.id, path);
+          }
+        });
       }
 
       // 2. Load Timeline
@@ -417,6 +493,7 @@ function StudioContent() {
               try {
                 const url = `http://localhost:3456/video/${path.replace(/\\/g, "/")}`;
                 const res = await fetch(url);
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
                 const blob = await res.blob();
                 blobMap.set(path, URL.createObjectURL(blob));
               } catch (e) {
@@ -453,13 +530,15 @@ function StudioContent() {
   const handleAddShot = () => {
     if (!sceneId) return;
     recordHistory();
+    const newId = crypto.randomUUID();
     setShots((prev) => {
       const newShot: Shot = {
-        id: crypto.randomUUID(),
+        id: newId,
         sceneId: sceneId,
         name: `Shot ${prev.length + 1}`,
         sourceImage: "",
-        audioPath: "", // <--- INIT AUDIO
+        audioPath: "",
+        waveform: [], // Init empty
         prompt: "",
         motionStrength: 127,
         seed: Math.floor(Math.random() * 1000000),
@@ -467,9 +546,9 @@ function StudioContent() {
         status: "DRAFT",
         outputVideo: "",
       };
-      setActiveShotId((current) => current || newShot.id);
       return [...prev, newShot];
     });
+    setActiveShotId(newId);
   };
 
   const handleExtendShot = async (originalShot: Shot) => {
@@ -479,20 +558,22 @@ function StudioContent() {
     if (!lastFramePath) return;
     const b64 = await ReadImageBase64(lastFramePath);
     recordHistory();
+    const newId = crypto.randomUUID();
     setShots((prev) => {
       const newShot: Shot = {
         ...originalShot,
-        id: crypto.randomUUID(),
+        id: newId,
         name: `${originalShot.name} (Ext)`,
         sourceImage: lastFramePath,
-        audioPath: "", // <--- RESET AUDIO FOR EXTENSION (Optional)
+        audioPath: "",
+        waveform: [], // Reset waveform
         previewBase64: b64,
         status: "DRAFT",
         outputVideo: "",
       };
-      setActiveShotId(newShot.id);
       return [...prev, newShot];
     });
+    setActiveShotId(newId);
   };
 
   const handleDeleteShot = (e: React.MouseEvent, id: string) => {
@@ -511,6 +592,18 @@ function StudioContent() {
 
   const updateActiveShot = (updates: Partial<Shot>) => {
     if (!activeShotId) return;
+
+    // --- CHECK FOR NEW MEDIA TO GENERATE WAVEFORM ---
+    const shot = shots.find((s) => s.id === activeShotId);
+    if (shot) {
+      if (updates.outputVideo && updates.outputVideo !== shot.outputVideo) {
+        generateWaveform(shot.id, updates.outputVideo);
+      }
+      if (updates.audioPath && updates.audioPath !== shot.audioPath) {
+        generateWaveform(shot.id, updates.audioPath);
+      }
+    }
+
     setShots((prev) =>
       prev.map((s) => (s.id === activeShotId ? { ...s, ...updates } : s)),
     );
@@ -811,6 +904,8 @@ function StudioContent() {
         trackIndex: targetTrackIndex,
         maxDuration: shotData.duration || 4,
         startTime: newStartTime,
+        volume: 1,
+        muted: false,
       };
       recordHistory();
       setTracks((prev) => {
@@ -862,6 +957,43 @@ function StudioContent() {
       </div>
     );
 
+  const generatorContent = (
+    <div className="flex flex-col h-full relative">
+      <div className="h-8 border-b border-zinc-800 flex items-center justify-between px-2 bg-[#09090b] shrink-0">
+        <span className="text-xs font-bold text-zinc-400">Generator</span>
+        <button
+          onClick={() => setIsGeneratorFullHeight(!isGeneratorFullHeight)}
+          className="text-zinc-400 hover:text-white"
+          title={
+            isGeneratorFullHeight
+              ? "Switch to Classic View"
+              : "Switch to Full Height"
+          }
+        >
+          {isGeneratorFullHeight ? (
+            <PanelTop size={14} />
+          ) : (
+            <PanelLeft size={14} />
+          )}
+        </button>
+      </div>
+      <div className="flex-1 min-h-0">
+        <GeneratorPanel
+          activeShot={activeShot}
+          updateActiveShot={updateActiveShot}
+          project={project}
+          scene={scene}
+          isRendering={isRendering}
+          setIsRendering={setIsRendering}
+          setVideoCache={(id: string, b64: string) =>
+            videoCache.current.set(id, b64)
+          }
+          setVideoSrc={() => {}}
+        />
+      </div>
+    </div>
+  );
+
   return (
     <DndContext
       sensors={sensors}
@@ -880,32 +1012,101 @@ function StudioContent() {
         </header>
 
         {/* WORKSPACE */}
-        <div className="flex-1 flex flex-col overflow-hidden">
-          <div className="flex-1 flex overflow-hidden min-h-0">
-            {/* GENERATOR */}
-            <div
-              style={{ width: generatorWidth }}
-              className="border-r border-zinc-800 bg-[#09090b] flex flex-col min-h-0 shrink-0"
-            >
-              <GeneratorPanel
-                activeShot={activeShot}
-                updateActiveShot={updateActiveShot}
-                project={project}
-                scene={scene}
-                isRendering={isRendering}
-                setIsRendering={setIsRendering}
-                setVideoCache={(id: string, b64: string) =>
-                  videoCache.current.set(id, b64)
+        <div className="flex-1 flex overflow-hidden">
+          {/* 1. FULL HEIGHT GENERATOR (Left) */}
+          {isGeneratorFullHeight && (
+            <>
+              <div
+                style={{ width: generatorWidth }}
+                className="border-r border-zinc-800 bg-[#09090b] flex flex-col min-h-0 shrink-0"
+              >
+                {generatorContent}
+              </div>
+              {/* Resizer for Generator */}
+              <div
+                className="w-1 hover:w-1.5 bg-zinc-900 hover:bg-[#D2FF44] cursor-col-resize transition-all z-50 flex-shrink-0"
+                onPointerDown={(e) => {
+                  isResizingGen.current = true;
+                  e.currentTarget.setPointerCapture(e.pointerId);
+                }}
+                onPointerUp={(e) =>
+                  e.currentTarget.releasePointerCapture(e.pointerId)
                 }
-                setVideoSrc={() => {}}
               />
+            </>
+          )}
+
+          {/* 2. MAIN CONTENT AREA (Right or Full) */}
+          <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+            {/* TOP ROW (Generator? + Library + Viewer) */}
+            <div className="flex-1 flex overflow-hidden min-h-0">
+              {/* CLASSIC GENERATOR (Inline) */}
+              {!isGeneratorFullHeight && (
+                <>
+                  <div
+                    style={{ width: generatorWidth }}
+                    className="border-r border-zinc-800 bg-[#09090b] flex flex-col min-h-0 shrink-0"
+                  >
+                    {generatorContent}
+                  </div>
+                  {/* Resizer for Generator */}
+                  <div
+                    className="w-1 hover:w-1.5 bg-zinc-900 hover:bg-[#D2FF44] cursor-col-resize transition-all z-50 flex-shrink-0"
+                    onPointerDown={(e) => {
+                      isResizingGen.current = true;
+                      e.currentTarget.setPointerCapture(e.pointerId);
+                    }}
+                    onPointerUp={(e) =>
+                      e.currentTarget.releasePointerCapture(e.pointerId)
+                    }
+                  />
+                </>
+              )}
+
+              {/* LIBRARY (Always here) */}
+              <div
+                style={{ width: libraryWidth }}
+                className="border-r border-zinc-800 bg-[#09090b] flex flex-col min-h-0 shrink-0"
+              >
+                <LibraryPanel
+                  shots={shots}
+                  activeShotId={activeShotId}
+                  setActiveShotId={setActiveShotId}
+                  handleAddShot={handleAddShot}
+                  handleExtendShot={handleExtendShot}
+                  handleDeleteShot={handleDeleteShot}
+                />
+              </div>
+
+              {/* Resizer for Library */}
+              <div
+                className="w-1 hover:w-1.5 bg-zinc-900 hover:bg-[#D2FF44] cursor-col-resize transition-all z-50 flex-shrink-0"
+                onPointerDown={(e) => {
+                  isResizingLib.current = true;
+                  e.currentTarget.setPointerCapture(e.pointerId);
+                }}
+                onPointerUp={(e) =>
+                  e.currentTarget.releasePointerCapture(e.pointerId)
+                }
+              />
+
+              {/* VIEWER (Always here) */}
+              <div className="flex-1 min-w-0 bg-black min-h-0">
+                <ViewerPanel
+                  isPlaying={isPlaying}
+                  onTogglePlay={togglePlay}
+                  primaryVideoRef={primaryVideoRef}
+                  secondaryVideoRef={secondaryVideoRef}
+                  canvasRef={canvasRef}
+                />
+              </div>
             </div>
 
-            {/* RESIZE HANDLE GEN */}
+            {/* Resizer for Timeline */}
             <div
-              className="w-1 hover:w-1.5 bg-zinc-900 hover:bg-[#D2FF44] cursor-col-resize transition-all z-50 flex-shrink-0"
+              className="h-1 hover:h-1.5 bg-zinc-900 hover:bg-[#D2FF44] cursor-row-resize transition-all z-50 shrink-0"
               onPointerDown={(e) => {
-                isResizingGen.current = true;
+                isResizingTime.current = true;
                 e.currentTarget.setPointerCapture(e.pointerId);
               }}
               onPointerUp={(e) =>
@@ -913,95 +1114,46 @@ function StudioContent() {
               }
             />
 
-            {/* LIBRARY */}
+            {/* TIMELINE (Always here) */}
             <div
-              style={{ width: libraryWidth }}
-              className="border-r border-zinc-800 bg-[#09090b] flex flex-col min-h-0 shrink-0"
+              style={{ height: timelineHeight }}
+              className="border-t border-zinc-800 bg-[#1e1e20] shrink-0"
             >
-              <LibraryPanel
-                shots={shots}
-                activeShotId={activeShotId}
-                setActiveShotId={setActiveShotId}
-                handleAddShot={handleAddShot}
-                handleExtendShot={handleExtendShot}
-                handleDeleteShot={handleDeleteShot}
-              />
-            </div>
-
-            {/* RESIZE HANDLE LIB */}
-            <div
-              className="w-1 hover:w-1.5 bg-zinc-900 hover:bg-[#D2FF44] cursor-col-resize transition-all z-50 flex-shrink-0"
-              onPointerDown={(e) => {
-                isResizingLib.current = true;
-                e.currentTarget.setPointerCapture(e.pointerId);
-              }}
-              onPointerUp={(e) =>
-                e.currentTarget.releasePointerCapture(e.pointerId)
-              }
-            />
-
-            {/* VIEWER */}
-            <div className="flex-1 min-w-0 bg-black min-h-0">
-              <ViewerPanel
+              <TimelinePanel
+                tracks={tracks}
+                onRemoveItem={(id: string) => {
+                  recordHistory();
+                  setTracks((prev) =>
+                    prev.map((t) => t.filter((i) => i.timelineId !== id)),
+                  );
+                  if (isPlaying) togglePlay();
+                }}
+                onUpdateItem={handleUpdateItem}
+                onAddTrack={handleAddTrack}
                 isPlaying={isPlaying}
-                onTogglePlay={togglePlay}
-                primaryVideoRef={primaryVideoRef}
-                secondaryVideoRef={secondaryVideoRef}
-                canvasRef={canvasRef}
+                togglePlay={togglePlay}
+                currentTime={currentTime}
+                duration={totalDuration}
+                seekTo={seekTo}
+                activeShotId={activeShotId ?? undefined}
+                onShotClick={(id: string) => setActiveShotId(id)}
+                shots={[]}
+                zoom={zoom}
+                setZoom={setZoom}
+                onSplit={handleSplit}
+                onUndo={undo}
+                onRedo={redo}
+                canUndo={history.length > 0}
+                canRedo={redoStack.length > 0}
+                trackSettings={trackSettings}
+                onDeleteTrack={handleDeleteTrack}
+                onRenameTrack={handleRenameTrack}
+                onResizeTrack={handleResizeTrack}
+                onToggleTrackLock={handleToggleTrackLock}
+                onToggleTrackVisibility={handleToggleTrackVisibility}
+                videoBlobs={videoBlobs}
               />
             </div>
-          </div>
-
-          {/* RESIZE HANDLE TIMELINE */}
-          <div
-            className="h-1 hover:h-1.5 bg-zinc-900 hover:bg-[#D2FF44] cursor-row-resize transition-all z-50 shrink-0"
-            onPointerDown={(e) => {
-              isResizingTime.current = true;
-              e.currentTarget.setPointerCapture(e.pointerId);
-            }}
-            onPointerUp={(e) =>
-              e.currentTarget.releasePointerCapture(e.pointerId)
-            }
-          />
-
-          {/* TIMELINE */}
-          <div
-            style={{ height: timelineHeight }}
-            className="border-t border-zinc-800 bg-[#1e1e20] shrink-0"
-          >
-            <TimelinePanel
-              tracks={tracks}
-              onRemoveItem={(id: string) => {
-                recordHistory();
-                setTracks((prev) =>
-                  prev.map((t) => t.filter((i) => i.timelineId !== id)),
-                );
-                if (isPlaying) togglePlay();
-              }}
-              onUpdateItem={handleUpdateItem}
-              onAddTrack={handleAddTrack}
-              isPlaying={isPlaying}
-              togglePlay={togglePlay}
-              currentTime={currentTime}
-              duration={totalDuration}
-              seekTo={seekTo}
-              activeShotId={activeShotId ?? undefined}
-              onShotClick={(id: string) => setActiveShotId(id)}
-              shots={[]}
-              zoom={zoom}
-              setZoom={setZoom}
-              onSplit={handleSplit}
-              onUndo={undo}
-              onRedo={redo}
-              canUndo={history.length > 0}
-              canRedo={redoStack.length > 0}
-              trackSettings={trackSettings}
-              onDeleteTrack={handleDeleteTrack}
-              onRenameTrack={handleRenameTrack}
-              onResizeTrack={handleResizeTrack}
-              onToggleTrackLock={handleToggleTrackLock}
-              onToggleTrackVisibility={handleToggleTrackVisibility}
-            />
           </div>
         </div>
       </div>
@@ -1034,6 +1186,18 @@ function StudioContent() {
                   />
                 )}
               </div>
+              {/* WAVEFORM VISUALIZATION */}
+              {activeDragItem.waveform && (
+                <div className="absolute bottom-4 left-0 right-0 h-6 flex items-end gap-[1px] px-1 opacity-80 pointer-events-none">
+                  {activeDragItem.waveform.map((h: number, i: number) => (
+                    <div
+                      key={i}
+                      style={{ height: `${h * 100}%` }}
+                      className="flex-1 bg-white/60 rounded-t-[1px]"
+                    />
+                  ))}
+                </div>
+              )}
               <div className="absolute bottom-0 w-full bg-[#20343e] px-2 py-0.5 text-[9px] text-zinc-300 truncate font-mono">
                 {activeDragItem.name} ({activeDragItem.duration?.toFixed(2)}s)
               </div>

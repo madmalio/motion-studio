@@ -58,6 +58,7 @@ export namespace main {
 	    duration: number;
 	    status: string;
 	    outputVideo: string;
+	    waveform: number[];
 	
 	    static createFrom(source: any = {}) {
 	        return new Shot(source);
@@ -78,6 +79,7 @@ export namespace main {
 	        this.duration = source["duration"];
 	        this.status = source["status"];
 	        this.outputVideo = source["outputVideo"];
+	        this.waveform = source["waveform"];
 	    }
 	}
 	export class TrackSetting {

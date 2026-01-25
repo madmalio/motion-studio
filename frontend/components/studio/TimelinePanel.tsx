@@ -24,6 +24,66 @@ const LEFT_PANEL_W = 160; // px
 const LEFT_PANEL_BG = "bg-[#2c2f33]";
 const LEFT_PANEL_BORDER = "border-r border-zinc-700";
 
+// --- NEW FAST WAVEFORM COMPONENT ---
+function TimelineWaveform({
+  data,
+  zoom,
+  color = "#ffffff",
+}: {
+  data: number[];
+  zoom: number;
+  color?: string;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !data || data.length === 0) return;
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    // We generated peaks at 20 samples per second in Go
+    const SAMPLES_PER_SEC = 20;
+
+    // Calculate total width based on data length
+    const totalDuration = data.length / SAMPLES_PER_SEC;
+    const width = Math.max(1, totalDuration * zoom);
+    const height = canvas.clientHeight || 64;
+
+    // Handle High DPI displays for crisp lines
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = width * dpr;
+    canvas.height = height * dpr;
+    ctx.scale(dpr, dpr);
+
+    ctx.clearRect(0, 0, width, height);
+    ctx.fillStyle = color;
+
+    // Calculate bar width (at least 1px)
+    // If zoom is high, bars are wide. If zoom is low, bars are thin.
+    const pixelsPerSample = zoom / SAMPLES_PER_SEC;
+    const barWidth = Math.max(0.5, pixelsPerSample - 0.5); // slight gap
+
+    for (let i = 0; i < data.length; i++) {
+      const x = i * pixelsPerSample;
+      // data[i] is 0.0 - 1.0
+      const barHeight = Math.max(2, data[i] * height);
+      const y = height - barHeight; // Draw from bottom up
+
+      ctx.fillRect(x, y, barWidth, barHeight);
+    }
+  }, [data, zoom, color]);
+
+  return <canvas ref={canvasRef} className="w-full h-full" />;
+}
+
+// --- LEGACY FALLBACK (Optional, for audio-only files without pre-calc) ---
+function LegacyTimelineWaveform({ url, zoom }: any) {
+  // Kept simple just in case, but ideally unused now
+  return null;
+}
+
 function TimelineItemComponent({
   id,
   data,
@@ -36,11 +96,12 @@ function TimelineItemComponent({
   activeTool,
   onSplitItem,
   locked,
+  videoBlobs,
 }: any) {
   const { attributes, listeners, setNodeRef, transform, isDragging } =
     useDraggable({
       id,
-      data: { type: "timeline-item" }, // ✅ important
+      data: { type: "timeline-item" },
       disabled: activeTool === "split" || locked,
     });
 
@@ -70,7 +131,6 @@ function TimelineItemComponent({
 
     const onMove = (ev: PointerEvent) => {
       const diff = ev.clientX - startX;
-      // Min width 10px, Max width based on maxDuration
       const newW = Math.max(10, Math.min(startWidth + diff, maxPx));
       setLocalState((prev) => ({ ...prev, width: newW }));
     };
@@ -101,11 +161,6 @@ function TimelineItemComponent({
 
     const onMove = (ev: PointerEvent) => {
       const diff = ev.clientX - startX;
-      // Calculate potential new values
-      // Cannot grow left beyond trimStart (0)
-      // Cannot shrink width below 10px
-      // Cannot move startLeft below 0
-
       let newLeft = startLeft + diff;
       let newWidth = startWidth - diff;
       let newTrim = startTrim + diff / zoom;
@@ -122,17 +177,13 @@ function TimelineItemComponent({
         newWidth = startWidth + startTrim * zoom;
       }
 
-      if (newLeft < 0) newLeft = 0; // Hard stop at timeline 0
+      if (newLeft < 0) newLeft = 0;
 
       setLocalState({ width: newWidth, left: newLeft });
     };
 
     const onUp = (ev: PointerEvent) => {
       setIsResizing(false);
-      // Finalize
-      const current = localState; // Closure might be stale, but we rely on the last render state or calculate again.
-      // Actually, safer to recalculate or use a ref, but for this snippet we'll re-calculate from event to be safe or trust React state update speed (usually fine for drag end).
-      // Let's just use the logic from onMove for the final commit.
       const diff = ev.clientX - startX;
       let newLeft = startLeft + diff;
       let newWidth = startWidth - diff;
@@ -194,8 +245,15 @@ function TimelineItemComponent({
     position: "absolute" as const,
     height: "100%",
     zIndex: isDragging || isResizing ? 50 : 10,
-    opacity: isDragging ? 0 : 1, // Hide original when dragging
+    opacity: isDragging ? 0 : 1,
   };
+
+  // 1. Calculate the TOTAL width of the full waveform (not just the clipped part)
+  const SAMPLES_PER_SEC = 20;
+  const fullWaveformDuration = data.waveform
+    ? data.waveform.length / SAMPLES_PER_SEC
+    : 0;
+  const fullWaveformWidth = fullWaveformDuration * zoom;
 
   return (
     <div
@@ -222,7 +280,21 @@ function TimelineItemComponent({
           )}
         </div>
 
-        <div className="absolute bottom-0 w-full bg-[#20343e] px-2 py-0.5 text-[9px] text-zinc-300 truncate font-mono pointer-events-none">
+        {/* --- WAVEFORM RENDERING --- */}
+        {data.waveform && data.waveform.length > 0 ? (
+          <div
+            className="absolute bottom-0 h-1/2 opacity-80 pointer-events-none"
+            style={{
+              // We offset the waveform to the left based on trimStart
+              left: `-${(data.trimStart || 0) * zoom}px`,
+              width: `${fullWaveformWidth}px`,
+            }}
+          >
+            <TimelineWaveform data={data.waveform} zoom={zoom} />
+          </div>
+        ) : null}
+
+        <div className="absolute bottom-0 w-full bg-[#20343e] px-2 py-0.5 text-[9px] text-zinc-300 truncate font-mono pointer-events-none z-10">
           {data.name} ({data.duration?.toFixed(2)}s)
         </div>
 
@@ -290,6 +362,7 @@ function TrackDroppable({
   onSplitItem,
   locked,
   visible,
+  videoBlobs,
 }: any) {
   const { setNodeRef } = useDroppable({
     id,
@@ -321,6 +394,7 @@ function TrackDroppable({
           activeTool={activeTool}
           onSplitItem={onSplitItem}
           locked={locked}
+          videoBlobs={videoBlobs}
         />
       ))}
     </div>
@@ -339,8 +413,6 @@ interface TimelinePanelProps {
   seekTo: (time: number) => void;
   zoom: number;
   setZoom: (z: number) => void;
-
-  // ✅ add back (page.tsx passes these)
   activeShotId?: string;
   onShotClick?: (id: string) => void;
   shots?: any[];
@@ -360,6 +432,7 @@ interface TimelinePanelProps {
   onResizeTrack?: (index: number, newHeight: number) => void;
   onToggleTrackLock?: (index: number) => void;
   onToggleTrackVisibility?: (index: number) => void;
+  videoBlobs?: Map<string, string>;
 }
 
 export default function TimelinePanel({
@@ -387,6 +460,7 @@ export default function TimelinePanel({
   onResizeTrack,
   onToggleTrackLock,
   onToggleTrackVisibility,
+  videoBlobs,
 }: TimelinePanelProps) {
   const [activeTool, setActiveTool] = useState<"select" | "split">("select");
   const isHovering = useRef(false);
@@ -419,7 +493,6 @@ export default function TimelinePanel({
   const [isScrubbing, setIsScrubbing] = useState(false);
   const [viewportPx, setViewportPx] = useState(0);
 
-  // Measure scroll viewport width (so ruler can stay “infinite-ish” at low zoom)
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
@@ -433,10 +506,9 @@ export default function TimelinePanel({
     return () => ro.disconnect();
   }, []);
 
-  // Infinite-ish timeline canvas
-  const MIN_TIMELINE_SECONDS = 120; // base
-  const BUFFER_SECONDS = 600; // +10 minutes empty space
-  const MAX_TIMELINE_SECONDS = 6 * 60 * 60; // safety
+  const MIN_TIMELINE_SECONDS = 120;
+  const BUFFER_SECONDS = 600;
+  const MAX_TIMELINE_SECONDS = 6 * 60 * 60;
 
   const viewportSeconds =
     viewportPx > 0 ? viewportPx / Math.max(zoom, 0.001) : 0;
@@ -489,7 +561,7 @@ export default function TimelinePanel({
 
     const onMove = (ev: PointerEvent) => {
       const diff = ev.clientY - startY;
-      const newHeight = Math.max(48, startHeight + diff); // Min height 48px
+      const newHeight = Math.max(48, startHeight + diff);
       if (onResizeTrack) onResizeTrack(index, newHeight);
     };
 
@@ -746,7 +818,7 @@ export default function TimelinePanel({
                 ),
               )}
 
-              {/* PLAYHEAD LINE + ✅ RED ARROW (diamond) */}
+              {/* PLAYHEAD LINE + RED ARROW (diamond) */}
               <div
                 className="absolute top-0 bottom-0 w-px bg-red-500 pointer-events-none"
                 style={{ left: `${currentTime * zoom}px` }}
@@ -785,6 +857,7 @@ export default function TimelinePanel({
                       onSplitItem={onSplit}
                       locked={trackSettings?.[trackIndex]?.locked}
                       visible={trackSettings?.[trackIndex]?.visible}
+                      videoBlobs={videoBlobs}
                     />
                   </div>
                 );

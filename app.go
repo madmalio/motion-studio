@@ -1,13 +1,16 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"mime/multipart"
 	"net/http"
 	"os"
@@ -126,6 +129,7 @@ type Shot struct {
 	Duration       float64 `json:"duration"`    // Seconds
 	Status         string  `json:"status"`      // DRAFT, RENDERING, DONE
 	OutputVideo    string  `json:"outputVideo"` // Path to generated MP4
+	Waveform       []float64 `json:"waveform"`
 }
 
 type Config struct {
@@ -1148,6 +1152,71 @@ func (a *App) ReadImageBase64(path string) string {
 
 	base64Str := base64.StdEncoding.EncodeToString(bytes)
 	return fmt.Sprintf("data:%s;base64,%s", mimeType, base64Str)
+}
+
+// ExtractAudioPeaks reads a video/audio file and returns a normalized waveform (0.0 - 1.0)
+// samplesPerSec determines resolution (e.g., 20 peaks per second of video)
+func (a *App) ExtractAudioPeaks(filePath string, samplesPerSec int) ([]float64, error) {
+	// 1. Construct FFmpeg command
+	// -i input: input file
+	// -vn: disable video (faster)
+	// -ac 1: downmix to mono (we only need one wave)
+	// -ar 4000: low sample rate (sufficient for visual waveform)
+	// -f s16le: output raw 16-bit little-endian PCM
+	// -: output to stdout
+	cmd := exec.Command("ffmpeg", "-i", filePath, "-vn", "-ac", "1", "-ar", "4000", "-f", "s16le", "-")
+	
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+
+	var peaks []float64
+	reader := bufio.NewReader(stdout)
+	
+	// 4000Hz sample rate / samplesPerSec (e.g. 20) = 200 samples per peak chunk
+	chunkSize := 4000 / samplesPerSec
+	
+	// Buffer for one sample (int16 = 2 bytes)
+	sampleBytes := make([]byte, 2)
+	
+	currentMax := 0.0
+	sampleCount := 0
+
+	for {
+		_, err := io.ReadFull(reader, sampleBytes)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			break 
+		}
+
+		// Convert bytes to int16
+		val := int16(binary.LittleEndian.Uint16(sampleBytes))
+		absVal := math.Abs(float64(val))
+
+		// Track max in this chunk
+		if absVal > currentMax {
+			currentMax = absVal
+		}
+		sampleCount++
+
+		// Push to peaks when chunk is full
+		if sampleCount >= chunkSize {
+			// Normalize int16 range (32768) to 0.0-1.0
+			peaks = append(peaks, currentMax/32768.0)
+			currentMax = 0
+			sampleCount = 0
+		}
+	}
+    
+	cmd.Wait() 
+	return peaks, nil
 }
 
 // --- VIDEO / EXTENSION FUNCTIONS ---

@@ -1,6 +1,7 @@
 // frontend/lib/wailsSafe.ts
 import * as App from "../wailsjs/go/main/App";
 import { waitForWails } from "./wailsReady";
+import { ExtractAudioPeaks as WailsExtractAudioPeaks } from "../wailsjs/go/main/App";
 
 // One place to safely call any Wails Go method
 async function callGo<T>(fn: () => Promise<T>, label: string): Promise<T> {
@@ -34,6 +35,18 @@ export const ReadImageBase64 = (path: string) =>
   callGo(() => App.ReadImageBase64(path), "ReadImageBase64");
 export const ExtractLastFrame = (path: string) =>
   callGo(() => App.ExtractLastFrame(path), "ExtractLastFrame");
+
+export async function ExtractAudioPeaks(
+  filePath: string,
+  samplesPerSec: number,
+): Promise<number[]> {
+  try {
+    return await WailsExtractAudioPeaks(filePath, samplesPerSec);
+  } catch (e) {
+    console.error("Failed to extract peaks", e);
+    return [];
+  }
+}
 
 // ---- SettingsProvider safe wrappers ----
 export const GetComfyURL = () => callGo(() => App.GetComfyURL(), "GetComfyURL");
