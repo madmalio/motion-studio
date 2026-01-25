@@ -16,19 +16,21 @@ import {
   MousePointer2,
   Undo2,
   Redo2,
+  Volume2, // <--- NEW IMPORT
+  VolumeX, // <--- NEW IMPORT
 } from "lucide-react";
 import { useDroppable, useDraggable } from "@dnd-kit/core";
 import { CSS } from "@dnd-kit/utilities";
 
-const LEFT_PANEL_W = 160; // px
+const LEFT_PANEL_W = 160;
 const LEFT_PANEL_BG = "bg-[#2c2f33]";
 const LEFT_PANEL_BORDER = "border-r border-zinc-700";
 
-// --- NEW FAST WAVEFORM COMPONENT ---
+// --- WAVEFORM COMPONENT ---
 function TimelineWaveform({
   data,
   zoom,
-  color = "#ffffff",
+  color = "#D2FF44",
 }: {
   data: number[];
   zoom: number;
@@ -43,15 +45,11 @@ function TimelineWaveform({
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    // We generated peaks at 20 samples per second in Go
     const SAMPLES_PER_SEC = 20;
-
-    // Calculate total width based on data length
     const totalDuration = data.length / SAMPLES_PER_SEC;
     const width = Math.max(1, totalDuration * zoom);
     const height = canvas.clientHeight || 64;
 
-    // Handle High DPI displays for crisp lines
     const dpr = window.devicePixelRatio || 1;
     canvas.width = width * dpr;
     canvas.height = height * dpr;
@@ -60,17 +58,13 @@ function TimelineWaveform({
     ctx.clearRect(0, 0, width, height);
     ctx.fillStyle = color;
 
-    // Calculate bar width (at least 1px)
-    // If zoom is high, bars are wide. If zoom is low, bars are thin.
     const pixelsPerSample = zoom / SAMPLES_PER_SEC;
-    const barWidth = Math.max(0.5, pixelsPerSample - 0.5); // slight gap
+    const barWidth = Math.max(0.5, pixelsPerSample);
 
     for (let i = 0; i < data.length; i++) {
       const x = i * pixelsPerSample;
-      // data[i] is 0.0 - 1.0
-      const barHeight = Math.max(2, data[i] * height);
-      const y = height - barHeight; // Draw from bottom up
-
+      const barHeight = Math.max(2, data[i] * height * 0.8);
+      const y = (height - barHeight) / 2;
       ctx.fillRect(x, y, barWidth, barHeight);
     }
   }, [data, zoom, color]);
@@ -78,12 +72,7 @@ function TimelineWaveform({
   return <canvas ref={canvasRef} className="w-full h-full" />;
 }
 
-// --- LEGACY FALLBACK (Optional, for audio-only files without pre-calc) ---
-function LegacyTimelineWaveform({ url, zoom }: any) {
-  // Kept simple just in case, but ideally unused now
-  return null;
-}
-
+// --- TIMELINE ITEM ---
 function TimelineItemComponent({
   id,
   data,
@@ -96,7 +85,6 @@ function TimelineItemComponent({
   activeTool,
   onSplitItem,
   locked,
-  videoBlobs,
 }: any) {
   const { attributes, listeners, setNodeRef, transform, isDragging } =
     useDraggable({
@@ -123,18 +111,15 @@ function TimelineItemComponent({
     e.stopPropagation();
     e.preventDefault();
     setIsResizing(true);
-
     const startX = e.clientX;
     const startWidth = localState.width;
     const maxDur = data.maxDuration || data.duration || 4;
     const maxPx = maxDur * zoom;
-
     const onMove = (ev: PointerEvent) => {
       const diff = ev.clientX - startX;
       const newW = Math.max(10, Math.min(startWidth + diff, maxPx));
       setLocalState((prev) => ({ ...prev, width: newW }));
     };
-
     const onUp = (ev: PointerEvent) => {
       const diff = ev.clientX - startX;
       const newW = Math.max(10, Math.min(startWidth + diff, maxPx));
@@ -143,7 +128,6 @@ function TimelineItemComponent({
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
     };
-
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
   };
@@ -153,42 +137,34 @@ function TimelineItemComponent({
     e.stopPropagation();
     e.preventDefault();
     setIsResizing(true);
-
     const startX = e.clientX;
     const startWidth = localState.width;
     const startLeft = localState.left;
     const startTrim = data.trimStart || 0;
-
     const onMove = (ev: PointerEvent) => {
       const diff = ev.clientX - startX;
       let newLeft = startLeft + diff;
       let newWidth = startWidth - diff;
       let newTrim = startTrim + diff / zoom;
-
       if (newWidth < 10) {
         newLeft = startLeft + startWidth - 10;
         newWidth = 10;
         newTrim = startTrim + (startWidth - 10) / zoom;
       }
-
       if (newTrim < 0) {
         newTrim = 0;
         newLeft = startLeft - startTrim * zoom;
         newWidth = startWidth + startTrim * zoom;
       }
-
       if (newLeft < 0) newLeft = 0;
-
       setLocalState({ width: newWidth, left: newLeft });
     };
-
     const onUp = (ev: PointerEvent) => {
       setIsResizing(false);
       const diff = ev.clientX - startX;
       let newLeft = startLeft + diff;
       let newWidth = startWidth - diff;
       let newTrim = startTrim + diff / zoom;
-
       if (newWidth < 10) {
         newLeft = startLeft + startWidth - 10;
         newWidth = 10;
@@ -200,17 +176,14 @@ function TimelineItemComponent({
         newWidth = startWidth + startTrim * zoom;
       }
       if (newLeft < 0) newLeft = 0;
-
       onUpdate({
         startTime: newLeft / zoom,
         duration: newWidth / zoom,
         trimStart: newTrim,
       });
-
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
     };
-
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
   };
@@ -248,12 +221,12 @@ function TimelineItemComponent({
     opacity: isDragging ? 0 : 1,
   };
 
-  // 1. Calculate the TOTAL width of the full waveform (not just the clipped part)
   const SAMPLES_PER_SEC = 20;
   const fullWaveformDuration = data.waveform
     ? data.waveform.length / SAMPLES_PER_SEC
     : 0;
   const fullWaveformWidth = fullWaveformDuration * zoom;
+  const hasWaveform = data.waveform && data.waveform.length > 0;
 
   return (
     <div
@@ -262,44 +235,52 @@ function TimelineItemComponent({
       {...listeners}
       {...attributes}
       className={`
-        absolute top-0 bottom-0 group flex flex-col select-none 
+        absolute top-0 bottom-0 group select-none
         ${activeTool === "split" ? "cursor-crosshair" : "cursor-grab active:cursor-grabbing"}
       `}
       onClick={handleClick}
       onPointerMove={handlePointerMove}
       onPointerLeave={handlePointerLeave}
     >
-      {/* Inner Content Container */}
       <div className="absolute inset-0 flex flex-col overflow-hidden bg-[#375a6c] border border-[#213845] rounded-sm">
-        <div className="flex-1 relative overflow-hidden flex">
+        {/* VIDEO PREVIEW */}
+        <div className="flex-1 relative overflow-hidden flex bg-zinc-800">
           {data.previewBase64 && (
             <img
               src={data.previewBase64}
               className="h-full w-full object-cover opacity-80"
             />
           )}
-        </div>
 
-        {/* --- WAVEFORM RENDERING --- */}
-        {data.waveform && data.waveform.length > 0 ? (
-          <div
-            className="absolute bottom-0 h-1/2 opacity-80 pointer-events-none"
-            style={{
-              // We offset the waveform to the left based on trimStart
-              left: `-${(data.trimStart || 0) * zoom}px`,
-              width: `${fullWaveformWidth}px`,
-            }}
-          >
-            <TimelineWaveform data={data.waveform} zoom={zoom} />
+          <div className="absolute bottom-0 w-full bg-gradient-to-t from-black/90 to-transparent px-2 py-0.5 text-[9px] text-zinc-300 truncate font-mono pointer-events-none z-10">
+            {data.name} ({data.duration?.toFixed(2)}s)
           </div>
-        ) : null}
 
-        <div className="absolute bottom-0 w-full bg-[#20343e] px-2 py-0.5 text-[9px] text-zinc-300 truncate font-mono pointer-events-none z-10">
-          {data.name} ({data.duration?.toFixed(2)}s)
+          <div className="absolute inset-0 ring-inset ring-2 pointer-events-none transition-all ring-transparent group-hover:ring-white/30" />
         </div>
 
-        <div className="absolute inset-0 ring-inset ring-2 pointer-events-none transition-all ring-transparent group-hover:ring-white/30" />
+        {/* WAVEFORM BOX */}
+        <div className="h-[35%] min-h-[24px] bg-[#1a1a1c] border-t border-white/10 relative overflow-hidden shrink-0 flex items-center">
+          {hasWaveform ? (
+            <div
+              className="absolute top-0 bottom-0"
+              style={{
+                left: `-${(data.trimStart || 0) * zoom}px`,
+                width: `${fullWaveformWidth}px`,
+              }}
+            >
+              <TimelineWaveform
+                data={data.waveform}
+                zoom={zoom}
+                color="#D2FF44"
+              />
+            </div>
+          ) : (
+            <div className="w-full h-px bg-[#D2FF44]/30" />
+          )}
+        </div>
 
+        {/* Tools Overlay */}
         {activeTool === "split" && splitHoverX !== null && (
           <div
             className="absolute top-0 bottom-0 w-px bg-red-500 z-[60] pointer-events-none"
@@ -326,7 +307,6 @@ function TimelineItemComponent({
         )}
       </div>
 
-      {/* Resize Handle LEFT */}
       {!locked && (
         <div
           className="absolute left-0 top-0 bottom-0 w-2 -translate-x-1/2 cursor-ew-resize z-50 opacity-0 group-hover:opacity-100 hover:bg-white/20 flex items-center justify-center"
@@ -336,7 +316,6 @@ function TimelineItemComponent({
         </div>
       )}
 
-      {/* Resize Handle RIGHT */}
       {!locked && (
         <div
           className="absolute right-0 top-0 bottom-0 w-2 translate-x-1/2 cursor-ew-resize z-50 opacity-0 group-hover:opacity-100 hover:bg-white/20 flex items-center justify-center"
@@ -433,6 +412,7 @@ interface TimelinePanelProps {
   onToggleTrackLock?: (index: number) => void;
   onToggleTrackVisibility?: (index: number) => void;
   videoBlobs?: Map<string, string>;
+  onVolumeChange?: (volume: number) => void; // New prop for functionality (optional)
 }
 
 export default function TimelinePanel({
@@ -461,8 +441,10 @@ export default function TimelinePanel({
   onToggleTrackLock,
   onToggleTrackVisibility,
   videoBlobs,
+  onVolumeChange,
 }: TimelinePanelProps) {
   const [activeTool, setActiveTool] = useState<"select" | "split">("select");
+  const [volume, setVolume] = useState(1); // Local volume state 0-1
   const isHovering = useRef(false);
 
   useEffect(() => {
@@ -483,8 +465,8 @@ export default function TimelinePanel({
   const formatTime = (seconds: number) => {
     const m = Math.floor(seconds / 60);
     const s = Math.floor(seconds % 60);
-    const f = Math.floor((seconds % 1) * 30);
-    return `01:${m.toString().padStart(2, "0")}:${s
+    const f = Math.floor((seconds % 1) * 30); // 30fps frames
+    return `${m.toString().padStart(2, "0")}:${s
       .toString()
       .padStart(2, "0")}:${f.toString().padStart(2, "0")}`;
   };
@@ -576,6 +558,12 @@ export default function TimelinePanel({
     window.addEventListener("pointerup", onUp);
   };
 
+  const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = parseFloat(e.target.value);
+    setVolume(val);
+    if (onVolumeChange) onVolumeChange(val);
+  };
+
   return (
     <div
       className="h-full w-full bg-[#1e1e20] flex flex-col font-sans select-none border-t border-black"
@@ -659,6 +647,29 @@ export default function TimelinePanel({
             >
               +
             </button>
+
+            {/* --- VOLUME CONTROL (New) --- */}
+            <div className="flex items-center gap-2 ml-4 border-l border-zinc-700 pl-4">
+              <button
+                onClick={() => {
+                  const newVol = volume === 0 ? 1 : 0;
+                  setVolume(newVol);
+                  if (onVolumeChange) onVolumeChange(newVol);
+                }}
+                className="text-zinc-400 hover:text-white"
+              >
+                {volume === 0 ? <VolumeX size={14} /> : <Volume2 size={14} />}
+              </button>
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.05}
+                value={volume}
+                onChange={handleVolumeChange}
+                className="w-16 h-1 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-[#D2FF44]"
+              />
+            </div>
           </div>
         </div>
 
@@ -692,10 +703,6 @@ export default function TimelinePanel({
             <SkipForward size={18} />
           </button>
         </div>
-
-        <div className="font-mono text-lg text-[#D2FF44] tabular-nums">
-          {formatTime(currentTime)}
-        </div>
       </div>
 
       {/* TIMELINE AREA */}
@@ -705,8 +712,12 @@ export default function TimelinePanel({
           className={`shrink-0 ${LEFT_PANEL_BG} ${LEFT_PANEL_BORDER}`}
           style={{ width: LEFT_PANEL_W }}
         >
-          {/* Ruler left block */}
-          <div className="h-8 border-b border-zinc-700" />
+          {/* Ruler left block / TIMECODE */}
+          <div className="h-8 border-b border-zinc-700 flex items-center justify-center bg-[#1a1a1c]">
+            <span className="font-mono text-xs text-[#D2FF44] font-bold tabular-nums">
+              {formatTime(currentTime)}
+            </span>
+          </div>
 
           {/* Track headers */}
           {tracks.length === 0 ? (
@@ -798,24 +809,55 @@ export default function TimelinePanel({
           className="flex-1 min-w-0 overflow-x-auto overflow-y-auto relative"
         >
           <div className="relative" style={{ width: `${contentWidthPx}px` }}>
-            {/* RULER (sticky) */}
+            {/* RULER (Resolve Style) */}
             <div
-              className="h-8 bg-[#1a1a1c] border-b border-zinc-700 sticky top-0 z-30 cursor-ew-resize"
+              className="h-8 bg-[#1a1a1c] border-b border-zinc-700 sticky top-0 z-30 cursor-ew-resize select-none overflow-hidden"
               onPointerDown={handlePointerDown}
               onPointerMove={handlePointerMove}
               onPointerUp={handlePointerUp}
               onPointerLeave={handlePointerUp}
             >
               {Array.from({ length: Math.ceil(timelineSeconds) }).map(
-                (_, i) => (
-                  <div
-                    key={i}
-                    className="absolute top-0 bottom-0 border-l border-zinc-700 text-[9px] text-zinc-500 pl-1"
-                    style={{ left: `${i * zoom}px` }}
-                  >
-                    {i % 5 === 0 ? `00:${i.toString().padStart(2, "0")}` : ""}
-                  </div>
-                ),
+                (_, i) => {
+                  const left = i * zoom;
+                  // Optimization: skip rendering if way outside viewport (simplified check)
+                  // In a real app we'd filter the range, but React handles thousands of empty divs okay-ish
+                  return (
+                    <div
+                      key={i}
+                      className="absolute top-0 bottom-0 pointer-events-none"
+                      style={{ left: `${left}px` }}
+                    >
+                      {/* Major Tick (Seconds) */}
+                      <div className="absolute bottom-0 left-0 w-px h-3 bg-zinc-400" />
+                      {/* Time Label */}
+                      <span className="absolute bottom-3 left-1 text-[9px] text-zinc-500 font-mono">
+                        {formatTime(i).split(":")[1]}:
+                        {formatTime(i).split(":")[2]}
+                      </span>
+
+                      {/* Minor Ticks (Sub-seconds) */}
+                      {zoom > 40 && (
+                        <>
+                          {/* 0.5s */}
+                          <div
+                            className="absolute bottom-0 left-[50%] w-px h-2 bg-zinc-600"
+                            style={{ left: `${zoom * 0.5}px` }}
+                          />
+                          {/* Quarter/Tenth ticks if zoomed way in */}
+                          {zoom > 100 &&
+                            Array.from({ length: 9 }).map((_, j) => (
+                              <div
+                                key={j}
+                                className={`absolute bottom-0 w-px ${j === 4 ? "hidden" : "h-1 bg-zinc-700"}`} // skip 0.5 (index 4)
+                                style={{ left: `${zoom * ((j + 1) / 10)}px` }}
+                              />
+                            ))}
+                        </>
+                      )}
+                    </div>
+                  );
+                },
               )}
 
               {/* PLAYHEAD LINE + RED ARROW (diamond) */}

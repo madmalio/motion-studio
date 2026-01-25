@@ -9,7 +9,9 @@ import {
   Music,
   X,
 } from "lucide-react";
-import { memo, useState, useEffect, useRef } from "react";
+import { memo, useState, useEffect } from "react";
+
+// 1. Keep original imports for existing backend functions
 import {
   SelectImage,
   SelectAudio,
@@ -17,9 +19,15 @@ import {
   RenderShot,
   SetProjectThumbnail,
 } from "../../wailsjs/go/main/App";
-import { EventsOn, EventsOff } from "../../wailsjs/runtime";
+
+import { EventsOn } from "../../wailsjs/runtime";
 import { useSettings } from "../SettingsProvider";
-import AudioWaveform from "./AudioWaveform";
+
+// 2. Import new helper from wailsSafe
+import { ExtractAudioPeaks } from "../../lib/wailsSafe";
+
+// 3. Import new Waveform component
+import TrimmableWaveform from "./TrimmableWaveform";
 
 const GeneratorPanel = memo(function GeneratorPanel({
   activeShot,
@@ -37,6 +45,9 @@ const GeneratorPanel = memo(function GeneratorPanel({
   // --- PROGRESS STATE ---
   const [progress, setProgress] = useState(0);
   const [progressStatus, setProgressStatus] = useState("Initializing...");
+
+  // --- WAVEFORM STATE ---
+  const [audioPeaks, setAudioPeaks] = useState<number[]>([]);
 
   // Auto-select workflow
   useEffect(() => {
@@ -63,10 +74,23 @@ const GeneratorPanel = memo(function GeneratorPanel({
     });
 
     return () => {
-      stopProgress(); // Clean up listeners
+      stopProgress();
       stopStatus();
     };
   }, [isRendering]);
+
+  // --- LOAD PEAKS WHEN AUDIO CHANGES ---
+  useEffect(() => {
+    if (activeShot?.audioPath) {
+      setAudioPeaks([]);
+      // Call Go Backend (20 samples/sec)
+      ExtractAudioPeaks(activeShot.audioPath, 20).then((peaks) => {
+        setAudioPeaks(peaks);
+      });
+    } else {
+      setAudioPeaks([]);
+    }
+  }, [activeShot?.audioPath]);
 
   // --- HANDLERS ---
 
@@ -89,13 +113,7 @@ const GeneratorPanel = memo(function GeneratorPanel({
   const handleClearAudio = (e: React.MouseEvent) => {
     e.stopPropagation();
     updateActiveShot({ audioPath: "", audioStart: 0, audioDuration: 0 });
-  };
-
-  // Helper to stream local files
-  const getLocalMediaUrl = (path: string) => {
-    if (!path) return "";
-    const cleanPath = path.replace(/\\/g, "/");
-    return `http://localhost:3456/video/${cleanPath}`;
+    setAudioPeaks([]);
   };
 
   const handleSetThumbnail = async () => {
@@ -136,7 +154,8 @@ const GeneratorPanel = memo(function GeneratorPanel({
     return <div className="p-10 text-xs text-zinc-500">Select a shot</div>;
 
   return (
-    <div className="h-full overflow-y-auto p-4 space-y-6">
+    // Added overflow-x-hidden here
+    <div className="h-full overflow-y-auto overflow-x-hidden p-4 space-y-6">
       {/* STATUS PILL */}
       <div className="flex items-center justify-between">
         <h2 className="text-sm font-bold text-zinc-100">Generator</h2>
@@ -226,10 +245,16 @@ const GeneratorPanel = memo(function GeneratorPanel({
                 </button>
               </div>
 
-              <AudioWaveform
-                url={getLocalMediaUrl(activeShot.audioPath)}
-                startTime={activeShot.audioStart || 0}
-                duration={activeShot.audioDuration || 0}
+              {/* REPLACED WITH NEW TRIMMABLE WAVEFORM */}
+              <TrimmableWaveform
+                data={audioPeaks}
+                trimStart={activeShot.audioStart || 0}
+                trimDuration={activeShot.audioDuration || 0}
+                audioUrl={
+                  activeShot.audioPath
+                    ? `http://localhost:3456/video/${activeShot.audioPath.replace(/\\/g, "/")}`
+                    : undefined
+                }
                 onTrimChange={(start, duration) => {
                   updateActiveShot({
                     audioStart: start,
@@ -307,11 +332,10 @@ const GeneratorPanel = memo(function GeneratorPanel({
           </div>
         </div>
 
-        {/* RENDER BUTTON WITH PROGRESS BAR */}
+        {/* RENDER BUTTON */}
         <div className="mt-4">
           {isRendering ? (
             <div className="w-full h-10 bg-zinc-900 rounded border border-zinc-800 relative overflow-hidden flex items-center justify-center">
-              {/* Background Bar */}
               <div
                 className="absolute left-0 top-0 h-full bg-[#D2FF44]/20 transition-all duration-300 ease-out"
                 style={{ width: `${progress}%` }}
