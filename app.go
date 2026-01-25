@@ -59,6 +59,12 @@ func (a *App) startup(ctx context.Context) {
 	a.loadNodeMappings()
 }
 
+// Ping is a fast, safe handshake that lets the frontend verify the Wails bridge
+// is actually ready for backend calls.
+func (a *App) Ping() bool {
+	return true
+}
+
 // --- ENGINE BRIDGE (Frontend calls this) ---
 
 // UpdateTimeline receives a list of file paths, generates a playlist,

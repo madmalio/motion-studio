@@ -70,6 +70,10 @@ export function ImportWorkflow(arg1) {
   return window['go']['main']['App']['ImportWorkflow'](arg1);
 }
 
+export function Ping() {
+  return window['go']['main']['App']['Ping']();
+}
+
 export function ReadImageBase64(arg1) {
   return window['go']['main']['App']['ReadImageBase64'](arg1);
 }

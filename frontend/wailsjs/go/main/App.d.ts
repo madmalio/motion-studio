@@ -36,6 +36,8 @@ export function GetWorkflows():Promise<Array<main.Workflow>>;
 
 export function ImportWorkflow(arg1:string):Promise<string>;
 
+export function Ping():Promise<boolean>;
+
 export function ReadImageBase64(arg1:string):Promise<string>;
 
 export function RenameWorkflow(arg1:string,arg2:string):Promise<string>;

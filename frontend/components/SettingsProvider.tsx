@@ -28,7 +28,7 @@ import {
   ImportWorkflow,
   DeleteWorkflow,
   RenameWorkflow,
-} from "../wailsjs/go/main/App";
+} from "../lib/wailsSafe";
 
 interface SettingsContextType {
   openSettings: (tab?: "general" | "workflows") => void;

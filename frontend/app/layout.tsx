@@ -1,8 +1,9 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import Shell from "../components/Shell";
-import { ConfirmProvider } from "../components/ConfirmProvider"; // <--- Import
+import { ConfirmProvider } from "../components/ConfirmProvider";
 import { SettingsProvider } from "../components/SettingsProvider";
+import WailsScripts from "../components/WailsScripts";
 
 export const metadata: Metadata = {
   title: "Motion Studio",
@@ -11,13 +12,15 @@ export const metadata: Metadata = {
 
 export default function RootLayout({
   children,
-}: Readonly<{
+}: {
   children: React.ReactNode;
-}>) {
+}) {
   return (
     <html lang="en">
       <body className="antialiased bg-[#09090b] text-white">
-        {/* Wrap Shell inside ConfirmProvider */}
+        {/* Wails bridge – client-only, early, safe */}
+        <WailsScripts />
+
         <ConfirmProvider>
           <SettingsProvider>
             <Shell>{children}</Shell>

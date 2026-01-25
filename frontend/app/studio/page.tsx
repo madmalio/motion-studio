@@ -26,6 +26,8 @@ import GeneratorPanel from "../../components/studio/GeneratorPanel";
 import LibraryPanel from "../../components/studio/LibraryPanel";
 import ViewerPanel from "../../components/studio/ViewerPanel";
 import TimelinePanel from "../../components/studio/TimelinePanel";
+import { waitForWails } from "../../lib/wailsReady";
+
 // --- WAILS IMPORTS ---
 import {
   GetProject,
@@ -37,7 +39,7 @@ import {
   DeleteShot,
   SaveTimeline,
   GetTimeline,
-} from "../../wailsjs/go/main/App";
+} from "../../lib/wailsSafe";
 
 // --- TYPES ---
 interface Shot {
@@ -87,6 +89,58 @@ const isTimelineDropTarget = (overId: string, tracks: TimelineItem[][]) => {
   if (overId.startsWith("track-")) return true;
   return tracks.some((t) => t.some((item) => item.timelineId === overId));
 };
+
+function WailsGuard({ children }: { children: React.ReactNode }) {
+  const [isReady, setIsReady] = useState(false);
+  const [showError, setShowError] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+
+    // show "disconnected" if it takes too long
+    const timer = setTimeout(() => {
+      if (alive) setShowError(true);
+    }, 2000);
+
+    waitForWails()
+      .then(() => {
+        if (!alive) return;
+        setIsReady(true);
+        clearTimeout(timer);
+      })
+      .catch(() => {
+        if (!alive) return;
+        setShowError(true);
+        clearTimeout(timer);
+      });
+
+    return () => {
+      alive = false;
+      clearTimeout(timer);
+    };
+  }, []);
+
+  if (isReady) return <>{children}</>;
+
+  if (showError)
+    return (
+      <div className="h-full w-full flex flex-col items-center justify-center bg-[#09090b] text-red-500 gap-4">
+        <Loader2 className="animate-spin text-red-500" size={32} />
+        <div className="text-center">
+          <h3 className="font-bold text-lg text-white">Backend Disconnected</h3>
+          <p className="text-sm text-zinc-500 mt-2">
+            Please make sure the application is running via Wails.
+          </p>
+        </div>
+      </div>
+    );
+
+  return (
+    <div className="h-full w-full flex items-center justify-center bg-[#09090b] text-[#D2FF44] gap-2">
+      <Loader2 className="animate-spin" /> Initializing System...
+    </div>
+  );
+}
 
 function StudioContent() {
   const router = useRouter();
@@ -304,6 +358,9 @@ function StudioContent() {
   const loadData = async (pId: string, sId: string) => {
     setIsLoading(true);
     try {
+      // Critical: on refresh the Wails bridge may exist but not be callable yet.
+      // This handshake prevents "backend disconnected" freezes.
+
       const p = await GetProject(pId);
       setProject(p);
       const sData = await GetScenes(pId);
@@ -1003,7 +1060,9 @@ function StudioContent() {
 export default function StudioPage() {
   return (
     <Suspense fallback={<div className="p-10 text-[#D2FF44]">Loading...</div>}>
-      <StudioContent />
+      <WailsGuard>
+        <StudioContent />
+      </WailsGuard>
     </Suspense>
   );
 }
