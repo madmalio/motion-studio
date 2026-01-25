@@ -463,12 +463,16 @@ export default function TimelinePanel({
   }, []);
 
   const formatTime = (seconds: number) => {
-    const m = Math.floor(seconds / 60);
-    const s = Math.floor(seconds % 60);
-    const f = Math.floor((seconds % 1) * 30); // 30fps frames
-    return `${m.toString().padStart(2, "0")}:${s
+    const adjusted = seconds + 3600; // Start at 01:00:00:00
+    const h = Math.floor(adjusted / 3600);
+    const m = Math.floor((adjusted % 3600) / 60);
+    const s = Math.floor(adjusted % 60);
+    const f = Math.floor((adjusted % 1) * 30);
+    return `${h.toString().padStart(2, "0")}:${m
       .toString()
-      .padStart(2, "0")}:${f.toString().padStart(2, "0")}`;
+      .padStart(2, "0")}:${s.toString().padStart(2, "0")}:${f
+      .toString()
+      .padStart(2, "0")}`;
   };
 
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -647,29 +651,6 @@ export default function TimelinePanel({
             >
               +
             </button>
-
-            {/* --- VOLUME CONTROL (New) --- */}
-            <div className="flex items-center gap-2 ml-4 border-l border-zinc-700 pl-4">
-              <button
-                onClick={() => {
-                  const newVol = volume === 0 ? 1 : 0;
-                  setVolume(newVol);
-                  if (onVolumeChange) onVolumeChange(newVol);
-                }}
-                className="text-zinc-400 hover:text-white"
-              >
-                {volume === 0 ? <VolumeX size={14} /> : <Volume2 size={14} />}
-              </button>
-              <input
-                type="range"
-                min={0}
-                max={1}
-                step={0.05}
-                value={volume}
-                onChange={handleVolumeChange}
-                className="w-16 h-1 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-[#D2FF44]"
-              />
-            </div>
           </div>
         </div>
 
@@ -702,6 +683,29 @@ export default function TimelinePanel({
           >
             <SkipForward size={18} />
           </button>
+        </div>
+
+        {/* --- VOLUME CONTROL (Moved to Right) --- */}
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => {
+              const newVol = volume === 0 ? 1 : 0;
+              setVolume(newVol);
+              if (onVolumeChange) onVolumeChange(newVol);
+            }}
+            className="text-zinc-400 hover:text-white"
+          >
+            {volume === 0 ? <VolumeX size={14} /> : <Volume2 size={14} />}
+          </button>
+          <input
+            type="range"
+            min={0}
+            max={1}
+            step={0.05}
+            value={volume}
+            onChange={handleVolumeChange}
+            className="w-16 h-1 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-[#D2FF44]"
+          />
         </div>
       </div>
 
@@ -820,40 +824,39 @@ export default function TimelinePanel({
               {Array.from({ length: Math.ceil(timelineSeconds) }).map(
                 (_, i) => {
                   const left = i * zoom;
-                  // Optimization: skip rendering if way outside viewport (simplified check)
-                  // In a real app we'd filter the range, but React handles thousands of empty divs okay-ish
                   return (
                     <div
                       key={i}
                       className="absolute top-0 bottom-0 pointer-events-none"
                       style={{ left: `${left}px` }}
                     >
-                      {/* Major Tick (Seconds) */}
-                      <div className="absolute bottom-0 left-0 w-px h-3 bg-zinc-400" />
-                      {/* Time Label */}
-                      <span className="absolute bottom-3 left-1 text-[9px] text-zinc-500 font-mono">
-                        {formatTime(i).split(":")[1]}:
-                        {formatTime(i).split(":")[2]}
-                      </span>
+                      {/* Tick hierarchy (top) */}
+                      {/* Tick hierarchy */}
+                      {i % 30 === 0 ? (
+                        /* BIG tick — 30s */
+                        <div className="absolute top-0 left-0 w-px h-4 bg-zinc-300" />
+                      ) : i % 15 === 0 ? (
+                        /* HALF tick — 15s */
+                        <div className="absolute top-0 left-0 w-px h-3 bg-zinc-400" />
+                      ) : (
+                        /* SMALL-MED tick — 1s */
+                        <div className="absolute top-0 left-0 w-px h-2 bg-zinc-600" />
+                      )}
 
-                      {/* Minor Ticks (Sub-seconds) */}
-                      {zoom > 40 && (
-                        <>
-                          {/* 0.5s */}
-                          <div
-                            className="absolute bottom-0 left-[50%] w-px h-2 bg-zinc-600"
-                            style={{ left: `${zoom * 0.5}px` }}
-                          />
-                          {/* Quarter/Tenth ticks if zoomed way in */}
-                          {zoom > 100 &&
-                            Array.from({ length: 9 }).map((_, j) => (
-                              <div
-                                key={j}
-                                className={`absolute bottom-0 w-px ${j === 4 ? "hidden" : "h-1 bg-zinc-700"}`} // skip 0.5 (index 4)
-                                style={{ left: `${zoom * ((j + 1) / 10)}px` }}
-                              />
-                            ))}
-                        </>
+                      {/* Small ticks — 0.2s */}
+                      {Array.from({ length: 4 }).map((_, j) => (
+                        <div
+                          key={j}
+                          className="absolute top-0 w-px h-1 bg-zinc-700"
+                          style={{ left: `${zoom * ((j + 1) / 5)}px` }}
+                        />
+                      ))}
+
+                      {/* Labels — every 5s (full timecode) */}
+                      {i % 30 === 0 && (
+                        <span className="absolute top-4 left-1 text-[9px] text-zinc-400 font-mono select-none">
+                          {formatTime(i)}
+                        </span>
                       )}
                     </div>
                   );
