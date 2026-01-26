@@ -496,6 +496,19 @@ export default function TimelinePanel({
       .padStart(2, "0")}`;
   };
 
+  const isAudioTrackAt = (idx: number) => {
+    const n = trackSettings?.[idx]?.name || "";
+    return n.trim().toUpperCase().startsWith("A");
+  };
+
+  const videoTrackIndices = tracks
+    .map((_, i) => i)
+    .filter((i) => !isAudioTrackAt(i));
+
+  const audioTrackIndices = tracks
+    .map((_, i) => i)
+    .filter((i) => isAudioTrackAt(i));
+
   const scrollRef = useRef<HTMLDivElement>(null);
   const [isScrubbing, setIsScrubbing] = useState(false);
   const [viewportPx, setViewportPx] = useState(0);
@@ -842,9 +855,12 @@ export default function TimelinePanel({
         {/* RIGHT SCROLL AREA (ONE horizontal scrollbar lives here) */}
         <div
           ref={scrollRef}
-          className="flex-1 min-w-0 overflow-x-auto overflow-y-auto relative"
+          className="flex-1 min-w-0 overflow-x-auto overflow-y-hidden relative"
         >
-          <div className="relative" style={{ width: `${contentWidthPx}px` }}>
+          <div
+            className="relative h-full flex flex-col"
+            style={{ width: `${contentWidthPx}px` }}
+          >
             {/* RULER (Resolve Style) */}
             <div
               className="h-8 bg-[#1a1a1c] border-b border-zinc-700 sticky top-0 z-30 cursor-ew-resize select-none overflow-hidden"
@@ -905,48 +921,87 @@ export default function TimelinePanel({
             </div>
 
             {/* TRACKS */}
-            {tracks.length === 0 ? (
-              <div className="h-24 border-b border-zinc-800 bg-[#151517]" />
-            ) : (
-              tracks.map((track: any[], trackIndex: number) => {
-                const height = trackSettings?.[trackIndex]?.height || 96;
+            <div className="flex-1 min-h-0 flex flex-col">
+              {tracks.length === 0 ? (
+                <div className="h-24 border-b border-zinc-800 bg-[#151517]" />
+              ) : (
+                <>
+                  {/* VIDEO TRACKS */}
+                  <div className="flex-1 min-h-0 overflow-y-auto">
+                    {videoTrackIndices.map((trackIndex: number) => {
+                      const track = tracks[trackIndex] || [];
+                      const height = trackSettings?.[trackIndex]?.height || 96;
 
-                const settings = trackSettings?.[trackIndex];
-                const isAudioTrack =
-                  settings?.type === "audio" ||
-                  settings?.name?.trim().toUpperCase().startsWith("A");
-
-                return (
-                  <div
-                    key={trackIndex}
-                    className="border-b border-zinc-800 relative bg-[#151517]"
-                    style={{ height }}
-                  >
-                    {/* PLAYHEAD through tracks */}
-                    <div
-                      className="absolute top-0 bottom-0 w-px bg-red-500 z-40 pointer-events-none"
-                      style={{ left: `${currentTime * zoom}px` }}
-                    />
-                    <TrackDroppable
-                      id={`timeline-track-${trackIndex}`}
-                      items={track}
-                      trackIndex={trackIndex}
-                      onRemoveItem={onRemoveItem}
-                      onUpdateItem={onUpdateItem}
-                      onShotClick={onShotClick}
-                      zoom={zoom}
-                      activeShotId={activeShotId}
-                      activeTool={activeTool}
-                      onSplitItem={onSplit}
-                      locked={trackSettings?.[trackIndex]?.locked}
-                      visible={trackSettings?.[trackIndex]?.visible}
-                      videoBlobs={videoBlobs}
-                      isAudioTrack={isAudioTrack}
-                    />
+                      return (
+                        <div
+                          key={trackIndex}
+                          className="border-b border-zinc-800 relative bg-[#151517]"
+                          style={{ height }}
+                        >
+                          <div
+                            className="absolute top-0 bottom-0 w-px bg-red-500 z-40 pointer-events-none"
+                            style={{ left: `${currentTime * zoom}px` }}
+                          />
+                          <TrackDroppable
+                            id={`timeline-track-${trackIndex}`}
+                            items={track}
+                            trackIndex={trackIndex}
+                            onRemoveItem={onRemoveItem}
+                            onUpdateItem={onUpdateItem}
+                            onShotClick={onShotClick}
+                            zoom={zoom}
+                            activeShotId={activeShotId}
+                            activeTool={activeTool}
+                            onSplitItem={onSplit}
+                            locked={trackSettings?.[trackIndex]?.locked}
+                            visible={trackSettings?.[trackIndex]?.visible}
+                            videoBlobs={videoBlobs}
+                            isAudioTrack={false}
+                          />
+                        </div>
+                      );
+                    })}
                   </div>
-                );
-              })
-            )}
+
+                  {/* AUDIO TRACKS (own vertical scroll) */}
+                  <div className="h-40 overflow-y-auto border-t border-zinc-800">
+                    {audioTrackIndices.map((trackIndex: number) => {
+                      const track = tracks[trackIndex] || [];
+                      const height = trackSettings?.[trackIndex]?.height || 64;
+
+                      return (
+                        <div
+                          key={trackIndex}
+                          className="border-b border-zinc-800 relative bg-[#151517]"
+                          style={{ height }}
+                        >
+                          <div
+                            className="absolute top-0 bottom-0 w-px bg-red-500 z-40 pointer-events-none"
+                            style={{ left: `${currentTime * zoom}px` }}
+                          />
+                          <TrackDroppable
+                            id={`timeline-track-${trackIndex}`}
+                            items={track}
+                            trackIndex={trackIndex}
+                            onRemoveItem={onRemoveItem}
+                            onUpdateItem={onUpdateItem}
+                            onShotClick={onShotClick}
+                            zoom={zoom}
+                            activeShotId={activeShotId}
+                            activeTool={activeTool}
+                            onSplitItem={onSplit}
+                            locked={trackSettings?.[trackIndex]?.locked}
+                            visible={trackSettings?.[trackIndex]?.visible}
+                            videoBlobs={videoBlobs}
+                            isAudioTrack={true}
+                          />
+                        </div>
+                      );
+                    })}
+                  </div>
+                </>
+              )}
+            </div>
           </div>
         </div>
       </div>

@@ -719,31 +719,21 @@ function StudioContent() {
     setTracks((prevTracks) => {
       const newTracks = [...prevTracks];
 
-      // Find where audio tracks start (A1, A2, ...)
-      const audioStart = trackSettings.findIndex((t) =>
-        (t.name || "").trim().toUpperCase().startsWith("A"),
-      );
+      // Insert new video track at the TOP of the timeline
+      newTracks.splice(0, 0, []);
 
-      // Insert new video track at the TOP of the video stack:
-      // index 0 if no audio, otherwise index 0 still works (we keep all videos above audio)
-      const insertAt = audioStart === -1 ? 0 : 0;
-
-      newTracks.splice(insertAt, 0, []);
       return newTracks;
     });
 
     setTrackSettings((prevSettings) => {
       const newSettings = [...prevSettings];
 
-      // Count current video tracks (not audio)
       const videoCount = newSettings.filter(
         (t) => !(t.name || "").trim().toUpperCase().startsWith("A"),
       ).length;
 
-      // New one should be V{videoCount+1} and appear above V1, etc.
       const name = `V${videoCount + 1}`;
 
-      // Insert at top (index 0)
       newSettings.splice(0, 0, {
         locked: false,
         visible: true,
