@@ -85,6 +85,7 @@ function TimelineItemComponent({
   activeTool,
   onSplitItem,
   locked,
+  isAudioTrack,
 }: any) {
   const { attributes, listeners, setNodeRef, transform, isDragging } =
     useDraggable({
@@ -242,45 +243,59 @@ function TimelineItemComponent({
       onPointerMove={handlePointerMove}
       onPointerLeave={handlePointerLeave}
     >
-      <div className="absolute inset-0 flex flex-col overflow-hidden bg-[#375a6c] border border-[#213845] rounded-sm">
-        {/* VIDEO PREVIEW */}
-        <div className="flex-1 relative overflow-hidden flex bg-zinc-800">
-          {data.previewBase64 && (
-            <img
-              src={data.previewBase64}
-              className="h-full w-full object-cover opacity-80"
-            />
-          )}
-
-          <div className="absolute bottom-0 w-full bg-gradient-to-t from-black/90 to-transparent px-2 py-0.5 text-[9px] text-zinc-300 truncate font-mono pointer-events-none z-10">
-            {data.name} ({data.duration?.toFixed(2)}s)
-          </div>
-
-          <div className="absolute inset-0 ring-inset ring-2 pointer-events-none transition-all ring-transparent group-hover:ring-white/30" />
-        </div>
-
-        {/* WAVEFORM BOX */}
-        <div className="h-[35%] min-h-[24px] bg-[#1a1a1c] border-t border-white/10 relative overflow-hidden shrink-0 flex items-center">
-          {hasWaveform ? (
-            <div
-              className="absolute top-0 bottom-0"
-              style={{
-                left: `-${(data.trimStart || 0) * zoom}px`,
-                width: `${fullWaveformWidth}px`,
-              }}
-            >
-              <TimelineWaveform
-                data={data.waveform}
-                zoom={zoom}
-                color="#D2FF44"
+      <div
+        className={`absolute inset-0 flex flex-col overflow-hidden border rounded-sm ${
+          isAudioTrack
+            ? "bg-[#1a1a1c] border-white/10"
+            : "bg-[#375a6c] border-[#213845]"
+        }`}
+      >
+        {/* VIDEO PREVIEW (video tracks only) */}
+        {!isAudioTrack && (
+          <div className="flex-1 relative overflow-hidden flex bg-zinc-800">
+            {data.previewBase64 && (
+              <img
+                src={data.previewBase64}
+                className="h-full w-full object-cover opacity-80"
               />
-            </div>
-          ) : (
-            <div className="w-full h-px bg-[#D2FF44]/30" />
-          )}
-        </div>
+            )}
 
-        {/* Tools Overlay */}
+            <div className="absolute bottom-0 w-full bg-gradient-to-t from-black/90 to-transparent px-2 py-0.5 text-[9px] text-zinc-300 truncate font-mono pointer-events-none z-10">
+              {data.name} ({data.duration?.toFixed(2)}s)
+            </div>
+
+            <div className="absolute inset-0 ring-inset ring-2 pointer-events-none transition-all ring-transparent group-hover:ring-white/30" />
+          </div>
+        )}
+
+        {/* WAVEFORM (audio tracks = full height, video tracks = bottom strip) */}
+        {isAudioTrack && (
+          <div className="relative overflow-hidden shrink-0 flex items-center flex-1 bg-[#101012]">
+            {hasWaveform ? (
+              <div
+                className="absolute top-0 bottom-0"
+                style={{
+                  left: `-${(data.trimStart || 0) * zoom}px`,
+                  width: `${fullWaveformWidth}px`,
+                }}
+              >
+                <TimelineWaveform
+                  data={data.waveform}
+                  zoom={zoom}
+                  color="#D2FF44"
+                />
+              </div>
+            ) : (
+              <div className="w-full h-px bg-[#D2FF44]/30" />
+            )}
+
+            <div className="absolute top-1 left-2 text-[9px] text-zinc-400 font-mono pointer-events-none">
+              {data.name}
+            </div>
+          </div>
+        )}
+
+        {/* Tools Overlay stays the same */}
         {activeTool === "split" && splitHoverX !== null && (
           <div
             className="absolute top-0 bottom-0 w-px bg-red-500 z-[60] pointer-events-none"
@@ -342,6 +357,7 @@ function TrackDroppable({
   locked,
   visible,
   videoBlobs,
+  isAudioTrack,
 }: any) {
   const { setNodeRef } = useDroppable({
     id,
@@ -374,6 +390,7 @@ function TrackDroppable({
           onSplitItem={onSplitItem}
           locked={locked}
           videoBlobs={videoBlobs}
+          isAudioTrack={isAudioTrack}
         />
       ))}
     </div>
@@ -384,7 +401,8 @@ interface TimelinePanelProps {
   tracks: any[][];
   onRemoveItem: (id: string) => void;
   onUpdateItem: (id: string, updates: any) => void;
-  onAddTrack: () => void;
+  onAddVideoTrack: () => void;
+  onAddAudioTrack: () => void;
   isPlaying: boolean;
   togglePlay: () => void;
   currentTime: number;
@@ -405,6 +423,7 @@ interface TimelinePanelProps {
     visible: boolean;
     name: string;
     height?: number;
+    type?: "video" | "audio";
   }[];
   onDeleteTrack?: (index: number) => void;
   onRenameTrack?: (index: number, newName: string) => void;
@@ -419,7 +438,9 @@ export default function TimelinePanel({
   tracks,
   onRemoveItem,
   onUpdateItem,
-  onAddTrack,
+  onAddVideoTrack,
+  onAddAudioTrack,
+
   isPlaying,
   togglePlay,
   currentTime,
@@ -578,10 +599,17 @@ export default function TimelinePanel({
       <div className="h-10 border-b border-black/40 flex items-center px-4 bg-[#262629] shrink-0 justify-between relative">
         <div className="flex items-center gap-2">
           <button
-            onClick={onAddTrack}
+            onClick={onAddVideoTrack}
             className="flex items-center gap-1 text-[10px] bg-zinc-800 hover:bg-zinc-700 px-2 py-1 rounded text-zinc-300"
           >
-            <Plus size={10} /> Add Track
+            <Plus size={10} /> Add Video
+          </button>
+
+          <button
+            onClick={onAddAudioTrack}
+            className="flex items-center gap-1 text-[10px] bg-zinc-800 hover:bg-zinc-700 px-2 py-1 rounded text-zinc-300"
+          >
+            <Plus size={10} /> Add Audio
           </button>
 
           <button
@@ -736,6 +764,10 @@ export default function TimelinePanel({
                 name: `Track ${trackIndex + 1}`,
                 height: 96,
               };
+              const isAudioTrack =
+                settings.type === "audio" ||
+                settings.name?.trim().toUpperCase().startsWith("A");
+
               const height = settings.height || 96;
               return (
                 <div
@@ -878,6 +910,12 @@ export default function TimelinePanel({
             ) : (
               tracks.map((track: any[], trackIndex: number) => {
                 const height = trackSettings?.[trackIndex]?.height || 96;
+
+                const settings = trackSettings?.[trackIndex];
+                const isAudioTrack =
+                  settings?.type === "audio" ||
+                  settings?.name?.trim().toUpperCase().startsWith("A");
+
                 return (
                   <div
                     key={trackIndex}
@@ -903,6 +941,7 @@ export default function TimelinePanel({
                       locked={trackSettings?.[trackIndex]?.locked}
                       visible={trackSettings?.[trackIndex]?.visible}
                       videoBlobs={videoBlobs}
+                      isAudioTrack={isAudioTrack}
                     />
                   </div>
                 );

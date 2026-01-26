@@ -71,6 +71,7 @@ interface Scene {
 
 interface TimelineItem extends Shot {
   timelineId: string;
+  pairId?: string;
   trackIndex?: number;
   startTime: number;
   maxDuration?: number;
@@ -92,6 +93,13 @@ const findContainer = (id: string, tracks: TimelineItem[][]) => {
 const isTimelineDropTarget = (overId: string, tracks: TimelineItem[][]) => {
   if (overId.startsWith("track-")) return true;
   return tracks.some((t) => t.some((item) => item.timelineId === overId));
+};
+
+const findAudioTrackIndex = (trackSettings: { name: string }[] | undefined) => {
+  if (!trackSettings) return -1;
+  return trackSettings.findIndex((t) =>
+    (t.name || "").trim().toUpperCase().startsWith("A"),
+  );
 };
 
 function WailsGuard({ children }: { children: React.ReactNode }) {
@@ -680,18 +688,72 @@ function StudioContent() {
   };
 
   // --- TRACK MANAGEMENT ---
+  const handleAddAudioTrack = () => {
+    recordHistory();
+
+    // add a new empty track at the end
+    setTracks((prev) => [...prev, []]);
+
+    // name it A1, then A2, then A3...
+    setTrackSettings((prev) => {
+      const audioCount = prev.filter((t) =>
+        (t.name || "").trim().toUpperCase().startsWith("A"),
+      ).length;
+
+      return [
+        ...prev,
+        {
+          locked: false,
+          visible: true,
+          name: `A${audioCount + 1}`,
+          height: 64,
+          type: "audio",
+        } as any,
+      ];
+    });
+  };
+
   const handleAddTrack = () => {
     recordHistory();
-    setTracks((prev) => [...prev, []]);
-    setTrackSettings((prev) => [
-      ...prev,
-      {
+
+    setTracks((prevTracks) => {
+      const newTracks = [...prevTracks];
+
+      // Find where audio tracks start (A1, A2, ...)
+      const audioStart = trackSettings.findIndex((t) =>
+        (t.name || "").trim().toUpperCase().startsWith("A"),
+      );
+
+      // Insert new video track at the TOP of the video stack:
+      // index 0 if no audio, otherwise index 0 still works (we keep all videos above audio)
+      const insertAt = audioStart === -1 ? 0 : 0;
+
+      newTracks.splice(insertAt, 0, []);
+      return newTracks;
+    });
+
+    setTrackSettings((prevSettings) => {
+      const newSettings = [...prevSettings];
+
+      // Count current video tracks (not audio)
+      const videoCount = newSettings.filter(
+        (t) => !(t.name || "").trim().toUpperCase().startsWith("A"),
+      ).length;
+
+      // New one should be V{videoCount+1} and appear above V1, etc.
+      const name = `V${videoCount + 1}`;
+
+      // Insert at top (index 0)
+      newSettings.splice(0, 0, {
         locked: false,
         visible: true,
-        name: `Track ${prev.length + 1}`,
+        name,
         height: 96,
-      },
-    ]);
+        type: "video",
+      } as any);
+
+      return newSettings;
+    });
   };
 
   const handleDeleteTrack = (index: number) => {
@@ -769,6 +831,11 @@ function StudioContent() {
     const targetTrackIndex = parseInt(
       dropContainer.replace("timeline-track-", ""),
     );
+    const trackIsAudio = (idx: number) =>
+      (trackSettings?.[idx]?.name || "").trim().toUpperCase().startsWith("A");
+
+    const targetIsAudio = trackIsAudio(targetTrackIndex);
+
     const activeRect = active.rect.current.translated;
     const overRect = over.rect;
 
@@ -893,6 +960,7 @@ function StudioContent() {
       active.data.current?.type === "shot" ||
       shots.some((s) => s.id === active.id);
     if (isLibraryItem) {
+      if (targetIsAudio) return;
       const shotData =
         active.data.current?.shot || shots.find((s) => s.id === active.id);
       if (!shotData) return;
@@ -900,6 +968,7 @@ function StudioContent() {
       const newItem: TimelineItem = {
         ...shotData,
         timelineId: crypto.randomUUID(),
+        pairId: crypto.randomUUID(),
         duration: shotData.duration || 4,
         trackIndex: targetTrackIndex,
         maxDuration: shotData.duration || 4,
@@ -907,13 +976,46 @@ function StudioContent() {
         volume: 1,
         muted: false,
       };
+
       recordHistory();
       setTracks((prev) => {
-        const newTracks = [...prev];
+        let newTracks = [...prev];
+
+        // 1) Drop video clip on the target track (existing behavior)
         newTracks[targetTrackIndex] = applyOverwrite(
           newTracks[targetTrackIndex],
           newItem,
         );
+
+        // 2) Ensure A1 exists (auto-create audio track)
+        let audioTrackIndex = trackSettings.findIndex((t) =>
+          (t.name || "").trim().toUpperCase().startsWith("A"),
+        );
+        if (audioTrackIndex === -1) {
+          newTracks = [...newTracks, []];
+          audioTrackIndex = newTracks.length - 1;
+
+          setTrackSettings((prevSettings) => [
+            ...prevSettings,
+            { locked: false, visible: true, name: "A1", height: 64 },
+          ]);
+        }
+
+        // 3) Add audio copy to A1
+        const audioItem: TimelineItem = {
+          ...newItem,
+          timelineId: crypto.randomUUID(),
+          pairId: newItem.pairId,
+          trackIndex: audioTrackIndex,
+          previewBase64: undefined,
+          name: `AUDIO: ${newItem.name}`,
+        };
+
+        newTracks[audioTrackIndex] = applyOverwrite(
+          newTracks[audioTrackIndex],
+          audioItem,
+        );
+
         return newTracks;
       });
       return;
@@ -924,10 +1026,15 @@ function StudioContent() {
       const sourceTrackIndex = parseInt(
         activeContainer.replace("timeline-track-", ""),
       );
+
+      const sourceIsAudio = trackIsAudio(sourceTrackIndex);
+      if (sourceIsAudio !== targetIsAudio) return;
+
       recordHistory();
       setTracks((prev) => {
         const newTracks = [...prev];
         if (!newTracks[sourceTrackIndex]) return prev;
+
         const sourceTrack = [...newTracks[sourceTrackIndex]];
         const itemIndex = sourceTrack.findIndex(
           (i) => i.timelineId === active.id,
@@ -939,6 +1046,77 @@ function StudioContent() {
 
         movedItem.trackIndex = targetTrackIndex;
         movedItem.startTime = newStartTime;
+
+        const sourceIsAudio = (trackSettings?.[sourceTrackIndex]?.name || "")
+          .trim()
+          .toUpperCase()
+          .startsWith("A");
+
+        if (sourceIsAudio && movedItem.pairId) {
+          // Find the paired VIDEO item anywhere (not on an audio track)
+          let videoTrackIndex = -1;
+          let videoItemIndex = -1;
+
+          for (let ti = 0; ti < newTracks.length; ti++) {
+            const trackName = (trackSettings?.[ti]?.name || "")
+              .trim()
+              .toUpperCase();
+            const isAudio = trackName.startsWith("A");
+            if (isAudio) continue;
+
+            const idx = newTracks[ti].findIndex(
+              (it: any) => it.pairId === movedItem.pairId,
+            );
+            if (idx !== -1) {
+              videoTrackIndex = ti;
+              videoItemIndex = idx;
+              break;
+            }
+          }
+
+          if (videoTrackIndex !== -1 && videoItemIndex !== -1) {
+            const videoTrack = [...newTracks[videoTrackIndex]];
+            const [videoItem] = videoTrack.splice(videoItemIndex, 1);
+            newTracks[videoTrackIndex] = videoTrack;
+
+            const movedVideoItem = {
+              ...videoItem,
+              startTime: newStartTime,
+              trackIndex: videoTrackIndex,
+            };
+
+            // Reinsert with overwrite so it behaves like your edits
+            newTracks[videoTrackIndex] = applyOverwrite(
+              newTracks[videoTrackIndex],
+              movedVideoItem,
+            );
+          }
+        }
+
+        if (movedItem.pairId) {
+          const a1Index = trackSettings.findIndex((t) =>
+            (t.name || "").trim().toUpperCase().startsWith("A"),
+          );
+
+          if (a1Index !== -1) {
+            const a1Track = [...newTracks[a1Index]];
+            const audioIdx = a1Track.findIndex(
+              (it: any) => it.pairId === movedItem.pairId,
+            );
+
+            if (audioIdx !== -1) {
+              const [audioItem] = a1Track.splice(audioIdx, 1);
+
+              const movedAudio = {
+                ...audioItem,
+                startTime: newStartTime,
+                trackIndex: a1Index,
+              };
+
+              newTracks[a1Index] = applyOverwrite(a1Track, movedAudio);
+            }
+          }
+        }
 
         newTracks[targetTrackIndex] = applyOverwrite(
           newTracks[targetTrackIndex],
@@ -1123,13 +1301,30 @@ function StudioContent() {
                 tracks={tracks}
                 onRemoveItem={(id: string) => {
                   recordHistory();
-                  setTracks((prev) =>
-                    prev.map((t) => t.filter((i) => i.timelineId !== id)),
-                  );
+
+                  // Find the pairId for the item being removed (if it has one)
+                  const target = tracks.flat().find((i) => i.timelineId === id);
+                  const pairId = target?.pairId;
+
+                  setTracks((prev) => {
+                    // If no pairId, behave exactly like before
+                    if (!pairId) {
+                      return prev.map((t) =>
+                        t.filter((i) => i.timelineId !== id),
+                      );
+                    }
+
+                    // If pairId exists, remove BOTH (video + audio) everywhere
+                    return prev.map((t) =>
+                      t.filter((i) => i.pairId !== pairId),
+                    );
+                  });
+
                   if (isPlaying) togglePlay();
                 }}
                 onUpdateItem={handleUpdateItem}
-                onAddTrack={handleAddTrack}
+                onAddVideoTrack={handleAddTrack}
+                onAddAudioTrack={handleAddAudioTrack}
                 isPlaying={isPlaying}
                 togglePlay={togglePlay}
                 currentTime={currentTime}
