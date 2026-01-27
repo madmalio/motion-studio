@@ -13,11 +13,12 @@ import { memo, useState, useEffect } from "react";
 
 // 1. Keep original imports for existing backend functions
 import {
-  SelectImage,
   SelectAudio,
   ReadImageBase64,
   RenderShot,
   SetProjectThumbnail,
+  ImportImage,
+  ImportAudio,
 } from "../../wailsjs/go/main/App";
 
 import { EventsOn } from "../../wailsjs/runtime";
@@ -95,7 +96,17 @@ const GeneratorPanel = memo(function GeneratorPanel({
   // --- HANDLERS ---
 
   const handleUpload = async () => {
-    const path = await SelectImage();
+    // 1. Check if we have a valid project ID (required for the folder path)
+    if (!project?.id) {
+      console.error("No project ID found");
+      return;
+    }
+
+    // 2. Call the NEW backend function
+    // This opens the dialog AND copies the file to "Documents/MotionStudio/<ID>/assets/"
+    const path = await ImportImage(project.id);
+
+    // 3. If successful, update the state
     if (path) {
       const b64 = await ReadImageBase64(path);
       updateActiveShot({ sourceImage: path, previewBase64: b64 });
@@ -103,7 +114,11 @@ const GeneratorPanel = memo(function GeneratorPanel({
   };
 
   const handleAudioUpload = async () => {
-    const path = await SelectAudio();
+    if (!project?.id) return;
+
+    // NEW: Copy audio to project assets immediately
+    const path = await ImportAudio(project.id);
+
     if (path) {
       // Reset trim settings when new file is loaded
       updateActiveShot({ audioPath: path, audioStart: 0, audioDuration: 0 });

@@ -70,6 +70,14 @@ export function GetWorkflows() {
   return window['go']['main']['App']['GetWorkflows']();
 }
 
+export function ImportAudio(arg1) {
+  return window['go']['main']['App']['ImportAudio'](arg1);
+}
+
+export function ImportImage(arg1) {
+  return window['go']['main']['App']['ImportImage'](arg1);
+}
+
 export function ImportWorkflow(arg1) {
   return window['go']['main']['App']['ImportWorkflow'](arg1);
 }

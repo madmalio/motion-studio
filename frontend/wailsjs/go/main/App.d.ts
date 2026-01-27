@@ -36,6 +36,10 @@ export function GetTimeline(arg1:string,arg2:string):Promise<main.TimelineData>;
 
 export function GetWorkflows():Promise<Array<main.Workflow>>;
 
+export function ImportAudio(arg1:string):Promise<string>;
+
+export function ImportImage(arg1:string):Promise<string>;
+
 export function ImportWorkflow(arg1:string):Promise<string>;
 
 export function Ping():Promise<boolean>;

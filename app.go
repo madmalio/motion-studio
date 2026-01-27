@@ -1117,6 +1117,71 @@ func (a *App) SelectImage() string {
 	return selection
 }
 
+// ImportImage opens a dialog, copies the file to the project assets, and returns the new path
+func (a *App) ImportImage(projectId string) string {
+	// 1. Open the File Dialog to let user pick a file
+	srcPath := a.SelectImage()
+	if srcPath == "" {
+		return ""
+	}
+
+	// 2. Define the destination folder: Documents/MotionStudio/<ProjectID>/assets
+	assetsDir := filepath.Join(a.getAppDir(), projectId, "assets")
+	// Ensure the folder exists
+	os.MkdirAll(assetsDir, 0755)
+
+	// 3. Create a unique filename (timestamp + original extension)
+	// This prevents overwriting if you import "image.png" twice
+	ext := filepath.Ext(srcPath)
+	newFilename := fmt.Sprintf("%d%s", time.Now().UnixNano(), ext)
+	destPath := filepath.Join(assetsDir, newFilename)
+
+	// 4. Copy the file
+	input, err := os.ReadFile(srcPath)
+	if err != nil {
+		return ""
+	}
+
+	err = os.WriteFile(destPath, input, 0644)
+	if err != nil {
+		return ""
+	}
+
+	// 5. Return the NEW safe path inside the project
+	return destPath
+}
+
+// ImportAudio opens a dialog, copies the file to the project assets, and returns the new path
+func (a *App) ImportAudio(projectId string) string {
+	// 1. Open the Audio File Dialog
+	srcPath := a.SelectAudio()
+	if srcPath == "" {
+		return ""
+	}
+
+	// 2. Define the destination folder
+	assetsDir := filepath.Join(a.getAppDir(), projectId, "assets")
+	os.MkdirAll(assetsDir, 0755)
+
+	// 3. Create a unique filename
+	ext := filepath.Ext(srcPath)
+	newFilename := fmt.Sprintf("%d%s", time.Now().UnixNano(), ext)
+	destPath := filepath.Join(assetsDir, newFilename)
+
+	// 4. Copy the file
+	input, err := os.ReadFile(srcPath)
+	if err != nil {
+		return ""
+	}
+
+	err = os.WriteFile(destPath, input, 0644)
+	if err != nil {
+		return ""
+	}
+
+	return destPath
+}
+
 // SelectAudio opens the file dialog for audio files
 func (a *App) SelectAudio() string {
 	selection, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
