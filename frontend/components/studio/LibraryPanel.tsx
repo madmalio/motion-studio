@@ -123,4 +123,4 @@ const LibraryPanel = memo(function LibraryPanel({
   );
 });
 
-export default LibraryPanel;
+export default memo(LibraryPanel);

@@ -377,4 +377,4 @@ const GeneratorPanel = memo(function GeneratorPanel({
   );
 });
 
-export default GeneratorPanel;
+export default memo(GeneratorPanel);
