@@ -175,6 +175,7 @@ function StudioContent() {
   const [activeShotId, setActiveShotId] = useState<string | null>(null);
   const [isRendering, setIsRendering] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
+  const [isReversePlaying, setIsReversePlaying] = useState(false);
 
   // Timeline & Playback State
   const [tracks, setTracks] = useState<TimelineItem[][]>([[]]);
@@ -332,6 +333,7 @@ function StudioContent() {
     secondaryVideoRef,
     canvasRef,
     isPlaying,
+    setIsPlaying, // Extracting this to manage mutual exclusion
     togglePlay,
     currentTime,
     seekTo,
@@ -341,7 +343,18 @@ function StudioContent() {
     totalDuration,
     videoBlobs,
     volume: masterVolume,
+    isReversePlaying,
   });
+
+  // --- REVERSE HANDLER (Moved Below Hook to fix Initialization) ---
+  const handlePlayReverse = useCallback(() => {
+    // If we are playing forward, stop that first to avoid fighting
+    if (isPlaying) {
+      setIsPlaying(false);
+    }
+    // Toggle the direction
+    setIsReversePlaying((prev) => !prev);
+  }, [isPlaying, setIsPlaying]);
 
   // --- AUTO-SAVE ---
   useEffect(() => {
@@ -1283,7 +1296,7 @@ function StudioContent() {
               {/* VIEWER (Always here) */}
               <div className="flex-1 min-w-0 bg-black min-h-0">
                 <ViewerPanel
-                  isPlaying={isPlaying}
+                  isPlaying={isPlaying || isReversePlaying}
                   onTogglePlay={togglePlay}
                   primaryVideoRef={primaryVideoRef}
                   secondaryVideoRef={secondaryVideoRef}
@@ -1332,13 +1345,30 @@ function StudioContent() {
                     );
                   });
 
-                  if (isPlaying) togglePlay();
+                  // Stop playback if something is removed
+                  if (isPlaying || isReversePlaying) {
+                    if (isPlaying) togglePlay();
+                    setIsReversePlaying(false);
+                  }
                 }}
                 onUpdateItem={handleUpdateItem}
                 onAddVideoTrack={handleAddTrack}
                 onAddAudioTrack={handleAddAudioTrack}
-                isPlaying={isPlaying}
-                togglePlay={togglePlay}
+
+                // --- UPDATED PLAYBACK PROPS (FIXED FIGHTING) ---
+                isPlaying={isPlaying || isReversePlaying} 
+                isReversePlaying={isReversePlaying}
+                onPlayReverse={handlePlayReverse}
+                togglePlay={() => {
+                  setIsReversePlaying(false); // Switch to forward mode
+                  togglePlay();
+                }}
+                onStop={() => {
+                  if (isPlaying) togglePlay();
+                  setIsReversePlaying(false);
+                }}
+                // -----------------------------------------------
+
                 currentTime={currentTime}
                 duration={totalDuration}
                 seekTo={seekTo}

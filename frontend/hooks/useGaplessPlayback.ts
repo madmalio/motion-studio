@@ -16,7 +16,8 @@ interface UseGaplessPlaybackProps {
   trackSettings: { locked: boolean; visible: boolean; name: string }[];
   totalDuration: number;
   videoBlobs?: Map<string, string>;
-  volume: number; // <--- ADDED THIS
+  volume: number;
+  isReversePlaying: boolean;
 }
 
 // HELPER: Convert local file path to a browser-accessible URL
@@ -36,7 +37,8 @@ export function useGaplessPlayback({
   trackSettings,
   totalDuration,
   videoBlobs,
-  volume, // <--- ADDED THIS
+  volume,
+  isReversePlaying,
 }: UseGaplessPlaybackProps) {
   const primaryVideoRef = useRef<HTMLVideoElement>(null);
   const secondaryVideoRef = useRef<HTMLVideoElement>(null);
@@ -190,18 +192,28 @@ export function useGaplessPlayback({
     const loop = (now: number) => {
       const delta = (now - lastTick) / 1000;
       lastTick = now;
-
-      let nextTime = currentTimeRef.current + delta;
-
-      if (nextTime >= totalDuration && totalDuration > 0) {
+    
+      // Use the flag to decide: Add time or Subtract time?
+      let nextTime = isReversePlaying 
+        ? currentTimeRef.current - delta 
+        : currentTimeRef.current + delta;
+    
+      // Boundary Check: If we hit the end (Forward)
+      if (!isReversePlaying && nextTime >= totalDuration && totalDuration > 0) {
         setIsPlaying(false);
         loadedShotIds.current = { primary: null, secondary: null };
         return;
       }
-
+    
+      // Boundary Check: If we hit the start (Reverse)
+      if (isReversePlaying && nextTime <= 0) {
+        nextTime = 0;
+        setIsPlaying(false); // Stop the engine at 0:00
+      }
+    
       currentTimeRef.current = nextTime;
       setCurrentTime(nextTime);
-
+    
       renderFrame(nextTime);
       animationFrameId = requestAnimationFrame(loop);
     };

@@ -3,7 +3,7 @@
 import { useRef, useState, useEffect, memo } from "react";
 import {
   Play,
-  Pause,
+  Square,
   SkipBack,
   SkipForward,
   Plus,
@@ -25,12 +25,13 @@ import { CSS } from "@dnd-kit/utilities";
 const LEFT_PANEL_W = 160;
 const LEFT_PANEL_BG = "bg-[#2c2f33]";
 const LEFT_PANEL_BORDER = "border-r border-zinc-700";
+const NEON_YELLOW = "#D2FF44";
 
 // --- WAVEFORM COMPONENT ---
 const TimelineWaveform = memo(function TimelineWaveform({
   data,
   zoom,
-  color = "#D2FF44",
+  color = NEON_YELLOW,
 }: {
   data: number[];
   zoom: number;
@@ -86,6 +87,8 @@ function TimelineItemComponent({
   onSplitItem,
   locked,
   isAudioTrack,
+  setGlobalSplitHover,
+  globalSplitHover,
 }: any) {
   const { attributes, listeners, setNodeRef, transform, isDragging } =
     useDraggable({
@@ -96,7 +99,7 @@ function TimelineItemComponent({
 
   const [isResizing, setIsResizing] = useState(false);
   const [localState, setLocalState] = useState({ width, left });
-  const [splitHoverX, setSplitHoverX] = useState<number | null>(null);
+  const [hoverX, setHoverX] = useState<number | null>(null);
 
   useEffect(() => {
     if (!isResizing) {
@@ -107,18 +110,42 @@ function TimelineItemComponent({
     }
   }, [width, left, isResizing]);
 
-  // Right-edge resize
+  // Handle local hover for split tool
+  const handlePointerMove = (e: React.PointerEvent) => {
+    if (activeTool === "split" && !locked) {
+      const rect = e.currentTarget.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      setHoverX(x);
+
+      // Calculate absolute time to sync with pair
+      const absTime = data.startTime + x / zoom;
+
+      if (setGlobalSplitHover) {
+        setGlobalSplitHover({
+          time: absTime,
+          pairId: data.pairId,
+          sourceItemId: id,
+        });
+      }
+    }
+  };
+
+  const handlePointerLeave = () => {
+    setHoverX(null);
+    if (activeTool === "split" && setGlobalSplitHover) {
+      setGlobalSplitHover(null);
+    }
+  };
+
+  // Resize Logic (Right)
   const handleResizeStart = (e: React.PointerEvent) => {
     if (activeTool === "split" || locked) return;
     e.stopPropagation();
     e.preventDefault();
-
     setIsResizing(true);
-
     const startX = e.clientX;
     const startWidth = localState.width;
     const startLeft = localState.left;
-
     const maxDur = data.maxDuration || data.duration || 4;
     const maxPx = maxDur * zoom;
 
@@ -126,41 +153,27 @@ function TimelineItemComponent({
       const diff = ev.clientX - startX;
       const newW = Math.max(10, Math.min(startWidth + diff, maxPx));
       setLocalState((prev) => ({ ...prev, width: newW }));
-
-      if (data.pairId) {
-        onUpdate({
-          startTime: startLeft / zoom,
-          duration: newW / zoom,
-        });
-      }
+      if (data.pairId)
+        onUpdate({ startTime: startLeft / zoom, duration: newW / zoom });
     };
-
     const onUp = (ev: PointerEvent) => {
+      setIsResizing(false);
       const diff = ev.clientX - startX;
       const newW = Math.max(10, Math.min(startWidth + diff, maxPx));
-      setIsResizing(false);
-
-      onUpdate({
-        startTime: startLeft / zoom,
-        duration: newW / zoom,
-      });
-
+      onUpdate({ startTime: startLeft / zoom, duration: newW / zoom });
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
     };
-
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
   };
 
-  // Left-edge resize
+  // Resize Logic (Left)
   const handleResizeStartLeft = (e: React.PointerEvent) => {
     if (activeTool === "split" || locked) return;
     e.stopPropagation();
     e.preventDefault();
-
     setIsResizing(true);
-
     const startX = e.clientX;
     const startWidth = localState.width;
     const startLeft = localState.left;
@@ -171,61 +184,46 @@ function TimelineItemComponent({
       let newLeft = startLeft + diff;
       let newWidth = startWidth - diff;
       let newTrim = startTrim + diff / zoom;
-
       if (newWidth < 10) {
         newLeft = startLeft + startWidth - 10;
         newWidth = 10;
         newTrim = startTrim + (startWidth - 10) / zoom;
       }
-
       if (newTrim < 0) {
         newTrim = 0;
         newLeft = startLeft - startTrim * zoom;
         newWidth = startWidth + startTrim * zoom;
       }
-
       if (newLeft < 0) newLeft = 0;
       setLocalState({ width: newWidth, left: newLeft });
     };
-
     const onUp = (ev: PointerEvent) => {
       setIsResizing(false);
-
       const diff = ev.clientX - startX;
       let newLeft = startLeft + diff;
       let newWidth = startWidth - diff;
       let newTrim = startTrim + diff / zoom;
-
       if (newWidth < 10) {
         newLeft = startLeft + startWidth - 10;
         newWidth = 10;
         newTrim = startTrim + (startWidth - 10) / zoom;
       }
-
       if (newTrim < 0) {
         newTrim = 0;
         newLeft = startLeft - startTrim * zoom;
         newWidth = startWidth + startTrim * zoom;
       }
-
       if (newLeft < 0) newLeft = 0;
-
       onUpdate({
         startTime: newLeft / zoom,
         duration: newWidth / zoom,
         trimStart: newTrim,
       });
-
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
     };
-
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
-  };
-
-  const handlePointerLeave = () => {
-    if (activeTool === "split") setSplitHoverX(null);
   };
 
   const handleClick = (e: React.MouseEvent) => {
@@ -239,6 +237,28 @@ function TimelineItemComponent({
       onClick && onClick();
     }
   };
+
+  // Determine if we should show the red split line
+  let showSplitLine = false;
+  let splitLineX = 0;
+
+  if (activeTool === "split" && !locked) {
+    if (hoverX !== null) {
+      showSplitLine = true;
+      splitLineX = hoverX;
+    } else if (
+      globalSplitHover &&
+      data.pairId &&
+      globalSplitHover.pairId === data.pairId
+    ) {
+      // Calculate relative X based on global time
+      const relativeTime = globalSplitHover.time - data.startTime;
+      if (relativeTime >= 0 && relativeTime <= (data.duration || 4)) {
+        showSplitLine = true;
+        splitLineX = relativeTime * zoom;
+      }
+    }
+  }
 
   const style = {
     transform: CSS.Translate.toString(transform),
@@ -263,23 +283,13 @@ function TimelineItemComponent({
       style={style}
       {...listeners}
       {...attributes}
-      className={`
-        absolute top-0 bottom-0 group select-none
-        ${
-          activeTool === "split"
-            ? "cursor-crosshair"
-            : "cursor-grab active:cursor-grabbing"
-        }
-      `}
+      className={`absolute top-0 bottom-0 group select-none ${activeTool === "split" ? "cursor-none" : "cursor-grab active:cursor-grabbing"}`}
       onClick={handleClick}
+      onPointerMove={handlePointerMove}
       onPointerLeave={handlePointerLeave}
     >
       <div
-        className={`absolute inset-0 flex flex-col overflow-hidden border rounded-sm ${
-          isAudioTrack
-            ? "bg-[#1a1a1c] border-white/10"
-            : "bg-[#375a6c] border-[#213845]"
-        }`}
+        className={`absolute inset-0 flex flex-col overflow-hidden border rounded-sm ${isAudioTrack ? "bg-[#1a1a1c] border-white/10" : "bg-[#375a6c] border-[#213845]"}`}
       >
         {!isAudioTrack && (
           <div className="flex-1 relative overflow-hidden flex bg-zinc-800">
@@ -308,7 +318,7 @@ function TimelineItemComponent({
                 <TimelineWaveform
                   data={data.waveform}
                   zoom={zoom}
-                  color="#D2FF44"
+                  color={NEON_YELLOW}
                 />
               </div>
             ) : (
@@ -320,15 +330,12 @@ function TimelineItemComponent({
           </div>
         )}
 
-        {activeTool === "split" && splitHoverX !== null && (
+        {/* --- CUSTOM SPLIT CURSOR (Solid Red Line) --- */}
+        {showSplitLine && (
           <div
             className="absolute top-0 bottom-0 w-px bg-red-500 z-[60] pointer-events-none"
-            style={{ left: splitHoverX }}
-          >
-            <div className="absolute -top-3 -left-1.5 text-red-500">
-              <Scissors size={12} />
-            </div>
-          </div>
+            style={{ left: splitLineX }}
+          />
         )}
 
         {!locked && (
@@ -380,6 +387,8 @@ function TrackDroppable({
   visible,
   videoBlobs,
   isAudioTrack,
+  setGlobalSplitHover,
+  globalSplitHover,
 }: any) {
   const { setNodeRef } = useDroppable({
     id,
@@ -390,9 +399,7 @@ function TrackDroppable({
   return (
     <div
       ref={setNodeRef}
-      className={`absolute inset-0 w-full h-full min-h-[50px] ${
-        !visible ? "opacity-40 grayscale" : ""
-      }`}
+      className={`absolute inset-0 w-full h-full min-h-[50px] ${!visible ? "opacity-40 grayscale" : ""}`}
     >
       {items.map((item: any) => (
         <TimelineItemComponent
@@ -415,6 +422,8 @@ function TrackDroppable({
           locked={locked}
           videoBlobs={videoBlobs}
           isAudioTrack={isAudioTrack}
+          setGlobalSplitHover={setGlobalSplitHover}
+          globalSplitHover={globalSplitHover}
         />
       ))}
     </div>
@@ -471,10 +480,7 @@ const Playhead = memo(function Playhead({
   return (
     <div
       className="absolute top-0 w-px bg-red-500 z-50 pointer-events-none will-change-transform"
-      style={{
-        height: height,
-        transform: `translateX(${time * zoom}px)`,
-      }}
+      style={{ height: height, transform: `translateX(${time * zoom}px)` }}
     >
       {showHandle && (
         <div className="absolute -top-2 -left-1.5 w-3 h-3 bg-red-500 rotate-45" />
@@ -503,6 +509,8 @@ const TrackRow = memo(function TrackRow({
   onToggleTrackVisibility,
   isAudio,
   currentTime,
+  setGlobalSplitHover,
+  globalSplitHover,
 }: any) {
   const defaultHeight = isAudio ? 48 : 96;
   const settings = trackSettings?.[trackIndex] || {
@@ -584,12 +592,8 @@ const TrackRow = memo(function TrackRow({
             visible={settings.visible}
             videoBlobs={videoBlobs}
             isAudioTrack={isAudio}
-          />
-          <Playhead
-            time={currentTime}
-            zoom={zoom}
-            height="100%"
-            showHandle={false}
+            setGlobalSplitHover={setGlobalSplitHover}
+            globalSplitHover={globalSplitHover}
           />
         </div>
       </div>
@@ -608,6 +612,7 @@ interface TimelinePanelProps {
   onAddVideoTrack: () => void;
   onAddAudioTrack: () => void;
   isPlaying: boolean;
+  isReversePlaying?: boolean; // New Prop for Reverse State
   togglePlay: () => void;
   currentTime: number;
   duration: number;
@@ -636,6 +641,8 @@ interface TimelinePanelProps {
   onToggleTrackVisibility?: (index: number) => void;
   videoBlobs?: Map<string, string>;
   onVolumeChange?: (volume: number) => void;
+  onPlayReverse?: () => void;
+  onStop?: () => void;
 }
 
 export default function TimelinePanel({
@@ -645,6 +652,7 @@ export default function TimelinePanel({
   onAddVideoTrack,
   onAddAudioTrack,
   isPlaying,
+  isReversePlaying = false,
   togglePlay,
   currentTime,
   duration,
@@ -666,48 +674,101 @@ export default function TimelinePanel({
   onToggleTrackVisibility,
   videoBlobs,
   onVolumeChange,
+  onPlayReverse,
+  onStop,
 }: TimelinePanelProps) {
   const [activeTool, setActiveTool] = useState<"select" | "split">("select");
+  const [isMuted, setIsMuted] = useState(false);
   const [volume, setVolume] = useState(1);
+  const [prevVolume, setPrevVolume] = useState(1);
+  const [globalSplitHover, setGlobalSplitHover] = useState<{
+    time: number;
+    pairId: string;
+    sourceItemId: string;
+  } | null>(null);
+
   const isHovering = useRef(false);
-
   const mainScrollRef = useRef<HTMLDivElement>(null);
+  const [scrollLeft, setScrollLeft] = useState(0);
+  const videoScrollRef = useRef<HTMLDivElement>(null);
+  const audioScrollRef = useRef<HTMLDivElement>(null);
 
-  // 1. Block the mouse wheel on the parent container
+  // KEYBOARD SHORTCUTS
   useEffect(() => {
-    const el = mainScrollRef.current;
-    if (!el) return;
-    const stopWheel = (e: WheelEvent) => e.preventDefault();
-    el.addEventListener("wheel", stopWheel, { passive: false });
-    return () => el.removeEventListener("wheel", stopWheel);
-  }, []);
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (!isHovering.current) return;
+      if (
+        e.target instanceof HTMLInputElement ||
+        e.target instanceof HTMLTextAreaElement
+      )
+        return;
 
-  // 2. The logic to scroll when grabbing the divider
-  const handleGrabScroll = (e: React.PointerEvent) => {
-    const scrollEl = mainScrollRef.current;
-    if (!scrollEl) return;
+      const key = e.key.toLowerCase();
 
-    const startY = e.clientY;
-    const startScrollTop = scrollEl.scrollTop;
+      if ((e.ctrlKey || e.metaKey) && key === "z") {
+        e.preventDefault();
+        if (e.shiftKey) {
+          if (onRedo && canRedo) onRedo();
+        } else {
+          if (onUndo && canUndo) onUndo();
+        }
+        return;
+      }
 
-    const onPointerMove = (moveEvent: PointerEvent) => {
-      const deltaY = moveEvent.clientY - startY;
-      // Subtracting deltaY pulls the content
-      scrollEl.scrollTop = startScrollTop - deltaY;
+      if (key === "a") setActiveTool("select");
+      else if (key === "b") setActiveTool("split");
     };
 
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onUndo, onRedo, canUndo, canRedo]);
+
+  // Volume Handlers
+  const handleVolumeChange = (newVol: number) => {
+    setVolume(newVol);
+    if (newVol > 0) {
+      setIsMuted(false);
+      setPrevVolume(newVol);
+    }
+    if (onVolumeChange) onVolumeChange(newVol);
+  };
+
+  const toggleMute = () => {
+    if (isMuted) {
+      setIsMuted(false);
+      setVolume(prevVolume);
+      if (onVolumeChange) onVolumeChange(prevVolume);
+    } else {
+      setPrevVolume(volume);
+      setIsMuted(true);
+      setVolume(0);
+      if (onVolumeChange) onVolumeChange(0);
+    }
+  };
+
+  // Drag grab line
+  const handleGrabScroll = (e: React.PointerEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const startY = e.clientY;
+    const mainContainer = mainScrollRef.current;
+    if (!mainContainer) return;
+    const startScroll = mainContainer.scrollTop;
+    const onPointerMove = (moveEvent: PointerEvent) => {
+      const deltaY = moveEvent.clientY - startY;
+      mainContainer.scrollTop = startScroll - deltaY;
+    };
     const onPointerUp = () => {
       window.removeEventListener("pointermove", onPointerMove);
       window.removeEventListener("pointerup", onPointerUp);
-      document.body.style.cursor = "default";
+      document.body.style.cursor = "";
     };
-
     window.addEventListener("pointermove", onPointerMove);
     window.addEventListener("pointerup", onPointerUp);
-    document.body.style.cursor = "grabbing";
+    document.body.style.cursor = "ns-resize";
   };
 
-  // Pair sync middleware
+  // Smart Sync Handlers
   const handleSmartUpdate = (id: string, updates: any) => {
     onUpdateItem(id, updates);
     let sourceItem: any = null;
@@ -718,73 +779,42 @@ export default function TimelinePanel({
         break;
       }
     }
-    if (sourceItem && sourceItem.pairId) {
+    if (sourceItem?.pairId) {
       for (const track of tracks) {
         const pair = track.find(
-          (i: any) => i.pairId === sourceItem.pairId && i.timelineId !== id,
+          (i) => i.pairId === sourceItem.pairId && i.timelineId !== id,
         );
         if (pair) onUpdateItem(pair.timelineId, updates);
       }
     }
   };
 
-  const [scrollLeft, setScrollLeft] = useState(0);
-
-  // VIDEO lane scroll container (pinner logic)
-  const videoScrollRef = useRef<HTMLDivElement>(null);
-  const pinRafRef = useRef<number | null>(null);
-  const resizeEndTimerRef = useRef<number | null>(null);
-  const lastPinnedTopRef = useRef<number>(-1);
-
-  const stickVideoToBottom = (behavior: ScrollBehavior = "auto") => {
-    const el = videoScrollRef.current;
-    if (!el) return;
-    const targetTop = Math.max(0, el.scrollHeight - el.clientHeight);
-    if (Math.abs(targetTop - el.scrollTop) < 1) return;
-    if (Math.abs(targetTop - lastPinnedTopRef.current) < 1) return;
-    lastPinnedTopRef.current = targetTop;
-    el.scrollTo({ top: targetTop, behavior });
-  };
-
-  useEffect(() => {
-    requestAnimationFrame(() => stickVideoToBottom("auto"));
-  }, [tracks, trackSettings]);
-
-  useEffect(() => {
-    const el = videoScrollRef.current;
-    if (!el) return;
-    const ro = new ResizeObserver(() => {
-      if (pinRafRef.current != null) return;
-      pinRafRef.current = requestAnimationFrame(() => {
-        pinRafRef.current = null;
-        stickVideoToBottom("auto");
-      });
-      if (resizeEndTimerRef.current != null) {
-        window.clearTimeout(resizeEndTimerRef.current);
+  const handleSmartSplit = (itemId: string, time: number) => {
+    if (onSplit) onSplit(itemId, time);
+    let sourceItem: any = null;
+    for (const track of tracks) {
+      const found = track.find((i: any) => i.timelineId === itemId);
+      if (found) {
+        sourceItem = found;
+        break;
       }
-      resizeEndTimerRef.current = window.setTimeout(() => {
-        stickVideoToBottom("smooth");
-      }, 120);
-    });
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
+    }
 
-  // Keyboard tools
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (!isHovering.current) return;
-      if (
-        e.target instanceof HTMLInputElement ||
-        e.target instanceof HTMLTextAreaElement
-      )
-        return;
-      if (e.key.toLowerCase() === "a") setActiveTool("select");
-      if (e.key.toLowerCase() === "b") setActiveTool("split");
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, []);
+    if (sourceItem?.pairId && onSplit) {
+      for (const track of tracks) {
+        const pair = track.find(
+          (i) => i.pairId === sourceItem.pairId && i.timelineId !== itemId,
+        );
+        if (
+          pair &&
+          time > pair.startTime &&
+          time < pair.startTime + (pair.duration || 0)
+        ) {
+          onSplit(pair.timelineId, time);
+        }
+      }
+    }
+  };
 
   const formatTime = (seconds: number) => {
     const adjusted = seconds + 3600;
@@ -792,31 +822,12 @@ export default function TimelinePanel({
     const m = Math.floor((adjusted % 3600) / 60);
     const s = Math.floor(adjusted % 60);
     const f = Math.floor((adjusted % 1) * 30);
-    return `${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}:${s
-      .toString()
-      .padStart(2, "0")}:${f.toString().padStart(2, "0")}`;
-  };
-
-  const handlePointerDown = (e: React.PointerEvent) => {
-    e.currentTarget.setPointerCapture(e.pointerId);
-    handleScrub(e);
-  };
-
-  const handlePointerMove = (e: React.PointerEvent) => {
-    if (e.buttons === 1) handleScrub(e);
+    return `${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}:${f.toString().padStart(2, "0")}`;
   };
 
   const handleScrub = (e: React.PointerEvent) => {
     const rect = e.currentTarget.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const t = Math.max(0, (x + scrollLeft) / zoom);
-    seekTo(t);
-  };
-
-  const handleVolumeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const val = parseFloat(e.target.value);
-    setVolume(val);
-    if (onVolumeChange) onVolumeChange(val);
+    seekTo(Math.max(0, (e.clientX - rect.left + scrollLeft) / zoom));
   };
 
   const timelineSeconds = Math.max(duration + 120, 600);
@@ -842,13 +853,99 @@ export default function TimelinePanel({
 
   return (
     <div
-      className="h-full w-full bg-[#1e1e20] flex flex-col font-sans select-none border-t border-black overflow-hidden"
+      className="h-full w-full bg-[#1e1e20] flex flex-col font-sans select-none border-t border-black overflow-hidden relative"
       onMouseEnter={() => (isHovering.current = true)}
       onMouseLeave={() => (isHovering.current = false)}
     >
-      {/* 1. TOOLBAR */}
-      <div className="h-10 border-b border-black/40 flex items-center px-4 bg-[#262629] shrink-0 justify-between z-20 relative">
-        <div className="flex items-center gap-2">
+      {/* --- TOP TOOLBAR: TRANSPORT & VOLUME --- */}
+      <div className="h-10 border-b border-black/40 bg-[#262629] shrink-0 relative flex items-center justify-center z-20">
+        {/* CENTER: Transport Controls */}
+        <div className="flex items-center gap-4">
+          <button
+            onClick={() => seekTo(0)}
+            className="text-zinc-400 hover:text-white"
+            title="Go to Start"
+          >
+            <SkipBack size={16} />
+          </button>
+
+          {/* Reverse Play (Mirrored Play) */}
+          <button
+            onClick={onPlayReverse}
+            className={`text-zinc-400 hover:text-white ${isReversePlaying ? "text-[#D2FF44]" : ""}`}
+            title="Play Reverse"
+          >
+            <Play
+              size={16}
+              className="rotate-180"
+              fill={isReversePlaying ? NEON_YELLOW : "currentColor"}
+            />
+          </button>
+
+          {/* Stop (No square border) */}
+          <button
+            onClick={() => {
+              if (onStop) onStop();
+              else if (isPlaying || isReversePlaying) togglePlay();
+            }}
+            className="text-zinc-400 hover:text-white"
+            title="Stop"
+          >
+            <Square size={16} fill="currentColor" />
+          </button>
+
+          {/* Play Forward */}
+          <button
+            onClick={() => {
+              if (!isPlaying) togglePlay();
+            }}
+            className={`text-zinc-400 hover:text-white ${isPlaying ? "text-[#D2FF44]" : ""}`}
+            title="Play Forward"
+          >
+            <Play
+              size={16}
+              fill={isPlaying ? NEON_YELLOW : "currentColor"}
+            />
+          </button>
+
+          <button
+            onClick={() => seekTo(duration)}
+            className="text-zinc-400 hover:text-white"
+            title="Go to End"
+          >
+            <SkipForward size={16} />
+          </button>
+        </div>
+
+        {/* RIGHT: Volume (Absolute Position) */}
+        <div className="absolute right-4 flex items-center gap-2">
+          <button
+            onClick={toggleMute}
+            className="text-zinc-400 hover:text-white"
+            title={isMuted ? "Unmute" : "Mute"}
+          >
+            {isMuted || volume === 0 ? (
+              <VolumeX size={16} />
+            ) : (
+              <Volume2 size={16} />
+            )}
+          </button>
+          <input
+            type="range"
+            min={0}
+            max={1}
+            step={0.05}
+            value={volume}
+            onChange={(e) => handleVolumeChange(parseFloat(e.target.value))}
+            className="w-20 h-1 accent-[#D2FF44] bg-zinc-700 rounded-lg appearance-none cursor-pointer"
+          />
+        </div>
+      </div>
+
+      {/* --- BOTTOM TOOLBAR: TRACKS, TOOLS, UNDO, ZOOM --- */}
+      <div className="h-10 border-b border-black/40 bg-[#262629] shrink-0 flex items-center px-4 justify-between z-20">
+        <div className="flex items-center gap-3">
+          {/* Add Tracks */}
           <button
             onClick={onAddVideoTrack}
             className="flex items-center gap-1 text-[10px] bg-zinc-800 hover:bg-zinc-700 px-2 py-1 rounded text-zinc-300"
@@ -861,218 +958,219 @@ export default function TimelinePanel({
           >
             <Plus size={10} /> Add Audio
           </button>
+
+          <div className="w-px h-4 bg-zinc-700 mx-1" />
+
+          {/* Tools */}
           <button
             onClick={() => setActiveTool("select")}
-            className={`flex items-center gap-1 text-[10px] px-2 py-1 rounded ${activeTool === "select" ? "bg-[#D2FF44] text-black" : "bg-zinc-800 text-zinc-300"}`}
+            className={`flex items-center gap-1 text-[10px] px-2 py-1 rounded transition-colors ${
+              activeTool === "select"
+                ? "bg-[#D2FF44] text-black font-bold"
+                : "bg-zinc-800 text-zinc-300"
+            }`}
+            title="Select Tool (A)"
           >
             <MousePointer2 size={10} /> Select
           </button>
           <button
             onClick={() => setActiveTool("split")}
-            className={`flex items-center gap-1 text-[10px] px-2 py-1 rounded ${activeTool === "split" ? "bg-[#D2FF44] text-black" : "bg-zinc-800 text-zinc-300"}`}
+            className={`flex items-center gap-1 text-[10px] px-2 py-1 rounded transition-colors ${
+              activeTool === "split"
+                ? "bg-[#D2FF44] text-black font-bold"
+                : "bg-zinc-800 text-zinc-300"
+            }`}
+            title="Split Tool (B)"
           >
             <Scissors size={10} /> Split
           </button>
-          <div className="w-px h-4 bg-zinc-700 mx-2" />
-          <button
-            onClick={() => onUndo?.()}
-            disabled={!canUndo}
-            className={`p-1 rounded ${canUndo ? "text-zinc-400" : "text-zinc-600"}`}
-          >
-            <Undo2 size={14} />
-          </button>
-          <button
-            onClick={() => onRedo?.()}
-            disabled={!canRedo}
-            className={`p-1 rounded ${canRedo ? "text-zinc-400" : "text-zinc-600"}`}
-          >
-            <Redo2 size={14} />
-          </button>
-          <div className="flex items-center gap-1 ml-4 border-l border-zinc-700 pl-4">
+
+          <div className="w-px h-4 bg-zinc-700 mx-1" />
+
+          {/* Undo/Redo */}
+          <div className="flex items-center gap-1">
             <button
-              onClick={() => setZoom(Math.max(1, zoom / 1.5))}
-              className="text-zinc-400 hover:text-white px-1"
+              onClick={onUndo}
+              disabled={!canUndo}
+              className={`p-1 rounded ${canUndo ? "text-zinc-300 hover:bg-zinc-700 hover:text-white" : "text-zinc-600 cursor-not-allowed"}`}
+              title="Undo (Ctrl+Z)"
             >
-              -
+              <Undo2 size={14} />
             </button>
-            <span className="text-[10px] text-zinc-500 w-8 text-center">
-              {Math.round(zoom)}%
-            </span>
             <button
-              onClick={() => setZoom(Math.min(200, zoom * 1.5))}
-              className="text-zinc-400 hover:text-white px-1"
+              onClick={onRedo}
+              disabled={!canRedo}
+              className={`p-1 rounded ${canRedo ? "text-zinc-300 hover:bg-zinc-700 hover:text-white" : "text-zinc-600 cursor-not-allowed"}`}
+              title="Redo (Ctrl+Shift+Z)"
             >
-              +
+              <Redo2 size={14} />
             </button>
           </div>
         </div>
 
-        <div className="flex items-center gap-4">
+        {/* Zoom */}
+        <div className="flex items-center gap-1 border-l border-zinc-700 pl-4">
           <button
-            onClick={() => seekTo(0)}
+            onClick={() => setZoom(Math.max(1, zoom / 1.5))}
             className="text-zinc-400 hover:text-white"
           >
-            <SkipBack size={18} />
+            -
           </button>
+          <span className="text-[10px] text-zinc-500 w-8 text-center">
+            {Math.round(zoom)}%
+          </span>
           <button
-            onClick={togglePlay}
-            className={`w-8 h-8 flex items-center justify-center rounded-full border ${isPlaying ? "bg-[#D2FF44] border-[#D2FF44]" : "border-[#D2FF44] text-[#D2FF44]"}`}
-          >
-            {isPlaying ? (
-              <Pause size={16} fill="black" />
-            ) : (
-              <Play size={16} fill="#D2FF44" className="ml-0.5" />
-            )}
-          </button>
-          <button
-            onClick={() => seekTo(duration)}
+            onClick={() => setZoom(Math.min(200, zoom * 1.5))}
             className="text-zinc-400 hover:text-white"
           >
-            <SkipForward size={18} />
+            +
           </button>
         </div>
+      </div>
 
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => setVolume(volume === 0 ? 1 : 0)}
-            className="text-zinc-400 hover:text-white"
+      {/* RULER */}
+      <div className="z-30 flex h-8 bg-[#1a1a1c] border-b border-zinc-700 shrink-0">
+        <div
+          className={`shrink-0 ${LEFT_PANEL_BG} border-r border-zinc-700 flex items-center justify-center`}
+          style={{ width: LEFT_PANEL_W }}
+        >
+          <span className="font-mono text-xs text-[#D2FF44]">
+            {formatTime(currentTime)}
+          </span>
+        </div>
+        <div
+          className="flex-1 relative overflow-hidden"
+          onPointerDown={handleScrub}
+        >
+          <div
+            style={{
+              transform: `translateX(-${scrollLeft}px)`,
+              width: contentWidthPx,
+              height: "100%",
+            }}
           >
-            {volume === 0 ? <VolumeX size={14} /> : <Volume2 size={14} />}
-          </button>
-          <input
-            type="range"
-            min={0}
-            max={1}
-            step={0.05}
-            value={volume}
-            onChange={handleVolumeChange}
-            className="w-16 h-1 bg-zinc-700 rounded-lg accent-[#D2FF44]"
+            <TimelineRuler seconds={timelineSeconds} zoom={zoom} />
+            <Playhead time={currentTime} zoom={zoom} />
+          </div>
+        </div>
+      </div>
+
+      {/* MAIN CONTAINER */}
+      <div
+        ref={mainScrollRef}
+        className="flex-1 relative flex flex-col overflow-y-auto overflow-x-hidden"
+        style={{
+          background: `linear-gradient(to right, #2c2f33 ${LEFT_PANEL_W}px, #121214 ${LEFT_PANEL_W}px)`,
+        }}
+      >
+        {/* VIDEO SECTION */}
+        <div
+          ref={videoScrollRef}
+          className="overflow-y-auto overflow-x-hidden flex flex-col shrink-0 timeline-scrollbar"
+          style={{ minHeight: "400px" }}
+        >
+          <div className="flex-grow" />
+          {videoTrackIndices.map((idx) => (
+            <TrackRow
+              key={idx}
+              trackIndex={idx}
+              tracks={tracks}
+              trackSettings={trackSettings}
+              zoom={zoom}
+              scrollLeft={scrollLeft}
+              contentWidth={contentWidthPx}
+              currentTime={currentTime}
+              activeShotId={activeShotId}
+              activeTool={activeTool}
+              onRemoveItem={onRemoveItem}
+              onUpdateItem={handleSmartUpdate}
+              onShotClick={onShotClick}
+              onSplit={handleSmartSplit}
+              videoBlobs={videoBlobs}
+              onRenameTrack={onRenameTrack}
+              onDeleteTrack={onDeleteTrack}
+              onToggleTrackLock={onToggleTrackLock}
+              onToggleTrackVisibility={onToggleTrackVisibility}
+              isAudio={false}
+              setGlobalSplitHover={setGlobalSplitHover}
+              globalSplitHover={globalSplitHover}
+            />
+          ))}
+        </div>
+
+        {/* GRAB LINE */}
+        <div
+          onPointerDown={handleGrabScroll}
+          className="h-2 flex items-center justify-center group cursor-ns-resize z-50 shrink-0 bg-[#1a1a1c]"
+        >
+          <div className="w-full h-[2px] bg-zinc-700 group-hover:bg-[#D2FF44] transition-colors" />
+        </div>
+
+        {/* AUDIO SECTION */}
+        <div
+          ref={audioScrollRef}
+          className="overflow-y-auto overflow-x-hidden flex flex-col shrink-0 timeline-scrollbar"
+          style={{ minHeight: "300px" }}
+        >
+          {audioTrackIndices.map((idx) => (
+            <TrackRow
+              key={idx}
+              trackIndex={idx}
+              tracks={tracks}
+              trackSettings={trackSettings}
+              zoom={zoom}
+              scrollLeft={scrollLeft}
+              contentWidth={contentWidthPx}
+              currentTime={currentTime}
+              activeShotId={activeShotId}
+              activeTool={activeTool}
+              onRemoveItem={onRemoveItem}
+              onUpdateItem={handleSmartUpdate}
+              onShotClick={onShotClick}
+              onSplit={handleSmartSplit}
+              videoBlobs={videoBlobs}
+              onRenameTrack={onRenameTrack}
+              onDeleteTrack={onDeleteTrack}
+              onToggleTrackLock={onToggleTrackLock}
+              onToggleTrackVisibility={onToggleTrackVisibility}
+              isAudio={true}
+              setGlobalSplitHover={setGlobalSplitHover}
+              globalSplitHover={globalSplitHover}
+            />
+          ))}
+        </div>
+      </div>
+
+      {/* GLOBAL PLAYHEAD OVERLAY */}
+      {/* 40px Top + 40px Bottom Toolbar + 32px Ruler = 112px Top offset */}
+      <div
+        className="absolute top-[112px] bottom-4 right-0 z-[60] pointer-events-none overflow-hidden"
+        style={{ left: LEFT_PANEL_W }}
+      >
+        <div
+          className="h-full relative will-change-transform"
+          style={{ transform: `translateX(-${scrollLeft}px)` }}
+        >
+          <Playhead
+            time={currentTime}
+            zoom={zoom}
+            height="100%"
+            showHandle={false}
           />
         </div>
       </div>
 
-      {/* 2. TIMELINE CONTENT ROOT - This is the parent container that slides */}
-      <div
-        ref={mainScrollRef}
-        className="flex-1 bg-[#121214] relative overflow-y-auto scrollbar-none"
-        style={{ scrollbarWidth: "none", msOverflowStyle: "none" }}
-      >
-        {/* --- TOP PANE: VIDEO (Sized to allow parent to scroll) --- */}
+      {/* FOOTER SCROLLBAR */}
+      <div className="shrink-0 h-4 flex z-20 bg-[#1a1a1c] border-t border-black">
         <div
-          className="flex flex-col border-b border-zinc-700 overflow-hidden relative shrink-0"
-          style={{ height: "70%" }}
-        >
-          {/* Sticky Ruler */}
-          <div className="sticky top-0 z-30 flex h-8 bg-[#1a1a1c] border-b border-zinc-700 shrink-0">
-            <div
-              className={`shrink-0 ${LEFT_PANEL_BG} border-r border-zinc-700 flex items-center justify-center`}
-              style={{ width: LEFT_PANEL_W }}
-            >
-              <span className="font-mono text-xs text-[#D2FF44] font-bold tabular-nums">
-                {formatTime(currentTime)}
-              </span>
-            </div>
-            <div
-              className="flex-1 relative overflow-hidden cursor-ew-resize"
-              onPointerDown={handlePointerDown}
-              onPointerMove={handlePointerMove}
-            >
-              <div
-                style={{
-                  transform: `translateX(-${scrollLeft}px)`,
-                  width: contentWidthPx,
-                  height: "100%",
-                }}
-              >
-                <TimelineRuler seconds={timelineSeconds} zoom={zoom} />
-                <Playhead time={currentTime} zoom={zoom} height="100%" />
-              </div>
-            </div>
-          </div>
-
-          {/* Video Track List (Independent internal scroll) */}
-          <div
-            ref={videoScrollRef}
-            className="flex-1 overflow-y-auto overflow-x-hidden relative min-h-0 flex flex-col"
-          >
-            <div className="flex-grow min-h-0" />
-            <div className="w-full shrink-0 flex flex-col">
-              {videoTrackIndices.map((idx) => (
-                <TrackRow
-                  key={idx}
-                  trackIndex={idx}
-                  tracks={tracks}
-                  trackSettings={trackSettings}
-                  zoom={zoom}
-                  scrollLeft={scrollLeft}
-                  contentWidth={contentWidthPx}
-                  currentTime={currentTime}
-                  activeShotId={activeShotId}
-                  activeTool={activeTool}
-                  onRemoveItem={onRemoveItem}
-                  onUpdateItem={handleSmartUpdate}
-                  onShotClick={onShotClick}
-                  onSplit={onSplit}
-                  videoBlobs={videoBlobs}
-                  onRenameTrack={onRenameTrack}
-                  onDeleteTrack={onDeleteTrack}
-                  onToggleTrackLock={onToggleTrackLock}
-                  onToggleTrackVisibility={onToggleTrackVisibility}
-                  isAudio={false}
-                />
-              ))}
-            </div>
-          </div>
-        </div>
-
-        {/* --- THE DRAG HANDLE --- */}
+          className={`shrink-0 ${LEFT_PANEL_BG} ${LEFT_PANEL_BORDER}`}
+          style={{ width: LEFT_PANEL_W }}
+        />
         <div
-          onPointerDown={handleGrabScroll}
-          className="h-2 bg-black hover:bg-[#D2FF44] cursor-grab active:cursor-grabbing z-50 transition-colors shrink-0 flex items-center justify-center border-y border-zinc-800"
-        >
-          <div className="w-10 h-1 bg-zinc-700 rounded-full" />
-        </div>
-
-        {/* --- BOTTOM PANE: AUDIO (Sized to allow parent to scroll) --- */}
-        <div
-          className="flex flex-col overflow-hidden relative shrink-0"
-          style={{ height: "70%" }}
-        >
-          {/* Audio Track List (Independent internal scroll) */}
-          <div className="flex-1 overflow-y-auto overflow-x-hidden relative min-h-0">
-            {audioTrackIndices.map((idx) => (
-              <TrackRow
-                key={idx}
-                trackIndex={idx}
-                tracks={tracks}
-                trackSettings={trackSettings}
-                zoom={zoom}
-                scrollLeft={scrollLeft}
-                contentWidth={contentWidthPx}
-                currentTime={currentTime}
-                activeShotId={activeShotId}
-                activeTool={activeTool}
-                onRemoveItem={onRemoveItem}
-                onUpdateItem={handleSmartUpdate}
-                onShotClick={onShotClick}
-                onSplit={onSplit}
-                videoBlobs={videoBlobs}
-                onRenameTrack={onRenameTrack}
-                onDeleteTrack={onDeleteTrack}
-                onToggleTrackLock={onToggleTrackLock}
-                onToggleTrackVisibility={onToggleTrackVisibility}
-                isAudio={true}
-              />
-            ))}
-          </div>
-        </div>
-
-        {/* --- MASTER HORIZONTAL SCROLLBAR --- */}
-        <div
-          className="shrink-0 h-4 bg-[#1a1a1c] border-t border-black overflow-x-auto z-20"
+          className="flex-1 overflow-x-auto"
           onScroll={(e) => setScrollLeft(e.currentTarget.scrollLeft)}
         >
-          <div style={{ width: contentWidthPx + LEFT_PANEL_W, height: 1 }} />
+          <div style={{ width: contentWidthPx, height: 1 }} />
         </div>
       </div>
     </div>
