@@ -53,7 +53,7 @@ const TimelineWaveform = memo(function TimelineWaveform({
     const dpr = window.devicePixelRatio || 1;
     canvas.width = width * dpr;
     canvas.height = height * dpr;
-    ctx.scale(dpr, dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
     ctx.clearRect(0, 0, width, height);
     ctx.fillStyle = color;
@@ -93,6 +93,7 @@ function TimelineItemComponent({
       data: { type: "timeline-item" },
       disabled: activeTool === "split" || locked,
     });
+
   const [isResizing, setIsResizing] = useState(false);
   const [localState, setLocalState] = useState({ width, left });
   const [splitHoverX, setSplitHoverX] = useState<number | null>(null);
@@ -106,14 +107,18 @@ function TimelineItemComponent({
     }
   }, [width, left, isResizing]);
 
+  // Right-edge resize
   const handleResizeStart = (e: React.PointerEvent) => {
     if (activeTool === "split" || locked) return;
     e.stopPropagation();
     e.preventDefault();
+
     setIsResizing(true);
+
     const startX = e.clientX;
     const startWidth = localState.width;
     const startLeft = localState.left;
+
     const maxDur = data.maxDuration || data.duration || 4;
     const maxPx = maxDur * zoom;
 
@@ -129,27 +134,33 @@ function TimelineItemComponent({
         });
       }
     };
+
     const onUp = (ev: PointerEvent) => {
       const diff = ev.clientX - startX;
       const newW = Math.max(10, Math.min(startWidth + diff, maxPx));
       setIsResizing(false);
+
       onUpdate({
-        startTime: localState.left / zoom,
+        startTime: startLeft / zoom,
         duration: newW / zoom,
       });
 
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
     };
+
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
   };
 
+  // Left-edge resize
   const handleResizeStartLeft = (e: React.PointerEvent) => {
     if (activeTool === "split" || locked) return;
     e.stopPropagation();
     e.preventDefault();
+
     setIsResizing(true);
+
     const startX = e.clientX;
     const startWidth = localState.width;
     const startLeft = localState.left;
@@ -160,6 +171,7 @@ function TimelineItemComponent({
       let newLeft = startLeft + diff;
       let newWidth = startWidth - diff;
       let newTrim = startTrim + diff / zoom;
+
       if (newWidth < 10) {
         newLeft = startLeft + startWidth - 10;
         newWidth = 10;
@@ -175,40 +187,41 @@ function TimelineItemComponent({
       if (newLeft < 0) newLeft = 0;
       setLocalState({ width: newWidth, left: newLeft });
     };
+
     const onUp = (ev: PointerEvent) => {
       setIsResizing(false);
+
       const diff = ev.clientX - startX;
       let newLeft = startLeft + diff;
       let newWidth = startWidth - diff;
       let newTrim = startTrim + diff / zoom;
+
       if (newWidth < 10) {
         newLeft = startLeft + startWidth - 10;
         newWidth = 10;
         newTrim = startTrim + (startWidth - 10) / zoom;
       }
+
       if (newTrim < 0) {
         newTrim = 0;
         newLeft = startLeft - startTrim * zoom;
         newWidth = startWidth + startTrim * zoom;
       }
+
       if (newLeft < 0) newLeft = 0;
+
       onUpdate({
         startTime: newLeft / zoom,
         duration: newWidth / zoom,
         trimStart: newTrim,
       });
+
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
     };
+
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
-  };
-
-  const handlePointerMove = (e: React.PointerEvent) => {
-    if (activeTool === "split") {
-      const rect = e.currentTarget.getBoundingClientRect();
-      setSplitHoverX(e.clientX - rect.left);
-    }
   };
 
   const handlePointerLeave = () => {
@@ -252,10 +265,13 @@ function TimelineItemComponent({
       {...attributes}
       className={`
         absolute top-0 bottom-0 group select-none
-        ${activeTool === "split" ? "cursor-crosshair" : "cursor-grab active:cursor-grabbing"}
+        ${
+          activeTool === "split"
+            ? "cursor-crosshair"
+            : "cursor-grab active:cursor-grabbing"
+        }
       `}
       onClick={handleClick}
-      onPointerMove={handlePointerMove}
       onPointerLeave={handlePointerLeave}
     >
       <div
@@ -370,10 +386,13 @@ function TrackDroppable({
     data: { type: "track", trackIndex },
     disabled: locked,
   });
+
   return (
     <div
       ref={setNodeRef}
-      className={`absolute inset-0 w-full h-full min-h-[50px] ${!visible ? "opacity-40 grayscale" : ""}`}
+      className={`absolute inset-0 w-full h-full min-h-[50px] ${
+        !visible ? "opacity-40 grayscale" : ""
+      }`}
     >
       {items.map((item: any) => (
         <TimelineItemComponent
@@ -403,7 +422,7 @@ function TrackDroppable({
 }
 
 // ---------------------------------------------------------------------------
-// SUB-COMPONENTS (Ruler, Playhead, TrackListRows)
+// SUB-COMPONENTS
 // ---------------------------------------------------------------------------
 
 const TimelineRuler = memo(function TimelineRuler({ seconds, zoom }: any) {
@@ -464,13 +483,12 @@ const Playhead = memo(function Playhead({
   );
 });
 
-// UPDATED: TrackRow with dynamic audio height
 const TrackRow = memo(function TrackRow({
   trackIndex,
   tracks,
   trackSettings,
   zoom,
-  scrollLeft, // Horizontal scroll offset
+  scrollLeft,
   contentWidth,
   activeShotId,
   activeTool,
@@ -497,10 +515,10 @@ const TrackRow = memo(function TrackRow({
 
   return (
     <div
-      className="flex border-b border-zinc-800 bg-[#151517] relative"
+      className="flex border-b border-zinc-800 bg-[#151517] relative shrink-0"
       style={{ height }}
     >
-      {/* 1. LEFT HEADER (Fixed width) */}
+      {/* LEFT HEADER */}
       <div
         className={`shrink-0 flex flex-col p-2 gap-1 justify-between relative group ${LEFT_PANEL_BG} ${LEFT_PANEL_BORDER}`}
         style={{ width: LEFT_PANEL_W }}
@@ -541,16 +559,15 @@ const TrackRow = memo(function TrackRow({
         </div>
       </div>
 
-      {/* 2. RIGHT TRACK CONTENT (Scrolls via Transform) */}
+      {/* RIGHT TRACK CONTENT */}
       <div className="flex-1 relative overflow-hidden bg-[#121214]">
-        {/* The scrolling container */}
         <div
           style={{
             transform: `translateX(-${scrollLeft}px)`,
             width: contentWidth,
             height: "100%",
           }}
-          className="will-change-transform"
+          className="will-change-transform relative"
         >
           <TrackDroppable
             id={`timeline-track-${trackIndex}`}
@@ -568,7 +585,6 @@ const TrackRow = memo(function TrackRow({
             videoBlobs={videoBlobs}
             isAudioTrack={isAudio}
           />
-          {/* Per-track playhead slice (visual only) */}
           <Playhead
             time={currentTime}
             zoom={zoom}
@@ -654,14 +670,46 @@ export default function TimelinePanel({
   const [activeTool, setActiveTool] = useState<"select" | "split">("select");
   const [volume, setVolume] = useState(1);
   const isHovering = useRef(false);
-  const isResizingSplit = useRef(false);
 
-  // UPDATED: Middleware to sync paired clips (Audio + Video)
+  const mainScrollRef = useRef<HTMLDivElement>(null);
+
+  // 1. Block the mouse wheel on the parent container
+  useEffect(() => {
+    const el = mainScrollRef.current;
+    if (!el) return;
+    const stopWheel = (e: WheelEvent) => e.preventDefault();
+    el.addEventListener("wheel", stopWheel, { passive: false });
+    return () => el.removeEventListener("wheel", stopWheel);
+  }, []);
+
+  // 2. The logic to scroll when grabbing the divider
+  const handleGrabScroll = (e: React.PointerEvent) => {
+    const scrollEl = mainScrollRef.current;
+    if (!scrollEl) return;
+
+    const startY = e.clientY;
+    const startScrollTop = scrollEl.scrollTop;
+
+    const onPointerMove = (moveEvent: PointerEvent) => {
+      const deltaY = moveEvent.clientY - startY;
+      // Subtracting deltaY pulls the content
+      scrollEl.scrollTop = startScrollTop - deltaY;
+    };
+
+    const onPointerUp = () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+      document.body.style.cursor = "default";
+    };
+
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+    document.body.style.cursor = "grabbing";
+  };
+
+  // Pair sync middleware
   const handleSmartUpdate = (id: string, updates: any) => {
-    // 1. Update the item actually being resized/moved
     onUpdateItem(id, updates);
-
-    // 2. Find the item in our tracks to check for a pairId
     let sourceItem: any = null;
     for (const track of tracks) {
       const found = track.find((i: any) => i.timelineId === id);
@@ -670,29 +718,59 @@ export default function TimelinePanel({
         break;
       }
     }
-
-    // 3. If it has a pairId, find the partner and update it too
     if (sourceItem && sourceItem.pairId) {
       for (const track of tracks) {
-        // Find the item with the SAME pairId but DIFFERENT timelineId
         const pair = track.find(
           (i: any) => i.pairId === sourceItem.pairId && i.timelineId !== id,
         );
-
-        if (pair) {
-          // Apply exactly the same start/duration/trim updates to the pair
-          onUpdateItem(pair.timelineId, updates);
-        }
+        if (pair) onUpdateItem(pair.timelineId, updates);
       }
     }
   };
 
-  // --- SPLIT & SCROLL STATE ---
-  const splitAreaRef = useRef<HTMLDivElement>(null);
-  const [videoHeightPx, setVideoHeightPx] = useState(300);
-
   const [scrollLeft, setScrollLeft] = useState(0);
 
+  // VIDEO lane scroll container (pinner logic)
+  const videoScrollRef = useRef<HTMLDivElement>(null);
+  const pinRafRef = useRef<number | null>(null);
+  const resizeEndTimerRef = useRef<number | null>(null);
+  const lastPinnedTopRef = useRef<number>(-1);
+
+  const stickVideoToBottom = (behavior: ScrollBehavior = "auto") => {
+    const el = videoScrollRef.current;
+    if (!el) return;
+    const targetTop = Math.max(0, el.scrollHeight - el.clientHeight);
+    if (Math.abs(targetTop - el.scrollTop) < 1) return;
+    if (Math.abs(targetTop - lastPinnedTopRef.current) < 1) return;
+    lastPinnedTopRef.current = targetTop;
+    el.scrollTo({ top: targetTop, behavior });
+  };
+
+  useEffect(() => {
+    requestAnimationFrame(() => stickVideoToBottom("auto"));
+  }, [tracks, trackSettings]);
+
+  useEffect(() => {
+    const el = videoScrollRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => {
+      if (pinRafRef.current != null) return;
+      pinRafRef.current = requestAnimationFrame(() => {
+        pinRafRef.current = null;
+        stickVideoToBottom("auto");
+      });
+      if (resizeEndTimerRef.current != null) {
+        window.clearTimeout(resizeEndTimerRef.current);
+      }
+      resizeEndTimerRef.current = window.setTimeout(() => {
+        stickVideoToBottom("smooth");
+      }, 120);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  // Keyboard tools
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (!isHovering.current) return;
@@ -708,58 +786,15 @@ export default function TimelinePanel({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, []);
 
-  useEffect(() => {
-    const SPLITTER_H = 4; // the splitter row
-    const SCROLLBAR_H = 16; // the master scrollbar row
-    const MIN_VIDEO = 120;
-    const MIN_AUDIO = 140;
-
-    const clamp = (nextVideoPx: number, containerH: number) => {
-      const maxVideo = containerH - SPLITTER_H - SCROLLBAR_H - MIN_AUDIO;
-      return Math.max(MIN_VIDEO, Math.min(nextVideoPx, maxVideo));
-    };
-
-    const handlePointerMove = (e: PointerEvent) => {
-      if (!isResizingSplit.current) return;
-
-      const el = splitAreaRef.current;
-      if (!el) return;
-
-      const rect = el.getBoundingClientRect();
-      const containerH = rect.height || 600;
-
-      // Pointer position inside the split area
-      const raw = e.clientY - rect.top;
-
-      setVideoHeightPx(clamp(raw, containerH));
-      document.body.style.cursor = "row-resize";
-    };
-
-    const handlePointerUp = () => {
-      isResizingSplit.current = false;
-      document.body.style.cursor = "default";
-    };
-
-    window.addEventListener("pointermove", handlePointerMove);
-    window.addEventListener("pointerup", handlePointerUp);
-
-    return () => {
-      window.removeEventListener("pointermove", handlePointerMove);
-      window.removeEventListener("pointerup", handlePointerUp);
-    };
-  }, []);
-
   const formatTime = (seconds: number) => {
     const adjusted = seconds + 3600;
     const h = Math.floor(adjusted / 3600);
     const m = Math.floor((adjusted % 3600) / 60);
     const s = Math.floor(adjusted % 60);
     const f = Math.floor((adjusted % 1) * 30);
-    return `${h.toString().padStart(2, "0")}:${m
+    return `${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}:${s
       .toString()
-      .padStart(2, "0")}:${s.toString().padStart(2, "0")}:${f
-      .toString()
-      .padStart(2, "0")}`;
+      .padStart(2, "0")}:${f.toString().padStart(2, "0")}`;
   };
 
   const handlePointerDown = (e: React.PointerEvent) => {
@@ -784,80 +819,9 @@ export default function TimelinePanel({
     if (onVolumeChange) onVolumeChange(val);
   };
 
-  // SIMPLE RESIZE LOGIC (No overlaps, simple percentage)
-  const handleSplitterDrag = (e: React.PointerEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-
-    // IMPORTANT: capture pointer so dragging continues even if cursor leaves the splitter
-    e.currentTarget.setPointerCapture(e.pointerId);
-
-    const startY = e.clientY;
-    const startPx = videoHeightPx;
-
-    const SPLITTER_H = 4; // row 2
-    const SCROLLBAR_H = 16; // row 4
-    const MIN_VIDEO = 120;
-    const MIN_AUDIO = 140;
-
-    const clamp = (nextVideoPx: number) => {
-      const containerH = splitAreaRef.current?.clientHeight ?? 600;
-      const maxVideo = containerH - SPLITTER_H - SCROLLBAR_H - MIN_AUDIO;
-
-      return Math.max(MIN_VIDEO, Math.min(nextVideoPx, maxVideo));
-    };
-
-    const onMove = (ev: PointerEvent) => {
-      const diff = ev.clientY - startY;
-      setVideoHeightPx(clamp(startPx + diff));
-    };
-
-    const onUp = () => {
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
-      document.body.style.cursor = "default";
-    };
-
-    document.body.style.cursor = "row-resize";
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
-  };
-
-  useEffect(() => {
-    const el = splitAreaRef.current;
-    if (!el) return;
-
-    const SPLITTER_H = 4; // h-1
-    const SCROLLBAR_H = 16; // h-4
-    const MIN_VIDEO = 100;
-    const MIN_AUDIO = 120; // keep audio from getting crushed
-
-    const clamp = (h: number, containerH: number) => {
-      const maxVideo = containerH - SPLITTER_H - SCROLLBAR_H - MIN_AUDIO;
-      return Math.max(MIN_VIDEO, Math.min(h, maxVideo));
-    };
-
-    const ro = new ResizeObserver(() => {
-      const containerH = el.clientHeight || 600;
-
-      setVideoHeightPx((prev) => {
-        // initialize once based on container size
-        if (!prev || prev < MIN_VIDEO) {
-          const initial = Math.floor(containerH * 0.6);
-          return clamp(initial, containerH);
-        }
-        return clamp(prev, containerH);
-      });
-    });
-
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
-
   const timelineSeconds = Math.max(duration + 120, 600);
   const contentWidthPx = timelineSeconds * zoom;
 
-  // Filter Tracks
   const videoTrackIndices = tracks
     .map((_, i) => i)
     .filter((i) => {
@@ -878,12 +842,12 @@ export default function TimelinePanel({
 
   return (
     <div
-      className="h-full w-full bg-[#1e1e20] flex flex-col font-sans select-none border-t border-black"
+      className="h-full w-full bg-[#1e1e20] flex flex-col font-sans select-none border-t border-black overflow-hidden"
       onMouseEnter={() => (isHovering.current = true)}
       onMouseLeave={() => (isHovering.current = false)}
     >
       {/* 1. TOOLBAR */}
-      <div className="h-10 border-b border-black/40 flex items-center px-4 bg-[#262629] shrink-0 justify-between">
+      <div className="h-10 border-b border-black/40 flex items-center px-4 bg-[#262629] shrink-0 justify-between z-20 relative">
         <div className="flex items-center gap-2">
           <button
             onClick={onAddVideoTrack}
@@ -942,6 +906,7 @@ export default function TimelinePanel({
             </button>
           </div>
         </div>
+
         <div className="flex items-center gap-4">
           <button
             onClick={() => seekTo(0)}
@@ -966,6 +931,7 @@ export default function TimelinePanel({
             <SkipForward size={18} />
           </button>
         </div>
+
         <div className="flex items-center gap-2">
           <button
             onClick={() => setVolume(volume === 0 ? 1 : 0)}
@@ -985,19 +951,19 @@ export default function TimelinePanel({
         </div>
       </div>
 
-      {/* 2. SPLIT VIEW AREA */}
+      {/* 2. TIMELINE CONTENT ROOT - This is the parent container that slides */}
       <div
-        ref={splitAreaRef}
-        className="flex-1 min-h-0 bg-[#121214] relative grid"
-        style={{
-          gridTemplateRows: `${videoHeightPx}px 4px 1fr 16px`,
-        }}
+        ref={mainScrollRef}
+        className="flex-1 bg-[#121214] relative overflow-y-auto scrollbar-none"
+        style={{ scrollbarWidth: "none", msOverflowStyle: "none" }}
       >
-        {/* VIDEO SECTION */}
-        <div className="min-h-0 overflow-hidden flex flex-col border-b border-black">
-          {/* Sticky Ruler Container */}
+        {/* --- TOP PANE: VIDEO (Sized to allow parent to scroll) --- */}
+        <div
+          className="flex flex-col border-b border-zinc-700 overflow-hidden relative shrink-0"
+          style={{ height: "70%" }}
+        >
+          {/* Sticky Ruler */}
           <div className="sticky top-0 z-30 flex h-8 bg-[#1a1a1c] border-b border-zinc-700 shrink-0">
-            {/* Timecode Box */}
             <div
               className={`shrink-0 ${LEFT_PANEL_BG} border-r border-zinc-700 flex items-center justify-center`}
               style={{ width: LEFT_PANEL_W }}
@@ -1006,8 +972,6 @@ export default function TimelinePanel({
                 {formatTime(currentTime)}
               </span>
             </div>
-
-            {/* Ruler */}
             <div
               className="flex-1 relative overflow-hidden cursor-ew-resize"
               onPointerDown={handlePointerDown}
@@ -1026,52 +990,56 @@ export default function TimelinePanel({
             </div>
           </div>
 
-          {/* Video Tracks */}
-          <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
-            {videoTrackIndices.map((idx) => (
-              <TrackRow
-                key={idx}
-                trackIndex={idx}
-                tracks={tracks}
-                trackSettings={trackSettings}
-                zoom={zoom}
-                scrollLeft={scrollLeft}
-                contentWidth={contentWidthPx}
-                currentTime={currentTime}
-                activeShotId={activeShotId}
-                activeTool={activeTool}
-                onRemoveItem={onRemoveItem}
-                onUpdateItem={handleSmartUpdate}
-                onShotClick={onShotClick}
-                onSplit={onSplit}
-                videoBlobs={videoBlobs}
-                onRenameTrack={onRenameTrack}
-                onDeleteTrack={onDeleteTrack}
-                onToggleTrackLock={onToggleTrackLock}
-                onToggleTrackVisibility={onToggleTrackVisibility}
-                isAudio={false}
-              />
-            ))}
+          {/* Video Track List (Independent internal scroll) */}
+          <div
+            ref={videoScrollRef}
+            className="flex-1 overflow-y-auto overflow-x-hidden relative min-h-0 flex flex-col"
+          >
+            <div className="flex-grow min-h-0" />
+            <div className="w-full shrink-0 flex flex-col">
+              {videoTrackIndices.map((idx) => (
+                <TrackRow
+                  key={idx}
+                  trackIndex={idx}
+                  tracks={tracks}
+                  trackSettings={trackSettings}
+                  zoom={zoom}
+                  scrollLeft={scrollLeft}
+                  contentWidth={contentWidthPx}
+                  currentTime={currentTime}
+                  activeShotId={activeShotId}
+                  activeTool={activeTool}
+                  onRemoveItem={onRemoveItem}
+                  onUpdateItem={handleSmartUpdate}
+                  onShotClick={onShotClick}
+                  onSplit={onSplit}
+                  videoBlobs={videoBlobs}
+                  onRenameTrack={onRenameTrack}
+                  onDeleteTrack={onDeleteTrack}
+                  onToggleTrackLock={onToggleTrackLock}
+                  onToggleTrackVisibility={onToggleTrackVisibility}
+                  isAudio={false}
+                />
+              ))}
+            </div>
           </div>
         </div>
 
-        {/* SPLITTER (row 2) */}
+        {/* --- THE DRAG HANDLE --- */}
         <div
-          className="bg-[#121214] hover:bg-[#D2FF44] cursor-row-resize z-50 border-y border-zinc-800"
-          style={{ touchAction: "none" }}
-          onPointerDown={(e) => {
-            isResizingSplit.current = true;
-            e.currentTarget.setPointerCapture(e.pointerId);
-          }}
-          onPointerUp={(e) => {
-            isResizingSplit.current = false;
-            e.currentTarget.releasePointerCapture(e.pointerId);
-          }}
-        />
+          onPointerDown={handleGrabScroll}
+          className="h-2 bg-black hover:bg-[#D2FF44] cursor-grab active:cursor-grabbing z-50 transition-colors shrink-0 flex items-center justify-center border-y border-zinc-800"
+        >
+          <div className="w-10 h-1 bg-zinc-700 rounded-full" />
+        </div>
 
-        {/* AUDIO SECTION (row 3) */}
-        <div className="min-h-0 overflow-hidden flex flex-col">
-          <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
+        {/* --- BOTTOM PANE: AUDIO (Sized to allow parent to scroll) --- */}
+        <div
+          className="flex flex-col overflow-hidden relative shrink-0"
+          style={{ height: "70%" }}
+        >
+          {/* Audio Track List (Independent internal scroll) */}
+          <div className="flex-1 overflow-y-auto overflow-x-hidden relative min-h-0">
             {audioTrackIndices.map((idx) => (
               <TrackRow
                 key={idx}
@@ -1099,9 +1067,9 @@ export default function TimelinePanel({
           </div>
         </div>
 
-        {/* MASTER SCROLLBAR (row 4) */}
+        {/* --- MASTER HORIZONTAL SCROLLBAR --- */}
         <div
-          className="bg-[#1a1a1c] border-t border-black overflow-x-auto"
+          className="shrink-0 h-4 bg-[#1a1a1c] border-t border-black overflow-x-auto z-20"
           onScroll={(e) => setScrollLeft(e.currentTarget.scrollLeft)}
         >
           <div style={{ width: contentWidthPx + LEFT_PANEL_W, height: 1 }} />
