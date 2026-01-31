@@ -16,7 +16,12 @@ interface PlaybackShot {
 
 interface UseGaplessPlaybackProps {
   tracks: any[][];
-  trackSettings: { locked: boolean; visible: boolean; name: string }[];
+  trackSettings: {
+    locked: boolean;
+    visible: boolean;
+    name: string;
+    type?: "audio" | "video";
+  }[];
   totalDuration: number;
   videoBlobs?: Map<string, string>;
   volume: number;

@@ -512,7 +512,7 @@ function StudioContent() {
               visible: true,
               name: i >= 1 ? `A${i}` : `V1`, // Simple default
               height: 64,
-              type: i >= 1 ? "audio" : "video",
+              type: (i >= 1 ? "audio" : "video") as "audio" | "video",
             };
           });
           setTrackSettings(syncedSettings);

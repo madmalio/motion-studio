@@ -1037,7 +1037,7 @@ export default function TimelinePanel({
         <div
           ref={videoScrollRef}
           className="overflow-y-auto overflow-x-hidden flex flex-col shrink-0 timeline-scrollbar"
-          style={{ minHeight: "400px" }}
+          style={{ minHeight: "400px", maxHeight: "50vh" }}
         >
           <div className="flex-grow" />
           {videoTrackIndices.map((idx) => (
@@ -1080,7 +1080,7 @@ export default function TimelinePanel({
         <div
           ref={audioScrollRef}
           className="overflow-y-auto overflow-x-hidden flex flex-col shrink-0 timeline-scrollbar"
-          style={{ minHeight: "300px" }}
+          style={{ minHeight: "300px", maxHeight: "40vh" }}
         >
           {audioTrackIndices.map((idx) => (
             <TrackRow
