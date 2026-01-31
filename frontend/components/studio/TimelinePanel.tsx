@@ -101,10 +101,17 @@ function TimelineItemComponent({
   const [localState, setLocalState] = useState({ width, left });
   const [hoverX, setHoverX] = useState<number | null>(null);
 
+  // FIX #1: Safety Check - Prevent infinite loops by ignoring tiny changes
   useEffect(() => {
     if (!isResizing) {
       setLocalState((prev) => {
-        if (prev.width === width && prev.left === left) return prev;
+        // If the difference is less than 0.1px, don't trigger a re-render
+        if (
+          Math.abs(prev.width - width) < 0.1 &&
+          Math.abs(prev.left - left) < 0.1
+        ) {
+          return prev;
+        }
         return { width, left };
       });
     }
@@ -137,33 +144,46 @@ function TimelineItemComponent({
     }
   };
 
-  // Resize Logic (Right)
+  // Resize Logic (Right) - FIXED
   const handleResizeStart = (e: React.PointerEvent) => {
     if (activeTool === "split" || locked) return;
     e.stopPropagation();
     e.preventDefault();
     setIsResizing(true);
+
     const startX = e.clientX;
     const startWidth = localState.width;
     const startLeft = localState.left;
-    const maxDur = data.maxDuration || data.duration || 4;
-    const maxPx = maxDur * zoom;
+
+    // FIX #2: Allow resizing.
+    // If sourceDuration exists, use it. Otherwise default to 1 hour (3600s) to allow expansion.
+    const sourceDur = data.sourceDuration || data.maxDuration || 3600;
+    const trimStart = data.trimStart || 0;
+    const maxLen = Math.max(0, sourceDur - trimStart);
+    const maxPx = maxLen * zoom;
 
     const onMove = (ev: PointerEvent) => {
       const diff = ev.clientX - startX;
+      // Clamp between 10px and the maximum file length
       const newW = Math.max(10, Math.min(startWidth + diff, maxPx));
+
+      // ONLY update local visual state. DO NOT call onUpdate here.
       setLocalState((prev) => ({ ...prev, width: newW }));
-      if (data.pairId)
-        onUpdate({ startTime: startLeft / zoom, duration: newW / zoom });
     };
+
     const onUp = (ev: PointerEvent) => {
-      setIsResizing(false);
-      const diff = ev.clientX - startX;
-      const newW = Math.max(10, Math.min(startWidth + diff, maxPx));
-      onUpdate({ startTime: startLeft / zoom, duration: newW / zoom });
+      // Clean up first
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
+      setIsResizing(false);
+
+      const diff = ev.clientX - startX;
+      const newW = Math.max(10, Math.min(startWidth + diff, maxPx));
+
+      // FIX #3: Save to database ONLY when mouse is released
+      onUpdate({ startTime: startLeft / zoom, duration: newW / zoom });
     };
+
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
   };
@@ -174,6 +194,7 @@ function TimelineItemComponent({
     e.stopPropagation();
     e.preventDefault();
     setIsResizing(true);
+
     const startX = e.clientX;
     const startWidth = localState.width;
     const startLeft = localState.left;
@@ -184,6 +205,7 @@ function TimelineItemComponent({
       let newLeft = startLeft + diff;
       let newWidth = startWidth - diff;
       let newTrim = startTrim + diff / zoom;
+
       if (newWidth < 10) {
         newLeft = startLeft + startWidth - 10;
         newWidth = 10;
@@ -195,14 +217,20 @@ function TimelineItemComponent({
         newWidth = startWidth + startTrim * zoom;
       }
       if (newLeft < 0) newLeft = 0;
+
       setLocalState({ width: newWidth, left: newLeft });
     };
+
     const onUp = (ev: PointerEvent) => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
       setIsResizing(false);
+
       const diff = ev.clientX - startX;
       let newLeft = startLeft + diff;
       let newWidth = startWidth - diff;
       let newTrim = startTrim + diff / zoom;
+
       if (newWidth < 10) {
         newLeft = startLeft + startWidth - 10;
         newWidth = 10;
@@ -214,14 +242,14 @@ function TimelineItemComponent({
         newWidth = startWidth + startTrim * zoom;
       }
       if (newLeft < 0) newLeft = 0;
+
       onUpdate({
         startTime: newLeft / zoom,
         duration: newWidth / zoom,
         trimStart: newTrim,
       });
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
     };
+
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
   };
