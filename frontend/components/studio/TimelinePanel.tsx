@@ -1036,10 +1036,21 @@ export default function TimelinePanel({
         {/* VIDEO SECTION */}
         <div
           ref={videoScrollRef}
-          className="overflow-y-auto overflow-x-hidden flex flex-col shrink-0 timeline-scrollbar"
-          style={{ minHeight: "400px", maxHeight: "50vh" }}
+          className="flex flex-col relative overflow-y-auto overflow-x-hidden timeline-scrollbar w-full"
+          style={{ flex: "0 0 60%" }} // Increased to 60% for better drag-scroll
         >
+          {/* BLANK VIDEO TRACK (Top Buffer) - Styled to match tracks */}
+          <div className="flex border-b border-zinc-800 bg-[#151517] shrink-0 h-24">
+            <div
+              className={`shrink-0 ${LEFT_PANEL_BG} ${LEFT_PANEL_BORDER}`}
+              style={{ width: LEFT_PANEL_W }}
+            />
+            <div className="flex-1 bg-[#121214]" />
+          </div>
+
+          {/* Spacer glue (pushes real tracks to bottom) */}
           <div className="flex-grow" />
+
           {videoTrackIndices.map((idx) => (
             <TrackRow
               key={idx}
@@ -1079,8 +1090,8 @@ export default function TimelinePanel({
         {/* AUDIO SECTION */}
         <div
           ref={audioScrollRef}
-          className="overflow-y-auto overflow-x-hidden flex flex-col shrink-0 timeline-scrollbar"
-          style={{ minHeight: "300px", maxHeight: "40vh" }}
+          className="flex flex-col relative overflow-y-auto overflow-x-hidden timeline-scrollbar w-full"
+          style={{ flex: "0 0 70%" }} // Increased to 70% to allow deeper main scrolling
         >
           {audioTrackIndices.map((idx) => (
             <TrackRow
@@ -1108,6 +1119,15 @@ export default function TimelinePanel({
               globalSplitHover={globalSplitHover}
             />
           ))}
+
+          {/* BLANK AUDIO TRACK (Bottom Buffer) - Increased to h-24 (96px) */}
+          <div className="flex border-b border-zinc-800 bg-[#151517] shrink-0 h-24">
+            <div
+              className={`shrink-0 ${LEFT_PANEL_BG} ${LEFT_PANEL_BORDER}`}
+              style={{ width: LEFT_PANEL_W }}
+            />
+            <div className="flex-1 bg-[#121214]" />
+          </div>
         </div>
       </div>
 
