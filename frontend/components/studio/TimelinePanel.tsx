@@ -3,7 +3,7 @@
 import { useRef, useState, useEffect, memo } from "react";
 import {
   Play,
-  Square,
+  Pause,
   SkipBack,
   SkipForward,
   Plus,
@@ -612,7 +612,6 @@ interface TimelinePanelProps {
   onAddVideoTrack: () => void;
   onAddAudioTrack: () => void;
   isPlaying: boolean;
-  isReversePlaying?: boolean; // New Prop for Reverse State
   togglePlay: () => void;
   currentTime: number;
   duration: number;
@@ -641,7 +640,6 @@ interface TimelinePanelProps {
   onToggleTrackVisibility?: (index: number) => void;
   videoBlobs?: Map<string, string>;
   onVolumeChange?: (volume: number) => void;
-  onPlayReverse?: () => void;
   onStop?: () => void;
 }
 
@@ -652,7 +650,6 @@ export default function TimelinePanel({
   onAddVideoTrack,
   onAddAudioTrack,
   isPlaying,
-  isReversePlaying = false,
   togglePlay,
   currentTime,
   duration,
@@ -674,7 +671,6 @@ export default function TimelinePanel({
   onToggleTrackVisibility,
   videoBlobs,
   onVolumeChange,
-  onPlayReverse,
   onStop,
 }: TimelinePanelProps) {
   const [activeTool, setActiveTool] = useState<"select" | "split">("select");
@@ -869,43 +865,17 @@ export default function TimelinePanel({
             <SkipBack size={16} />
           </button>
 
-          {/* Reverse Play (Mirrored Play) */}
+          {/* Play/Pause Toggle */}
           <button
-            onClick={onPlayReverse}
-            className={`text-zinc-400 hover:text-white ${isReversePlaying ? "text-[#D2FF44]" : ""}`}
-            title="Play Reverse"
-          >
-            <Play
-              size={16}
-              className="rotate-180"
-              fill={isReversePlaying ? NEON_YELLOW : "currentColor"}
-            />
-          </button>
-
-          {/* Stop (No square border) */}
-          <button
-            onClick={() => {
-              if (onStop) onStop();
-              else if (isPlaying || isReversePlaying) togglePlay();
-            }}
-            className="text-zinc-400 hover:text-white"
-            title="Stop"
-          >
-            <Square size={16} fill="currentColor" />
-          </button>
-
-          {/* Play Forward */}
-          <button
-            onClick={() => {
-              if (!isPlaying) togglePlay();
-            }}
+            onClick={togglePlay}
             className={`text-zinc-400 hover:text-white ${isPlaying ? "text-[#D2FF44]" : ""}`}
-            title="Play Forward"
+            title={isPlaying ? "Pause" : "Play"}
           >
-            <Play
-              size={16}
-              fill={isPlaying ? NEON_YELLOW : "currentColor"}
-            />
+            {isPlaying ? (
+              <Pause size={16} fill="currentColor" />
+            ) : (
+              <Play size={16} fill="currentColor" />
+            )}
           </button>
 
           <button
