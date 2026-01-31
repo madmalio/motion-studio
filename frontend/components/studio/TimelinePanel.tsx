@@ -1028,7 +1028,7 @@ export default function TimelinePanel({
       {/* MAIN CONTAINER */}
       <div
         ref={mainScrollRef}
-        className="flex-1 relative flex flex-col overflow-y-auto overflow-x-hidden"
+        className="flex-1 relative flex flex-col overflow-hidden"
         style={{
           background: `linear-gradient(to right, #2c2f33 ${LEFT_PANEL_W}px, #121214 ${LEFT_PANEL_W}px)`,
         }}
