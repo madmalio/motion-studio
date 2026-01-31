@@ -1107,26 +1107,62 @@ function StudioContent() {
         }
 
         if (movedItem.pairId) {
-          const a1Index = trackSettings.findIndex((t) =>
-            (t.name || "").trim().toUpperCase().startsWith("A"),
-          );
+          // 1. Get Track Indices by Type
+          const videoIndices = trackSettings
+            .map((t, i) => ({ ...t, index: i }))
+            .filter((t) => !(t.name || "").trim().toUpperCase().startsWith("A"))
+            .map((t) => t.index);
 
-          if (a1Index !== -1) {
-            const a1Track = [...newTracks[a1Index]];
-            const audioIdx = a1Track.findIndex(
-              (it: any) => it.pairId === movedItem.pairId,
-            );
+          const audioIndices = trackSettings
+            .map((t, i) => ({ ...t, index: i }))
+            .filter((t) => (t.name || "").trim().toUpperCase().startsWith("A"))
+            .map((t) => t.index);
 
-            if (audioIdx !== -1) {
-              const [audioItem] = a1Track.splice(audioIdx, 1);
+          // 2. Determine Target Audio Track (V1->A1, V2->A2)
+          const targetVideoOrder = videoIndices.indexOf(targetTrackIndex);
+          let targetAudioIndex = -1;
+
+          if (targetVideoOrder !== -1 && audioIndices.length > 0) {
+            // Invert video order so V1 (bottom) maps to A1 (top)
+            const invertedOrder = videoIndices.length - 1 - targetVideoOrder;
+            // Clamp to available audio tracks
+            const safeOrder = Math.min(invertedOrder, audioIndices.length - 1);
+            targetAudioIndex = audioIndices[safeOrder];
+          }
+
+          if (targetAudioIndex !== -1) {
+            // 3. Find and Move the Paired Audio Item
+            let sourceAudioTrackIndex = -1;
+            let sourceAudioItemIndex = -1;
+
+            for (const idx of audioIndices) {
+              const trk = newTracks[idx];
+              if (!trk) continue;
+              const found = trk.findIndex(
+                (it: any) => it.pairId === movedItem.pairId,
+              );
+              if (found !== -1) {
+                sourceAudioTrackIndex = idx;
+                sourceAudioItemIndex = found;
+                break;
+              }
+            }
+
+            if (sourceAudioTrackIndex !== -1) {
+              const sourceTrack = [...newTracks[sourceAudioTrackIndex]];
+              const [audioItem] = sourceTrack.splice(sourceAudioItemIndex, 1);
+              newTracks[sourceAudioTrackIndex] = sourceTrack;
 
               const movedAudio = {
                 ...audioItem,
                 startTime: newStartTime,
-                trackIndex: a1Index,
+                trackIndex: targetAudioIndex,
               };
 
-              newTracks[a1Index] = applyOverwrite(a1Track, movedAudio);
+              newTracks[targetAudioIndex] = applyOverwrite(
+                newTracks[targetAudioIndex] || [],
+                movedAudio,
+              );
             }
           }
         }
