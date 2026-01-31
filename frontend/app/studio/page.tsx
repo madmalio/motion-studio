@@ -177,10 +177,19 @@ function StudioContent() {
   const [isLoading, setIsLoading] = useState(true);
 
   // Timeline & Playback State
-  const [tracks, setTracks] = useState<TimelineItem[][]>([[]]);
+  const [tracks, setTracks] = useState<TimelineItem[][]>([[], []]);
   const [trackSettings, setTrackSettings] = useState<
-    { locked: boolean; visible: boolean; name: string; height?: number }[]
-  >([{ locked: false, visible: true, name: "Track 1", height: 96 }]);
+    {
+      locked: boolean;
+      visible: boolean;
+      name: string;
+      height?: number;
+      type?: "video" | "audio";
+    }[]
+  >([
+    { locked: false, visible: true, name: "V1", height: 96, type: "video" },
+    { locked: false, visible: true, name: "A1", height: 48, type: "audio" },
+  ]);
 
   const [activeDragItem, setActiveDragItem] = useState<any>(null);
   const [zoom, setZoom] = useState(10); // px/second
@@ -524,15 +533,41 @@ function StudioContent() {
           );
           setVideoBlobs(blobMap);
         } else {
-          setTracks([[]]);
+          setTracks([[], []]);
           setTrackSettings([
-            { locked: false, visible: true, name: "Track 1", height: 96 },
+            {
+              locked: false,
+              visible: true,
+              name: "V1",
+              height: 96,
+              type: "video",
+            },
+            {
+              locked: false,
+              visible: true,
+              name: "A1",
+              height: 48,
+              type: "audio",
+            },
           ]);
         }
       } catch (e) {
-        setTracks([[]]);
+        setTracks([[], []]);
         setTrackSettings([
-          { locked: false, visible: true, name: "Track 1", height: 96 },
+          {
+            locked: false,
+            visible: true,
+            name: "V1",
+            height: 96,
+            type: "video",
+          },
+          {
+            locked: false,
+            visible: true,
+            name: "A1",
+            height: 48,
+            type: "audio",
+          },
         ]);
       }
 
@@ -704,24 +739,52 @@ function StudioContent() {
   const handleAddAudioTrack = () => {
     recordHistory();
 
-    // add a new empty track at the end
-    setTracks((prev) => [...prev, []]);
+    // 1. Add the new empty track to the data array
+    setTracks((prevTracks) => {
+      return [...prevTracks, []];
+    });
 
-    // name it A1, then A2, then A3...
-    setTrackSettings((prev) => {
-      const audioCount = prev.filter((t) =>
-        (t.name || "").trim().toUpperCase().startsWith("A"),
-      ).length;
+    setTrackSettings((prevSettings) => {
+      // --- AUTO-HEAL STEP ---
+      // We only respect settings that have a corresponding track.
+      // If 'tracks' has 2 items but 'settings' has 18, we discard the extra 16.
+      // We use 'tracks.length' from the current render scope.
+      const validSettings = prevSettings.slice(0, tracks.length);
 
+      // 2. Filter existing audio tracks from the VALID settings only
+      const audioTracks = validSettings.filter((t) => {
+        if (t.type) return t.type === "audio";
+        // Legacy fallback: name starts with A followed by a number (e.g., "A1")
+        return (t.name || "").trim().toUpperCase().match(/^A\d+/);
+      });
+
+      let nextNum = 1;
+
+      if (audioTracks.length > 0) {
+        // Find the last audio track in the valid list
+        const lastTrack = audioTracks[audioTracks.length - 1];
+
+        // Extract the number
+        const match = (lastTrack.name || "").match(/(\d+)/);
+        if (match) {
+          nextNum = parseInt(match[1], 10) + 1;
+        } else {
+          nextNum = audioTracks.length + 1;
+        }
+      }
+
+      const name = `A${nextNum}`;
+
+      // 3. Return the sanitized list + the new track
       return [
-        ...prev,
+        ...validSettings,
         {
           locked: false,
           visible: true,
-          name: `A${audioCount + 1}`,
+          name,
           height: 64,
           type: "audio",
-        } as any,
+        },
       ];
     });
   };
@@ -731,39 +794,47 @@ function StudioContent() {
 
     setTracks((prevTracks) => {
       const newTracks = [...prevTracks];
-
-      // Find where audio tracks start (A1, A2, ...)
-      const audioStart = trackSettings.findIndex((t) =>
-        (t.name || "").trim().toUpperCase().startsWith("A"),
-      );
-
-      // Insert new video track at the TOP of the video stack:
-      // index 0 if no audio, otherwise index 0 still works (we keep all videos above audio)
-      const insertAt = audioStart === -1 ? 0 : 0;
-
-      newTracks.splice(insertAt, 0, []);
+      // Insert new video track at the TOP (index 0)
+      newTracks.splice(0, 0, []);
       return newTracks;
     });
 
     setTrackSettings((prevSettings) => {
-      const newSettings = [...prevSettings];
+      // --- AUTO-HEAL STEP ---
+      // Slice settings to match the actual number of tracks existing BEFORE this addition.
+      // This removes ghost entries from old saves.
+      const validSettings = prevSettings.slice(0, tracks.length);
 
-      // Count current video tracks (not audio)
-      const videoCount = newSettings.filter(
-        (t) => !(t.name || "").trim().toUpperCase().startsWith("A"),
-      ).length;
+      // Find all video tracks in the valid list
+      const videoTracks = validSettings.filter(
+        (t) =>
+          t.type === "video" ||
+          !(t.name || "").trim().toUpperCase().startsWith("A"),
+      );
 
-      // New one should be V{videoCount+1} and appear above V1, etc.
-      const name = `V${videoCount + 1}`;
+      let nextNum = 1;
+      if (videoTracks.length > 0) {
+        // Video tracks are usually at the top. We look at the highest existing one (index 0).
+        const firstTrack = videoTracks[0];
+        const match = (firstTrack.name || "").match(/(\d+)/);
+        if (match) {
+          nextNum = parseInt(match[1], 10) + 1;
+        } else {
+          nextNum = videoTracks.length + 1;
+        }
+      }
 
-      // Insert at top (index 0)
+      const name = `V${nextNum}`;
+
+      // Insert new settings at the TOP (index 0) to match the tracks array
+      const newSettings = [...validSettings];
       newSettings.splice(0, 0, {
         locked: false,
         visible: true,
         name,
         height: 96,
         type: "video",
-      } as any);
+      });
 
       return newSettings;
     });
