@@ -46,7 +46,7 @@ import {
   DeleteShot,
   SaveTimeline,
   GetTimeline,
-  ExtractAudioPeaks, // <--- ADDED THIS
+  ExtractAudioPeaks,
 } from "../../lib/wailsSafe";
 
 // --- TYPES ---
@@ -56,7 +56,7 @@ interface Shot {
   name: string;
   sourceImage: string;
   audioPath: string;
-  waveform?: number[]; // <--- ADDED THIS
+  waveform?: number[];
   previewBase64?: string;
   prompt: string;
   motionStrength: number;
@@ -102,21 +102,12 @@ const isTimelineDropTarget = (overId: string, tracks: TimelineItem[][]) => {
   return tracks.some((t) => t.some((item) => item.timelineId === overId));
 };
 
-const findAudioTrackIndex = (trackSettings: { name: string }[] | undefined) => {
-  if (!trackSettings) return -1;
-  return trackSettings.findIndex((t) =>
-    (t.name || "").trim().toUpperCase().startsWith("A"),
-  );
-};
-
 function WailsGuard({ children }: { children: React.ReactNode }) {
   const [isReady, setIsReady] = useState(false);
   const [showError, setShowError] = useState(false);
 
   useEffect(() => {
     let alive = true;
-
-    // show "disconnected" if it takes too long
     const timer = setTimeout(() => {
       if (alive) setShowError(true);
     }, 2000);
@@ -336,17 +327,26 @@ function StudioContent() {
   );
 
   // --- ENGINE STATE ---
+  const playbackTracks = useMemo(() => {
+    return tracks.map((track, index) => {
+      if (trackSettings[index] && !trackSettings[index].visible) {
+        return [];
+      }
+      return track;
+    });
+  }, [tracks, trackSettings]);
+
   const {
     primaryVideoRef,
     secondaryVideoRef,
     canvasRef,
     isPlaying,
-    setIsPlaying, // Extracting this to manage mutual exclusion
+    setIsPlaying,
     togglePlay,
     currentTime,
     seekTo,
   } = useGaplessPlayback({
-    tracks,
+    tracks: playbackTracks,
     trackSettings,
     totalDuration,
     videoBlobs,
@@ -378,7 +378,6 @@ function StudioContent() {
   useEffect(() => {
     shots.forEach((shot) => {
       if (shot.outputVideo && !videoBlobs.has(shot.outputVideo)) {
-        // If we have it in cache (from generation), create a blob url
         if (videoCache.current.has(shot.id)) {
           const b64 = videoCache.current.get(shot.id);
           if (b64) {
@@ -431,15 +430,11 @@ function StudioContent() {
   // --- HELPER: GENERATE WAVEFORM ---
   const generateWaveform = async (shotId: string, filePath: string) => {
     if (!filePath) return;
-
-    // 20 peaks per second gives a good balance of detail and performance
     const peaks = await ExtractAudioPeaks(filePath, 20);
-
     if (peaks && peaks.length > 0) {
       setShots((prev) =>
         prev.map((s) => (s.id === shotId ? { ...s, waveform: peaks } : s)),
       );
-      // Also update tracks if this shot is on the timeline
       setTracks((prev) =>
         prev.map((track) =>
           track.map((item) =>
@@ -465,7 +460,6 @@ function StudioContent() {
       setScene(s || null);
 
       const savedShots = await GetShots(pId, sId);
-      // 1. Hydrate Shots
       if (savedShots && savedShots.length > 0) {
         const hydratedShots = await Promise.all(
           savedShots.map(async (shot: any) => {
@@ -479,8 +473,6 @@ function StudioContent() {
         setShots(hydratedShots);
         setActiveShotId(hydratedShots[0].id);
 
-        // --- BACKFILL WAVEFORMS ---
-        // If shots have video but no waveform, generate it now
         hydratedShots.forEach((shot) => {
           const path = shot.outputVideo || shot.audioPath;
           if (path && (!shot.waveform || shot.waveform.length === 0)) {
@@ -489,7 +481,6 @@ function StudioContent() {
         });
       }
 
-      // 2. Load Timeline
       try {
         const timelineData = await GetTimeline(pId, sId);
         if (timelineData && timelineData.tracks) {
@@ -508,11 +499,24 @@ function StudioContent() {
             }),
           );
           setTracks(hydratedTracks);
-          if (timelineData.trackSettings) {
-            setTrackSettings(timelineData.trackSettings);
-          }
 
-          // 3. Pre-load Video Clips
+          // --- FIX: Force Sync trackSettings to match tracks length ---
+          const savedSettings = timelineData.trackSettings || [];
+          const syncedSettings = hydratedTracks.map((_, i) => {
+            // Use existing or create default
+            if (savedSettings[i]) return savedSettings[i];
+
+            // Heuristic defaults
+            return {
+              locked: false,
+              visible: true,
+              name: i >= 1 ? `A${i}` : `V1`, // Simple default
+              height: 64,
+              type: i >= 1 ? "audio" : "video",
+            };
+          });
+          setTrackSettings(syncedSettings);
+
           const uniquePaths = new Set<string>();
           hydratedTracks.flat().forEach((item: any) => {
             if (item.outputVideo) uniquePaths.add(item.outputVideo);
@@ -594,7 +598,7 @@ function StudioContent() {
         name: `Shot ${prev.length + 1}`,
         sourceImage: "",
         audioPath: "",
-        waveform: [], // Init empty
+        waveform: [],
         prompt: "",
         motionStrength: 127,
         seed: Math.floor(Math.random() * 1000000),
@@ -622,7 +626,7 @@ function StudioContent() {
         name: `${originalShot.name} (Ext)`,
         sourceImage: lastFramePath,
         audioPath: "",
-        waveform: [], // Reset waveform
+        waveform: [],
         previewBase64: b64,
         status: "DRAFT",
         outputVideo: "",
@@ -648,8 +652,6 @@ function StudioContent() {
 
   const updateActiveShot = (updates: Partial<Shot>) => {
     if (!activeShotId) return;
-
-    // --- CHECK FOR NEW MEDIA TO GENERATE WAVEFORM ---
     const shot = shots.find((s) => s.id === activeShotId);
     if (shot) {
       if (updates.outputVideo && updates.outputVideo !== shot.outputVideo) {
@@ -659,7 +661,6 @@ function StudioContent() {
         generateWaveform(shot.id, updates.audioPath);
       }
     }
-
     setShots((prev) =>
       prev.map((s) => (s.id === activeShotId ? { ...s, ...updates } : s)),
     );
@@ -706,16 +707,13 @@ function StudioContent() {
       if (targetTrackIndex !== -1 && targetItemIndex !== -1) {
         const track = newTracks[targetTrackIndex];
         const item = track[targetItemIndex];
-
         if (
           splitTime <= item.startTime + 0.05 ||
           splitTime >= item.startTime + (item.duration || 0) - 0.05
         ) {
           return prev;
         }
-
         const splitOffset = splitTime - item.startTime;
-
         const leftItem = { ...item, duration: splitOffset };
         const rightItem: TimelineItem = {
           ...item,
@@ -730,7 +728,6 @@ function StudioContent() {
         newTracks[targetTrackIndex] = newTrack;
         return newTracks;
       }
-
       return prev;
     });
   };
@@ -738,33 +735,20 @@ function StudioContent() {
   // --- TRACK MANAGEMENT ---
   const handleAddAudioTrack = () => {
     recordHistory();
-
-    // 1. Add the new empty track to the data array
-    setTracks((prevTracks) => {
-      return [...prevTracks, []];
-    });
+    setTracks((prevTracks) => [...prevTracks, []]);
 
     setTrackSettings((prevSettings) => {
-      // --- AUTO-HEAL STEP ---
-      // We only respect settings that have a corresponding track.
-      // If 'tracks' has 2 items but 'settings' has 18, we discard the extra 16.
-      // We use 'tracks.length' from the current render scope.
+      // AUTO-HEAL: Ensure we start with a clean list matched to current tracks
       const validSettings = prevSettings.slice(0, tracks.length);
 
-      // 2. Filter existing audio tracks from the VALID settings only
       const audioTracks = validSettings.filter((t) => {
         if (t.type) return t.type === "audio";
-        // Legacy fallback: name starts with A followed by a number (e.g., "A1")
         return (t.name || "").trim().toUpperCase().match(/^A\d+/);
       });
 
       let nextNum = 1;
-
       if (audioTracks.length > 0) {
-        // Find the last audio track in the valid list
         const lastTrack = audioTracks[audioTracks.length - 1];
-
-        // Extract the number
         const match = (lastTrack.name || "").match(/(\d+)/);
         if (match) {
           nextNum = parseInt(match[1], 10) + 1;
@@ -772,49 +756,33 @@ function StudioContent() {
           nextNum = audioTracks.length + 1;
         }
       }
-
       const name = `A${nextNum}`;
-
-      // 3. Return the sanitized list + the new track
       return [
         ...validSettings,
-        {
-          locked: false,
-          visible: true,
-          name,
-          height: 64,
-          type: "audio",
-        },
+        { locked: false, visible: true, name, height: 64, type: "audio" },
       ];
     });
   };
 
   const handleAddTrack = () => {
     recordHistory();
-
     setTracks((prevTracks) => {
       const newTracks = [...prevTracks];
-      // Insert new video track at the TOP (index 0)
       newTracks.splice(0, 0, []);
       return newTracks;
     });
 
     setTrackSettings((prevSettings) => {
-      // --- AUTO-HEAL STEP ---
-      // Slice settings to match the actual number of tracks existing BEFORE this addition.
-      // This removes ghost entries from old saves.
+      // AUTO-HEAL
       const validSettings = prevSettings.slice(0, tracks.length);
 
-      // Find all video tracks in the valid list
       const videoTracks = validSettings.filter(
         (t) =>
           t.type === "video" ||
           !(t.name || "").trim().toUpperCase().startsWith("A"),
       );
-
       let nextNum = 1;
       if (videoTracks.length > 0) {
-        // Video tracks are usually at the top. We look at the highest existing one (index 0).
         const firstTrack = videoTracks[0];
         const match = (firstTrack.name || "").match(/(\d+)/);
         if (match) {
@@ -823,10 +791,7 @@ function StudioContent() {
           nextNum = videoTracks.length + 1;
         }
       }
-
       const name = `V${nextNum}`;
-
-      // Insert new settings at the TOP (index 0) to match the tracks array
       const newSettings = [...validSettings];
       newSettings.splice(0, 0, {
         locked: false,
@@ -835,7 +800,6 @@ function StudioContent() {
         height: 96,
         type: "video",
       });
-
       return newSettings;
     });
   };
@@ -865,9 +829,23 @@ function StudioContent() {
   };
 
   const handleToggleTrackVisibility = (index: number) => {
-    setTrackSettings((prev) =>
-      prev.map((s, i) => (i === index ? { ...s, visible: !s.visible } : s)),
-    );
+    setTrackSettings((prev) => {
+      const newSettings = [...prev];
+      // Safety check: ensure the setting exists before toggling
+      if (!newSettings[index]) {
+        newSettings[index] = {
+          locked: false,
+          visible: true,
+          name: `Track ${index + 1}`,
+          height: 64,
+        };
+      }
+      newSettings[index] = {
+        ...newSettings[index],
+        visible: !newSettings[index].visible,
+      };
+      return newSettings;
+    });
   };
 
   // --- DND LOGIC ---
@@ -932,10 +910,8 @@ function StudioContent() {
       if (!isCtrlPressed.current) {
         const SNAP_THRESHOLD_PX = 15;
         const snapThreshold = SNAP_THRESHOLD_PX / zoom;
-
         let activeDuration = 4;
         let foundItem: any;
-
         for (const t of tracks) {
           const i = t.find((it) => it.timelineId === active.id);
           if (i) {
@@ -946,11 +922,9 @@ function StudioContent() {
         if (!foundItem) {
           foundItem = shots.find((s) => s.id === active.id);
         }
-
         if (foundItem) {
           activeDuration = foundItem.duration || 4;
         }
-
         let minDiff = snapThreshold;
         if (Math.abs(rawTime - 0) < minDiff) {
           newStartTime = 0;
@@ -964,14 +938,11 @@ function StudioContent() {
           newStartTime = Math.max(0, currentTime - activeDuration);
           minDiff = Math.abs(rawTime + activeDuration - currentTime);
         }
-
         tracks.forEach((track) => {
           track.forEach((item) => {
             if (item.timelineId === active.id) return;
-
             const itemStart = item.startTime;
             const itemEnd = item.startTime + (item.duration || 4);
-
             const diffStartStart = Math.abs(rawTime - itemStart);
             if (diffStartStart < minDiff) {
               newStartTime = itemStart;
@@ -1048,7 +1019,6 @@ function StudioContent() {
       const shotData =
         active.data.current?.shot || shots.find((s) => s.id === active.id);
       if (!shotData) return;
-
       const newItem: TimelineItem = {
         ...shotData,
         timelineId: crypto.randomUUID(),
@@ -1060,32 +1030,24 @@ function StudioContent() {
         volume: 1,
         muted: false,
       };
-
       recordHistory();
       setTracks((prev) => {
         let newTracks = [...prev];
-
-        // 1) Drop video clip on the target track (existing behavior)
         newTracks[targetTrackIndex] = applyOverwrite(
           newTracks[targetTrackIndex],
           newItem,
         );
-
-        // 2) Ensure A1 exists (auto-create audio track)
         let audioTrackIndex = trackSettings.findIndex((t) =>
           (t.name || "").trim().toUpperCase().startsWith("A"),
         );
         if (audioTrackIndex === -1) {
           newTracks = [...newTracks, []];
           audioTrackIndex = newTracks.length - 1;
-
           setTrackSettings((prevSettings) => [
             ...prevSettings,
             { locked: false, visible: true, name: "A1", height: 64 },
           ]);
         }
-
-        // 3) Add audio copy to A1
         const audioItem: TimelineItem = {
           ...newItem,
           timelineId: crypto.randomUUID(),
@@ -1094,12 +1056,10 @@ function StudioContent() {
           previewBase64: undefined,
           name: `AUDIO: ${newItem.name}`,
         };
-
         newTracks[audioTrackIndex] = applyOverwrite(
           newTracks[audioTrackIndex],
           audioItem,
         );
-
         return newTracks;
       });
       return;
@@ -1110,44 +1070,30 @@ function StudioContent() {
       const sourceTrackIndex = parseInt(
         activeContainer.replace("timeline-track-", ""),
       );
-
       const sourceIsAudio = trackIsAudio(sourceTrackIndex);
       if (sourceIsAudio !== targetIsAudio) return;
-
       recordHistory();
       setTracks((prev) => {
         const newTracks = [...prev];
         if (!newTracks[sourceTrackIndex]) return prev;
-
         const sourceTrack = [...newTracks[sourceTrackIndex]];
         const itemIndex = sourceTrack.findIndex(
           (i) => i.timelineId === active.id,
         );
         if (itemIndex === -1) return prev;
-
         const [movedItem] = sourceTrack.splice(itemIndex, 1);
         newTracks[sourceTrackIndex] = sourceTrack;
-
         movedItem.trackIndex = targetTrackIndex;
         movedItem.startTime = newStartTime;
 
-        const sourceIsAudio = (trackSettings?.[sourceTrackIndex]?.name || "")
-          .trim()
-          .toUpperCase()
-          .startsWith("A");
-
         if (sourceIsAudio && movedItem.pairId) {
-          // Find the paired VIDEO item anywhere (not on an audio track)
           let videoTrackIndex = -1;
           let videoItemIndex = -1;
-
           for (let ti = 0; ti < newTracks.length; ti++) {
             const trackName = (trackSettings?.[ti]?.name || "")
               .trim()
               .toUpperCase();
-            const isAudio = trackName.startsWith("A");
-            if (isAudio) continue;
-
+            if (trackName.startsWith("A")) continue;
             const idx = newTracks[ti].findIndex(
               (it: any) => it.pairId === movedItem.pairId,
             );
@@ -1157,55 +1103,40 @@ function StudioContent() {
               break;
             }
           }
-
           if (videoTrackIndex !== -1 && videoItemIndex !== -1) {
             const videoTrack = [...newTracks[videoTrackIndex]];
             const [videoItem] = videoTrack.splice(videoItemIndex, 1);
             newTracks[videoTrackIndex] = videoTrack;
-
             const movedVideoItem = {
               ...videoItem,
               startTime: newStartTime,
               trackIndex: videoTrackIndex,
             };
-
-            // Reinsert with overwrite so it behaves like your edits
             newTracks[videoTrackIndex] = applyOverwrite(
               newTracks[videoTrackIndex],
               movedVideoItem,
             );
           }
         }
-
         if (movedItem.pairId) {
-          // 1. Get Track Indices by Type
           const videoIndices = trackSettings
             .map((t, i) => ({ ...t, index: i }))
             .filter((t) => !(t.name || "").trim().toUpperCase().startsWith("A"))
             .map((t) => t.index);
-
           const audioIndices = trackSettings
             .map((t, i) => ({ ...t, index: i }))
             .filter((t) => (t.name || "").trim().toUpperCase().startsWith("A"))
             .map((t) => t.index);
-
-          // 2. Determine Target Audio Track (V1->A1, V2->A2)
           const targetVideoOrder = videoIndices.indexOf(targetTrackIndex);
           let targetAudioIndex = -1;
-
           if (targetVideoOrder !== -1 && audioIndices.length > 0) {
-            // Invert video order so V1 (bottom) maps to A1 (top)
             const invertedOrder = videoIndices.length - 1 - targetVideoOrder;
-            // Clamp to available audio tracks
             const safeOrder = Math.min(invertedOrder, audioIndices.length - 1);
             targetAudioIndex = audioIndices[safeOrder];
           }
-
           if (targetAudioIndex !== -1) {
-            // 3. Find and Move the Paired Audio Item
             let sourceAudioTrackIndex = -1;
             let sourceAudioItemIndex = -1;
-
             for (const idx of audioIndices) {
               const trk = newTracks[idx];
               if (!trk) continue;
@@ -1218,18 +1149,15 @@ function StudioContent() {
                 break;
               }
             }
-
             if (sourceAudioTrackIndex !== -1) {
               const sourceTrack = [...newTracks[sourceAudioTrackIndex]];
               const [audioItem] = sourceTrack.splice(sourceAudioItemIndex, 1);
               newTracks[sourceAudioTrackIndex] = sourceTrack;
-
               const movedAudio = {
                 ...audioItem,
                 startTime: newStartTime,
                 trackIndex: targetAudioIndex,
               };
-
               newTracks[targetAudioIndex] = applyOverwrite(
                 newTracks[targetAudioIndex] || [],
                 movedAudio,
@@ -1237,12 +1165,10 @@ function StudioContent() {
             }
           }
         }
-
         newTracks[targetTrackIndex] = applyOverwrite(
           newTracks[targetTrackIndex],
           movedItem,
         );
-
         return newTracks;
       });
     }
@@ -1301,7 +1227,6 @@ function StudioContent() {
       onDragEnd={handleDragEnd}
     >
       <div className="flex-1 w-full flex flex-col overflow-hidden bg-[#09090b]">
-        {/* HEADER */}
         <header className="h-10 w-full border-b border-zinc-800 bg-[#09090b] flex items-center justify-between px-4 shrink-0">
           <h1 className="text-sm font-bold text-white flex items-center gap-2">
             {scene.name} <span className="text-zinc-600">/</span>{" "}
@@ -1309,9 +1234,7 @@ function StudioContent() {
           </h1>
         </header>
 
-        {/* WORKSPACE */}
         <div className="flex-1 flex overflow-hidden">
-          {/* 1. FULL HEIGHT GENERATOR (Left) */}
           {isGeneratorFullHeight && (
             <>
               <div
@@ -1320,7 +1243,6 @@ function StudioContent() {
               >
                 {generatorContent}
               </div>
-              {/* Resizer for Generator */}
               <div
                 className="w-1 hover:w-1.5 bg-zinc-900 hover:bg-[#D2FF44] cursor-col-resize transition-all z-50 flex-shrink-0"
                 onPointerDown={(e) => {
@@ -1334,11 +1256,8 @@ function StudioContent() {
             </>
           )}
 
-          {/* 2. MAIN CONTENT AREA (Right or Full) */}
           <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-            {/* TOP ROW (Generator? + Library + Viewer) */}
             <div className="flex-1 flex overflow-hidden min-h-0">
-              {/* CLASSIC GENERATOR (Inline) */}
               {!isGeneratorFullHeight && (
                 <>
                   <div
@@ -1347,7 +1266,6 @@ function StudioContent() {
                   >
                     {generatorContent}
                   </div>
-                  {/* Resizer for Generator */}
                   <div
                     className="w-1 hover:w-1.5 bg-zinc-900 hover:bg-[#D2FF44] cursor-col-resize transition-all z-50 flex-shrink-0"
                     onPointerDown={(e) => {
@@ -1360,8 +1278,6 @@ function StudioContent() {
                   />
                 </>
               )}
-
-              {/* LIBRARY (Always here) */}
               <div
                 style={{ width: libraryWidth }}
                 className="border-r border-zinc-800 bg-[#09090b] flex flex-col min-h-0 shrink-0"
@@ -1375,8 +1291,6 @@ function StudioContent() {
                   handleDeleteShot={handleDeleteShot}
                 />
               </div>
-
-              {/* Resizer for Library */}
               <div
                 className="w-1 hover:w-1.5 bg-zinc-900 hover:bg-[#D2FF44] cursor-col-resize transition-all z-50 flex-shrink-0"
                 onPointerDown={(e) => {
@@ -1387,8 +1301,6 @@ function StudioContent() {
                   e.currentTarget.releasePointerCapture(e.pointerId)
                 }
               />
-
-              {/* VIEWER (Always here) */}
               <div className="flex-1 min-w-0 bg-black min-h-0">
                 <ViewerPanel
                   isPlaying={isPlaying}
@@ -1399,8 +1311,6 @@ function StudioContent() {
                 />
               </div>
             </div>
-
-            {/* Resizer for Timeline */}
             <div
               className="h-1 hover:h-1.5 bg-zinc-900 hover:bg-[#D2FF44] cursor-row-resize transition-all z-50 shrink-0"
               onPointerDown={(e) => {
@@ -1411,8 +1321,6 @@ function StudioContent() {
                 e.currentTarget.releasePointerCapture(e.pointerId)
               }
             />
-
-            {/* TIMELINE (Always here) */}
             <div
               style={{ height: timelineHeight }}
               className="border-t border-zinc-800 bg-[#1e1e20] shrink-0"
@@ -1421,26 +1329,18 @@ function StudioContent() {
                 tracks={tracks}
                 onRemoveItem={(id: string) => {
                   recordHistory();
-
-                  // Find the pairId for the item being removed (if it has one)
                   const target = tracks.flat().find((i) => i.timelineId === id);
                   const pairId = target?.pairId;
-
                   setTracks((prev) => {
-                    // If no pairId, behave exactly like before
                     if (!pairId) {
                       return prev.map((t) =>
                         t.filter((i) => i.timelineId !== id),
                       );
                     }
-
-                    // If pairId exists, remove BOTH (video + audio) everywhere
                     return prev.map((t) =>
                       t.filter((i) => i.pairId !== pairId),
                     );
                   });
-
-                  // Stop playback if something is removed
                   if (isPlaying) {
                     togglePlay();
                   }
@@ -1448,14 +1348,11 @@ function StudioContent() {
                 onUpdateItem={handleUpdateItem}
                 onAddVideoTrack={handleAddTrack}
                 onAddAudioTrack={handleAddAudioTrack}
-                // --- UPDATED PLAYBACK PROPS (FIXED FIGHTING) ---
                 isPlaying={isPlaying}
                 togglePlay={togglePlay}
                 onStop={() => {
                   if (isPlaying) togglePlay();
                 }}
-                // -----------------------------------------------
-
                 currentTime={currentTime}
                 duration={totalDuration}
                 seekTo={seekTo}
@@ -1511,7 +1408,6 @@ function StudioContent() {
                   />
                 )}
               </div>
-              {/* WAVEFORM VISUALIZATION */}
               {activeDragItem.waveform && (
                 <div className="absolute bottom-4 left-0 right-0 h-6 flex items-end gap-[1px] px-1 opacity-80 pointer-events-none">
                   {activeDragItem.waveform.map((h: number, i: number) => (

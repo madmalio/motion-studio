@@ -4,11 +4,14 @@ import { useState, useRef, useEffect, useCallback } from "react";
 interface PlaybackShot {
   id: string;
   outputVideo: string;
+  audioPath?: string; // Added support for audio-only files
   duration: number;
   timelineId: string;
   startTime?: number;
   trimStart?: number;
-  offset?: number; // Calculated internally
+  offset?: number;
+  hidden?: boolean; // Added support for forced hiding
+  muted?: boolean;
 }
 
 interface UseGaplessPlaybackProps {
@@ -25,9 +28,7 @@ const convertFileSrc = (filePath: string) => {
   if (filePath.startsWith("http")) return filePath;
   if (filePath.startsWith("blob:")) return filePath;
 
-  // IMPORTANT: We prepend "/video/" so the Go Handler knows to pick this up.
-  // We do NOT encodeURIComponent the whole path because Windows drive colons (C:)
-  // sometimes get messy if over-encoded.
+  // IMPORTANT: Prepend "/video/" for the Go Handler
   return `http://localhost:3456/video/${filePath.replace(/\\/g, "/")}`;
 };
 
@@ -63,7 +64,7 @@ export function useGaplessPlayback({
     secondary: null,
   });
 
-  // --- NEW: VOLUME SYNC EFFECT ---
+  // --- VOLUME SYNC ---
   useEffect(() => {
     if (primaryVideoRef.current) {
       primaryVideoRef.current.volume = volume;
@@ -76,34 +77,77 @@ export function useGaplessPlayback({
   // 1. FLATTEN TRACKS TO FIND ACTIVE SHOT
   const getShotAtTime = useCallback(
     (time: number) => {
-      // Iterate tracks from TOP (highest index) to BOTTOM (0)
+      let videoData = null;
+      let audioData = null;
+
+      // 1. Find Video Source (Visuals)
       for (let t = tracks.length - 1; t >= 0; t--) {
-        // Skip disabled tracks
-        if (trackSettings[t] && !trackSettings[t].visible) continue;
+        const settings = trackSettings[t];
+        const isAudio =
+          settings?.type === "audio" ||
+          settings?.name?.trim().toUpperCase().startsWith("A");
+
+        if (isAudio) continue;
 
         const track = tracks[t];
-        if (!track) continue;
+        if (!track || track.length === 0) continue;
 
-        for (const shot of track) {
+        for (const rawShot of track) {
+          const shot = rawShot as PlaybackShot;
+          if (shot.hidden) continue;
           const duration = shot.duration || 4;
           const shotStart = shot.startTime ?? 0;
           const shotEnd = shotStart + duration;
 
           if (time >= shotStart && time < shotEnd) {
-            return {
-              shot: shot as PlaybackShot,
+            videoData = {
+              shot: shot,
               offset: time - shotStart + (shot.trimStart || 0),
               trackIndex: t,
             };
+            break;
           }
         }
+        if (videoData) break;
       }
-      return null;
+
+      // 2. Find Audio Source (Sound)
+      for (let t = tracks.length - 1; t >= 0; t--) {
+        const settings = trackSettings[t];
+        const isAudio =
+          settings?.type === "audio" ||
+          settings?.name?.trim().toUpperCase().startsWith("A");
+
+        if (!isAudio) continue;
+
+        const track = tracks[t];
+        if (!track || track.length === 0) continue;
+
+        for (const rawShot of track) {
+          const shot = rawShot as PlaybackShot;
+          if (shot.hidden) continue;
+          const duration = shot.duration || 4;
+          const shotStart = shot.startTime ?? 0;
+          const shotEnd = shotStart + duration;
+
+          if (time >= shotStart && time < shotEnd) {
+            audioData = {
+              shot: shot,
+              offset: time - shotStart + (shot.trimStart || 0),
+              trackIndex: t,
+            };
+            break;
+          }
+        }
+        if (audioData) break;
+      }
+
+      return { videoData, audioData };
     },
     [tracks, trackSettings],
   );
 
-  // 2. LOAD VIDEO (No Base64!)
+  // 2. LOAD VIDEO OR AUDIO
   const loadShot = (
     shot: PlaybackShot,
     playerType: "primary" | "secondary",
@@ -117,24 +161,29 @@ export function useGaplessPlayback({
     if (!videoEl) return;
 
     const isNewSource = loadedShotIds.current[playerType] !== shot.id;
+
     if (isNewSource) {
-      // DIRECT FILE SOURCE
-      const blobUrl = videoBlobs?.get(shot.outputVideo);
-      const src = blobUrl || convertFileSrc(shot.outputVideo);
+      // Prioritize outputVideo, fallback to audioPath
+      const filePath = shot.outputVideo || shot.audioPath;
+
+      if (!filePath) {
+        // No media to play
+        videoEl.removeAttribute("src");
+        return;
+      }
+
+      const blobUrl = videoBlobs?.get(filePath);
+      const src = blobUrl || convertFileSrc(filePath);
 
       videoEl.src = src;
       videoEl.load();
       loadedShotIds.current[playerType] = shot.id;
 
-      // Apply volume immediately on load
       videoEl.volume = volume;
 
-      // PRE-SEEK
       try {
         videoEl.currentTime = startOffset;
-      } catch (e) {
-        // Ignore if metadata not loaded yet
-      }
+      } catch (e) {}
 
       const onLoaded = () => {
         videoEl.currentTime = startOffset;
@@ -155,9 +204,9 @@ export function useGaplessPlayback({
       const ctx = canvas.getContext("2d", { alpha: false });
       if (!ctx) return;
 
-      const activeData = getShotAtTime(time);
+      const { videoData } = getShotAtTime(time);
 
-      if (!activeData) {
+      if (!videoData) {
         // GAP: Draw Black
         ctx.fillStyle = "black";
         ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -171,6 +220,7 @@ export function useGaplessPlayback({
 
       const minReady = isPlaying && !force ? 3 : 2;
 
+      // Only draw if we have a valid element and it's not a pure audio track (optional check)
       if (activeEl && activeEl.readyState >= minReady) {
         ctx.drawImage(activeEl, 0, 0, canvas.width, canvas.height);
       }
@@ -178,7 +228,7 @@ export function useGaplessPlayback({
     [getShotAtTime, isPlaying],
   );
 
-  // 3. PLAYBACK LOOP (Animation Frame)
+  // 3. PLAYBACK LOOP
   useEffect(() => {
     if (!isPlaying) return;
 
@@ -193,10 +243,9 @@ export function useGaplessPlayback({
 
       let nextTime = currentTimeRef.current + delta;
 
-      // Boundary Check: If we hit the end (Forward)
       if (nextTime >= totalDuration && totalDuration > 0) {
         setIsPlaying(false);
-        loadedShotIds.current = { primary: null, secondary: null };
+        // Do not clear loadedShotIds here to prevent black flash on replay
         return;
       }
 
@@ -214,7 +263,8 @@ export function useGaplessPlayback({
 
   // 4. SYNC PLAYERS
   useEffect(() => {
-    const activeData = getShotAtTime(currentTime);
+    const { videoData, audioData } = getShotAtTime(currentTime);
+    const activeData = videoData || audioData;
     const p = primaryVideoRef.current;
     const s = secondaryVideoRef.current;
     let currentShotEnd = currentTime;
@@ -258,7 +308,7 @@ export function useGaplessPlayback({
           activeEl.pause();
         }
 
-        activeEl.muted = false;
+        activeEl.muted = !audioData;
 
         if (!isPlaying) {
           requestAnimationFrame(() => renderFrame(currentTime));
@@ -271,17 +321,17 @@ export function useGaplessPlayback({
         otherEl.muted = true;
       }
     } else {
-      // GAP
+      // GAP - Ensure silence and pause
       if (p) {
         p.style.opacity = "0";
         p.pause();
       }
       if (s) {
-        if (!isPlaying) {
-          requestAnimationFrame(() => renderFrame(currentTime));
-        }
         s.style.opacity = "0";
         s.pause();
+      }
+      if (!isPlaying) {
+        requestAnimationFrame(() => renderFrame(currentTime));
       }
     }
 
@@ -292,14 +342,17 @@ export function useGaplessPlayback({
     for (let t = 0; t < tracks.length; t++) {
       if (trackSettings[t] && !trackSettings[t].visible) continue;
       const track = tracks[t];
-      for (const shot of track) {
+      for (const rawShot of track) {
+        const shot = rawShot as PlaybackShot;
+        if (shot.hidden) continue; // Skip hidden shots during preload check
+
         const sTime = shot.startTime ?? 0;
         if (sTime >= currentShotEnd - 0.5) {
           if (activeData && shot.id === activeData.shot.id) continue;
           const diff = sTime - currentShotEnd;
           if (diff < minDiff) {
             minDiff = diff;
-            nextShot = shot as PlaybackShot;
+            nextShot = shot;
           }
         }
       }
@@ -308,8 +361,15 @@ export function useGaplessPlayback({
     if (nextShot) {
       const preloadPlayer =
         targetPlayer === "primary" ? "secondary" : "primary";
-      if (loadedShotIds.current[preloadPlayer] !== nextShot.id) {
-        loadShot(nextShot, preloadPlayer, nextShot.trimStart || 0, true);
+      if (
+        loadedShotIds.current[preloadPlayer] !== (nextShot as PlaybackShot).id
+      ) {
+        loadShot(
+          nextShot as PlaybackShot,
+          preloadPlayer,
+          (nextShot as PlaybackShot).trimStart || 0,
+          true,
+        );
       }
     }
   }, [
@@ -321,7 +381,7 @@ export function useGaplessPlayback({
     trackSettings,
     videoBlobs,
     renderFrame,
-    volume, // Added dependency to volume to ensure updates
+    volume,
   ]);
 
   // 5. EVENT LISTENERS
