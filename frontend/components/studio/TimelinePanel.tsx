@@ -717,7 +717,15 @@ export default function TimelinePanel({
   const videoScrollRef = useRef<HTMLDivElement>(null);
   const audioScrollRef = useRef<HTMLDivElement>(null);
 
-  // KEYBOARD SHORTCUTS
+  // 1. Keep a "Ref" of the current time for keyboard listeners
+  const timeRef = useRef(currentTime);
+
+  // Sync the Ref whenever the real time updates
+  useEffect(() => {
+    timeRef.current = currentTime;
+  }, [currentTime]);
+
+  // KEYBOARD SHORTCUTS (Undo/Redo/Tools)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (!isHovering.current) return;
@@ -746,6 +754,41 @@ export default function TimelinePanel({
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [onUndo, onRedo, canUndo, canRedo]);
+
+  // KEYBOARD SCRUBBING (Left/Right Arrows)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Safety: Don't scrub if typing in a text box
+      if (
+        e.target instanceof HTMLInputElement ||
+        e.target instanceof HTMLTextAreaElement
+      ) {
+        return;
+      }
+
+      const FRAME_STEP = 1 / 30; // Approx 1 frame
+      const LARGE_STEP = 1.0; // 1 second
+
+      let delta = 0;
+
+      if (e.key === "ArrowLeft") {
+        delta = e.shiftKey ? -LARGE_STEP : -FRAME_STEP;
+      } else if (e.key === "ArrowRight") {
+        delta = e.shiftKey ? LARGE_STEP : FRAME_STEP;
+      } else {
+        return; // Ignore other keys
+      }
+
+      e.preventDefault(); // Stop window scrolling
+
+      // Calculate new time using the Ref
+      const newTime = Math.max(0, timeRef.current + delta);
+      seekTo(newTime);
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [seekTo]);
 
   // Volume Handlers
   const handleVolumeChange = (newVol: number) => {
@@ -850,8 +893,37 @@ export default function TimelinePanel({
   };
 
   const handleScrub = (e: React.PointerEvent) => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    seekTo(Math.max(0, (e.clientX - rect.left + scrollLeft) / zoom));
+    // Prevent default browser dragging of text/images
+    e.preventDefault();
+
+    // 1. Get the ruler container and its position
+    const container = e.currentTarget as HTMLDivElement;
+    const rect = container.getBoundingClientRect();
+
+    // Helper: Calculate time based on mouse X position
+    const calculateTime = (clientX: number) => {
+      // (Mouse X - Ruler Start + Scrolled Amount) / Zoom
+      const x = clientX - rect.left + scrollLeft;
+      // Prevent negative time
+      return Math.max(0, x / zoom);
+    };
+
+    // 2. Jump to position immediately on click
+    seekTo(calculateTime(e.clientX));
+
+    // 3. Setup dragging listeners
+    const onMove = (ev: PointerEvent) => {
+      seekTo(calculateTime(ev.clientX));
+    };
+
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+
+    // Attach to window so you can drag outside the ruler area comfortably
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
   };
 
   const timelineSeconds = Math.max(duration + 120, 600);
