@@ -767,13 +767,10 @@ function StudioContent() {
   const handleAddTrack = () => {
     recordHistory();
 
-    // Insert the new VIDEO track just before the first audio track
-    const firstAudioIndex = trackSettings.findIndex((s) =>
-      (s?.name || "").trim().toUpperCase().startsWith("A"),
-    );
-
-    const insertIndex =
-      firstAudioIndex === -1 ? tracks.length : firstAudioIndex;
+    // We want new video tracks to appear ABOVE V1 in the UI.
+    // Your UI currently renders earlier tracks "higher", so we insert at the top of the VIDEO stack.
+    // That means: insert at index 0 (before all existing tracks).
+    const insertIndex = 0;
 
     setTracks((prevTracks) => {
       const next = [...prevTracks];
@@ -782,10 +779,12 @@ function StudioContent() {
     });
 
     setTrackSettings((prevSettings) => {
+      // Keep settings aligned to tracks length before we add the new one
       const validSettings = prevSettings.slice(0, tracks.length);
 
-      const videoCount = validSettings.filter(
-        (t) => !(t?.name || "").trim().toUpperCase().startsWith("A"),
+      // Count existing video tracks by name (V1, V2, ...)
+      const videoCount = validSettings.filter((s) =>
+        (s?.name || "").trim().toUpperCase().startsWith("V"),
       ).length;
 
       const name = `V${videoCount + 1}`;
