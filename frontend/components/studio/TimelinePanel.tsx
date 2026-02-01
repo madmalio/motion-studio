@@ -717,6 +717,17 @@ export default function TimelinePanel({
   const videoScrollRef = useRef<HTMLDivElement>(null);
   const audioScrollRef = useRef<HTMLDivElement>(null);
 
+  useEffect(() => {
+    // We use a small timeout to ensure the DOM layout (flex-grow)
+    // has finished calculating the full height before we scroll.
+    const timer = setTimeout(() => {
+      if (videoScrollRef.current) {
+        videoScrollRef.current.scrollTop = videoScrollRef.current.scrollHeight;
+      }
+    }, 0);
+    return () => clearTimeout(timer);
+  }, []);
+
   // 1. Keep a "Ref" of the current time for keyboard listeners
   const timeRef = useRef(currentTime);
 

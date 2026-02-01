@@ -327,14 +327,15 @@ export function useGaplessPlayback({
 
       // If an A-track is active, we do NOT want video audio (prevents echo)
       // If no A-track, video audio is allowed unless the shot is muted
-      // FIX: If ANY audio track exists (even if hidden/silent), we mute the video audio
-      // to prevent confusion where hiding an audio track reveals the underlying video audio.
-      const hasAudioTrack = trackSettings.some(
+      // FIX: Only mute video audio if there is a VISIBLE audio track.
+      const hasVisibleAudioTrack = trackSettings.some(
         (t) =>
-          t.type === "audio" ||
-          (t.name || "").trim().toUpperCase().startsWith("A"),
+          (t.type === "audio" ||
+            (t.name || "").trim().toUpperCase().startsWith("A")) &&
+          t.visible,
       );
-      p.muted = Boolean(audioData) || Boolean(vShot.muted) || hasAudioTrack;
+      p.muted =
+        Boolean(audioData) || Boolean(vShot.muted) || hasVisibleAudioTrack;
 
       // When paused, force a redraw so scrubbing shows correct frame
       if (!isPlaying) requestAnimationFrame(() => renderFrame(currentTime));

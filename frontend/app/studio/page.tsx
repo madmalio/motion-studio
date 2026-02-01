@@ -504,7 +504,12 @@ function StudioContent() {
           const savedSettings = timelineData.trackSettings || [];
           const syncedSettings = hydratedTracks.map((_, i) => {
             // Use existing or create default
-            if (savedSettings[i]) return savedSettings[i];
+            if (savedSettings[i]) {
+              if (savedSettings[i].name === "V1") {
+                return { ...savedSettings[i], visible: true };
+              }
+              return savedSettings[i];
+            }
 
             // Heuristic defaults
             return {
