@@ -766,41 +766,40 @@ function StudioContent() {
 
   const handleAddTrack = () => {
     recordHistory();
+
+    // Insert the new VIDEO track just before the first audio track
+    const firstAudioIndex = trackSettings.findIndex((s) =>
+      (s?.name || "").trim().toUpperCase().startsWith("A"),
+    );
+
+    const insertIndex =
+      firstAudioIndex === -1 ? tracks.length : firstAudioIndex;
+
     setTracks((prevTracks) => {
-      const newTracks = [...prevTracks];
-      newTracks.splice(0, 0, []);
-      return newTracks;
+      const next = [...prevTracks];
+      next.splice(insertIndex, 0, []);
+      return next;
     });
 
     setTrackSettings((prevSettings) => {
-      // AUTO-HEAL
       const validSettings = prevSettings.slice(0, tracks.length);
 
-      const videoTracks = validSettings.filter(
-        (t) =>
-          t.type === "video" ||
-          !(t.name || "").trim().toUpperCase().startsWith("A"),
-      );
-      let nextNum = 1;
-      if (videoTracks.length > 0) {
-        const firstTrack = videoTracks[0];
-        const match = (firstTrack.name || "").match(/(\d+)/);
-        if (match) {
-          nextNum = parseInt(match[1], 10) + 1;
-        } else {
-          nextNum = videoTracks.length + 1;
-        }
-      }
-      const name = `V${nextNum}`;
-      const newSettings = [...validSettings];
-      newSettings.splice(0, 0, {
+      const videoCount = validSettings.filter(
+        (t) => !(t?.name || "").trim().toUpperCase().startsWith("A"),
+      ).length;
+
+      const name = `V${videoCount + 1}`;
+
+      const next = [...validSettings];
+      next.splice(insertIndex, 0, {
         locked: false,
         visible: true,
         name,
         height: 96,
         type: "video",
       });
-      return newSettings;
+
+      return next;
     });
   };
 

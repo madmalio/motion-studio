@@ -85,67 +85,96 @@ export function useGaplessPlayback({
       let videoData = null;
       let audioData = null;
 
-      // 1. Find Video Source (Visuals)
-      for (let t = tracks.length - 1; t >= 0; t--) {
+      const parseTrackNum = (name?: string, prefix?: "V" | "A") => {
+        const n = (name || "").trim().toUpperCase();
+        if (!prefix || !n.startsWith(prefix)) return -1;
+        const m = n.match(/\d+/);
+        return m ? parseInt(m[0], 10) : -1;
+      };
+
+      // 1) Find winning VIDEO by highest V-number (V3 > V2 > V1), not by array index
+      let bestVideo: any = null;
+      let bestV = -1;
+
+      for (let t = 0; t < tracks.length; t++) {
         const settings = trackSettings[t];
         const isAudio =
           settings?.type === "audio" ||
-          settings?.name?.trim().toUpperCase().startsWith("A");
-
+          (settings?.name || "").trim().toUpperCase().startsWith("A");
         if (isAudio) continue;
+        if (settings && settings.visible === false) continue;
 
+        const vNum = parseTrackNum(settings?.name, "V");
         const track = tracks[t];
         if (!track || track.length === 0) continue;
 
         for (const rawShot of track) {
           const shot = rawShot as PlaybackShot;
           if (shot.hidden) continue;
+
           const duration = shot.duration || 4;
           const shotStart = shot.startTime ?? 0;
           const shotEnd = shotStart + duration;
 
           if (time >= shotStart && time < shotEnd) {
-            videoData = {
-              shot: shot,
-              offset: time - shotStart + (shot.trimStart || 0),
-              trackIndex: t,
-            };
-            break;
+            // higher V-number wins
+            if (vNum > bestV) {
+              bestV = vNum;
+              bestVideo = {
+                shot,
+                offset: time - shotStart + (shot.trimStart || 0),
+                trackIndex: t,
+              };
+            }
+            break; // only need first hit per track
           }
         }
-        if (videoData) break;
       }
 
-      // 2. Find Audio Source (Sound)
-      for (let t = tracks.length - 1; t >= 0; t--) {
+      videoData = bestVideo;
+
+      // AUDIO RULE:
+      // - If an A-track is active at the current time, it overrides video audio.
+      // - If no A-track is active, audio follows the winning video clip.
+      // This is intentional (rough-cut editor behavior)
+      let bestAudio: any = null;
+      let bestA = -1;
+
+      for (let t = 0; t < tracks.length; t++) {
         const settings = trackSettings[t];
         const isAudio =
           settings?.type === "audio" ||
-          settings?.name?.trim().toUpperCase().startsWith("A");
-
+          (settings?.name || "").trim().toUpperCase().startsWith("A");
         if (!isAudio) continue;
+        if (settings && settings.visible === false) continue;
 
+        const aNum = parseTrackNum(settings?.name, "A");
         const track = tracks[t];
         if (!track || track.length === 0) continue;
 
         for (const rawShot of track) {
           const shot = rawShot as PlaybackShot;
           if (shot.hidden) continue;
+
           const duration = shot.duration || 4;
           const shotStart = shot.startTime ?? 0;
           const shotEnd = shotStart + duration;
 
           if (time >= shotStart && time < shotEnd) {
-            audioData = {
-              shot: shot,
-              offset: time - shotStart + (shot.trimStart || 0),
-              trackIndex: t,
-            };
+            if (aNum > bestA) {
+              bestA = aNum;
+              bestAudio = {
+                shot,
+                offset: time - shotStart + (shot.trimStart || 0),
+                trackIndex: t,
+              };
+            }
             break;
           }
         }
-        if (audioData) break;
       }
+
+      audioData = bestAudio;
 
       return { videoData, audioData };
     },
@@ -218,14 +247,9 @@ export function useGaplessPlayback({
         return;
       }
 
-      const activeEl =
-        activePlayerRef.current === "primary"
-          ? primaryVideoRef.current
-          : secondaryVideoRef.current;
-
+      const activeEl = primaryVideoRef.current;
       const minReady = isPlaying && !force ? 3 : 2;
 
-      // Only draw if we have a valid element and it's not a pure audio track (optional check)
       if (activeEl && activeEl.readyState >= minReady) {
         ctx.drawImage(activeEl, 0, 0, canvas.width, canvas.height);
       }
@@ -266,128 +290,92 @@ export function useGaplessPlayback({
     return () => cancelAnimationFrame(animationFrameId);
   }, [isPlaying, totalDuration, renderFrame]);
 
-  // 4. SYNC PLAYERS
+  // 4. SYNC PLAYERS (Overwrite model)
+  // - PRIMARY = visuals (always)
+  // - SECONDARY = audio-only when an audio track is active
   useEffect(() => {
     const { videoData, audioData } = getShotAtTime(currentTime);
-    const activeData = videoData || audioData;
+
     const p = primaryVideoRef.current;
     const s = secondaryVideoRef.current;
-    let currentShotEnd = currentTime;
 
-    let targetPlayer: "primary" | "secondary" = activePlayer;
+    // -------------------------
+    // VISUALS (PRIMARY ONLY)
+    // -------------------------
+    if (videoData?.shot && p) {
+      const vShot = videoData.shot;
+      const vOffset = videoData.offset ?? 0;
 
-    // --- 1. HANDLE ACTIVE SHOT ---
-    if (activeData) {
-      const { shot, offset } = activeData;
-      currentShotEnd = (shot.startTime || 0) + (shot.duration || 0);
-
-      if (loadedShotIds.current.primary === shot.id) {
-        targetPlayer = "primary";
-      } else if (loadedShotIds.current.secondary === shot.id) {
-        targetPlayer = "secondary";
+      // Load or seek
+      if (loadedShotIds.current.primary !== vShot.id) {
+        loadShot(vShot, "primary", vOffset, true);
       } else {
-        targetPlayer = activePlayer === "primary" ? "secondary" : "primary";
-        loadShot(shot, targetPlayer, offset, true);
-      }
-
-      if (activePlayer !== targetPlayer) {
-        updateActivePlayer(targetPlayer);
-      }
-
-      const activeEl = targetPlayer === "primary" ? p : s;
-      const otherEl = targetPlayer === "primary" ? s : p;
-
-      // Sync Active Player
-      if (activeEl) {
-        const drift = Math.abs(activeEl.currentTime - (offset || 0));
-        const tolerance = isPlaying ? 0.5 : 0.05;
-        if (drift > tolerance) {
-          if (Number.isFinite(offset) && activeEl.readyState >= 1) {
-            activeEl.currentTime = offset || 0;
-          }
-        }
-
-        if (isPlaying && activeEl.paused) {
-          activeEl.play().catch(() => {});
-        } else if (!isPlaying && !activeEl.paused) {
-          activeEl.pause();
-        }
-
-        activeEl.muted = !audioData;
-
-        if (!isPlaying) {
-          requestAnimationFrame(() => renderFrame(currentTime));
+        const drift = Math.abs(p.currentTime - vOffset);
+        const tolerance = isPlaying ? 0.25 : 0.05;
+        if (
+          drift > tolerance &&
+          p.readyState >= 1 &&
+          Number.isFinite(vOffset)
+        ) {
+          p.currentTime = vOffset;
         }
       }
 
-      // Sync Inactive Player
-      if (otherEl) {
-        otherEl.pause();
-        otherEl.muted = true;
-      }
+      // Play/pause
+      if (isPlaying && p.paused) p.play().catch(() => {});
+      if (!isPlaying && !p.paused) p.pause();
+
+      // If an A-track is active, we do NOT want video audio (prevents echo)
+      // If no A-track, video audio is allowed unless the shot is muted
+      p.muted = Boolean(audioData) || Boolean(vShot.muted);
+
+      // When paused, force a redraw so scrubbing shows correct frame
+      if (!isPlaying) requestAnimationFrame(() => renderFrame(currentTime));
     } else {
-      // GAP - Ensure silence and pause
+      // No active video: pause visuals
       if (p) {
-        p.style.opacity = "0";
         p.pause();
-      }
-      if (s) {
-        s.style.opacity = "0";
-        s.pause();
-      }
-      if (!isPlaying) {
-        requestAnimationFrame(() => renderFrame(currentTime));
+        p.muted = true;
       }
     }
 
-    // --- 2. PRELOAD NEXT SHOT ---
-    let nextShot: PlaybackShot | null = null;
-    let minDiff = Infinity;
+    // -------------------------
+    // AUDIO
+    // -------------------------
+    if (s) {
+      // If there is an audio track active at this time, play it on SECONDARY.
+      if (audioData?.shot) {
+        const aShot = audioData.shot;
+        const aOffset = audioData.offset ?? 0;
 
-    for (let t = 0; t < tracks.length; t++) {
-      if (trackSettings[t] && !trackSettings[t].visible) continue;
-      const track = tracks[t];
-      for (const rawShot of track) {
-        const shot = rawShot as PlaybackShot;
-        if (shot.hidden) continue; // Skip hidden shots during preload check
-
-        const sTime = shot.startTime ?? 0;
-        if (sTime >= currentShotEnd - 0.5) {
-          if (activeData && shot.id === activeData.shot.id) continue;
-          const diff = sTime - currentShotEnd;
-          if (diff < minDiff) {
-            minDiff = diff;
-            nextShot = shot;
+        // Load or seek
+        if (loadedShotIds.current.secondary !== aShot.id) {
+          loadShot(aShot, "secondary", aOffset, true);
+        } else {
+          const drift = Math.abs(s.currentTime - aOffset);
+          const tolerance = isPlaying ? 0.25 : 0.05;
+          if (
+            drift > tolerance &&
+            s.readyState >= 1 &&
+            Number.isFinite(aOffset)
+          ) {
+            s.currentTime = aOffset;
           }
         }
-      }
-    }
 
-    if (nextShot) {
-      const preloadPlayer =
-        targetPlayer === "primary" ? "secondary" : "primary";
-      if (
-        loadedShotIds.current[preloadPlayer] !== (nextShot as PlaybackShot).id
-      ) {
-        loadShot(
-          nextShot as PlaybackShot,
-          preloadPlayer,
-          (nextShot as PlaybackShot).trimStart || 0,
-          true,
-        );
+        // Audio should be audible unless explicitly muted
+        s.muted = Boolean(aShot.muted);
+
+        // Play/pause
+        if (isPlaying && s.paused) s.play().catch(() => {});
+        if (!isPlaying && !s.paused) s.pause();
+      } else {
+        // No active A-track: secondary must be silent
+        s.pause();
+        s.muted = true;
       }
     }
-  }, [
-    currentTime,
-    isPlaying,
-    getShotAtTime,
-    activePlayer,
-    tracks,
-    trackSettings,
-    videoBlobs,
-    renderFrame,
-    volume,
-  ]);
+  }, [currentTime, isPlaying, getShotAtTime, renderFrame]);
 
   // 5. EVENT LISTENERS
   useEffect(() => {
