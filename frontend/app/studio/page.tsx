@@ -10,7 +10,7 @@ import {
   useMemo,
 } from "react";
 import { useConfirm } from "../../components/ConfirmProvider";
-import { Loader2, PanelLeft, PanelTop } from "lucide-react";
+import { Loader2, PanelLeft, PanelTop, Download, X } from "lucide-react";
 // --- DND KIT ---
 import {
   DndContext,
@@ -166,6 +166,8 @@ function StudioContent() {
   const [activeShotId, setActiveShotId] = useState<string | null>(null);
   const [isRendering, setIsRendering] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
+  const [showExportModal, setShowExportModal] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
 
   // Timeline & Playback State
   const [tracks, setTracks] = useState<TimelineItem[][]>([[], []]);
@@ -510,10 +512,20 @@ function StudioContent() {
           const syncedSettings = hydratedTracks.map((_, i) => {
             // Use existing or create default
             if (savedSettings[i]) {
-              if (savedSettings[i].name === "V1") {
-                return { ...savedSettings[i], visible: true };
+              const setting = { ...savedSettings[i] } as any;
+              // Ensure type is set so renaming doesn't break playback/logic
+              if (!setting.type) {
+                setting.type = (setting.name || "")
+                  .trim()
+                  .toUpperCase()
+                  .startsWith("A")
+                  ? "audio"
+                  : "video";
               }
-              return savedSettings[i];
+              if (setting.name === "V1") {
+                return { ...setting, visible: true };
+              }
+              return setting;
             }
 
             // Heuristic defaults
@@ -793,9 +805,10 @@ function StudioContent() {
       const validSettings = prevSettings.slice(0, tracks.length);
 
       // Count existing video tracks by name (V1, V2, ...)
-      const videoCount = validSettings.filter((s) =>
-        (s?.name || "").trim().toUpperCase().startsWith("V"),
-      ).length;
+      const videoCount = validSettings.filter((s) => {
+        if (s.type) return s.type === "video";
+        return (s?.name || "").trim().toUpperCase().startsWith("V");
+      }).length;
 
       const name = `V${videoCount + 1}`;
 
@@ -901,8 +914,11 @@ function StudioContent() {
     const targetTrackIndex = parseInt(
       dropContainer.replace("timeline-track-", ""),
     );
-    const trackIsAudio = (idx: number) =>
-      (trackSettings?.[idx]?.name || "").trim().toUpperCase().startsWith("A");
+    const trackIsAudio = (idx: number) => {
+      const t = trackSettings?.[idx];
+      if (t?.type) return t.type === "audio";
+      return (t?.name || "").trim().toUpperCase().startsWith("A");
+    };
 
     const targetIsAudio = trackIsAudio(targetTrackIndex);
 
@@ -1198,6 +1214,24 @@ function StudioContent() {
     }
   };
 
+  const handleExport = async () => {
+    setIsExporting(true);
+    try {
+      // Call backend directly
+      const result = await (window as any).go.main.App.ExportVideo(
+        project?.id,
+        scene?.id,
+        "mp4",
+      );
+      if (result !== "Success" && result !== "Cancelled") {
+        alert("Export failed: " + result);
+      }
+    } finally {
+      setIsExporting(false);
+      setShowExportModal(false);
+    }
+  };
+
   if (isLoading || !project || !scene)
     return (
       <div className="h-full w-full flex items-center justify-center bg-[#09090b] text-[#D2FF44] gap-2">
@@ -1256,6 +1290,13 @@ function StudioContent() {
             {scene.name} <span className="text-zinc-600">/</span>{" "}
             <span className="text-zinc-500 font-normal">{project.name}</span>
           </h1>
+          <button
+            onClick={() => setShowExportModal(true)}
+            className="flex items-center gap-2 px-3 py-1.5 bg-[#D2FF44] text-black text-xs font-bold rounded hover:bg-[#b8e635] transition-colors"
+          >
+            <Download size={14} />
+            Export
+          </button>
         </header>
 
         <div className="flex-1 flex overflow-hidden">
@@ -1462,6 +1503,45 @@ function StudioContent() {
           )
         ) : null}
       </DragOverlay>
+
+      {/* EXPORT MODAL */}
+      {showExportModal && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm">
+          <div className="bg-[#18181b] border border-zinc-800 rounded-lg shadow-2xl w-[400px] p-6 flex flex-col gap-4">
+            <div className="flex items-center justify-between">
+              <h2 className="text-lg font-bold text-white">Export Timeline</h2>
+              <button
+                onClick={() => setShowExportModal(false)}
+                className="text-zinc-500 hover:text-white"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            <div className="text-sm text-zinc-400">
+              Render the current timeline to a video file. This will flatten all
+              visible video tracks.
+            </div>
+
+            <div className="flex justify-end gap-2 mt-4">
+              <button
+                onClick={() => setShowExportModal(false)}
+                className="px-4 py-2 rounded bg-zinc-800 text-zinc-300 hover:bg-zinc-700 text-sm"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleExport}
+                disabled={isExporting}
+                className="px-4 py-2 rounded bg-[#D2FF44] text-black font-bold hover:bg-[#b8e635] text-sm flex items-center gap-2"
+              >
+                {isExporting && <Loader2 size={14} className="animate-spin" />}
+                {isExporting ? "Rendering..." : "Export Video"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </DndContext>
   );
 }

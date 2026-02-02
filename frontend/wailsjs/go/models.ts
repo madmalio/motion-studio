@@ -86,6 +86,7 @@ export namespace main {
 	    locked: boolean;
 	    visible: boolean;
 	    name: string;
+	    type: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new TrackSetting(source);
@@ -96,6 +97,7 @@ export namespace main {
 	        this.locked = source["locked"];
 	        this.visible = source["visible"];
 	        this.name = source["name"];
+	        this.type = source["type"];
 	    }
 	}
 	export class TimelineData {

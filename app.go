@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sort"
 	"sync"
 	"time"
 
@@ -140,6 +141,7 @@ type TrackSetting struct {
 	Locked  bool   `json:"locked"`
 	Visible bool   `json:"visible"`
 	Name    string `json:"name"`
+	Type    string `json:"type"`
 }
 
 type TimelineData struct {
@@ -1324,6 +1326,167 @@ func (a *App) ExtractLastFrame(inputPath string) string {
 	}
 
 	return outputPath
+}
+
+// --- EXPORT ENGINE ---
+
+type RenderSegment struct {
+	SourcePath string
+	InPoint    float64
+	OutPoint   float64
+	Duration   float64
+}
+
+func (a *App) ExportVideo(projectId string, sceneId string, format string) string {
+	// 1. Select Output File
+	outPath, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
+		Title:           "Export Video",
+		DefaultFilename: "timeline_export.mp4",
+		Filters: []runtime.FileFilter{
+			{DisplayName: "MP4 Video", Pattern: "*.mp4"},
+		},
+	})
+	if err != nil || outPath == "" {
+		return "Cancelled"
+	}
+
+	// 2. Load Timeline
+	timeline := a.GetTimeline(projectId, sceneId)
+	if len(timeline.Tracks) == 0 {
+		return "Empty timeline"
+	}
+
+	// 3. Flatten Timeline (Visuals)
+	// We need to determine which clip is visible at every point in time.
+	// Strategy: Collect all start/end points to create intervals, then sample center of interval.
+	
+	// Collect all time points
+	timePoints := []float64{0.0}
+	
+	// Helper to parse map to struct-like
+	type Item struct {
+		ID          string
+		StartTime   float64
+		Duration    float64
+		TrimStart   float64
+		OutputVideo string
+		AudioPath   string
+		SourceImage string
+	}
+
+	var tracks [][]Item
+	for _, rawTrack := range timeline.Tracks {
+		var track []Item
+		for _, rawItem := range rawTrack {
+			item := Item{}
+			if v, ok := rawItem["startTime"].(float64); ok { item.StartTime = v }
+			if v, ok := rawItem["duration"].(float64); ok { item.Duration = v }
+			if v, ok := rawItem["trimStart"].(float64); ok { item.TrimStart = v }
+			if v, ok := rawItem["outputVideo"].(string); ok { item.OutputVideo = v }
+			if v, ok := rawItem["audioPath"].(string); ok { item.AudioPath = v }
+			if v, ok := rawItem["sourceImage"].(string); ok { item.SourceImage = v }
+			
+			track = append(track, item)
+			timePoints = append(timePoints, item.StartTime)
+			timePoints = append(timePoints, item.StartTime+item.Duration)
+		}
+		tracks = append(tracks, track)
+	}
+
+	// Sort and Unique
+	sort.Float64s(timePoints)
+	uniquePoints := []float64{}
+	if len(timePoints) > 0 {
+		uniquePoints = append(uniquePoints, timePoints[0])
+		for i := 1; i < len(timePoints); i++ {
+			if timePoints[i] > timePoints[i-1] + 0.001 { // Epsilon
+				uniquePoints = append(uniquePoints, timePoints[i])
+			}
+		}
+	}
+
+	var segments []RenderSegment
+
+	// Iterate intervals
+	for i := 0; i < len(uniquePoints)-1; i++ {
+		start := uniquePoints[i]
+		end := uniquePoints[i+1]
+		mid := (start + end) / 2
+		dur := end - start
+
+		// Find top-most visible video track
+		var activeItem *Item
+
+		// Iterate tracks (assuming standard order: V1, V2... we want highest V-index to win?)
+		// The frontend logic: "higher V-number wins". 
+		// Usually V1 is index 0. If V2 is index 1, V2 covers V1.
+		// We need to check trackSettings to know if it's a video track.
+		
+		for tIdx, track := range tracks {
+			// Check visibility
+			if tIdx < len(timeline.TrackSettings) {
+				ts := timeline.TrackSettings[tIdx]
+				if !ts.Visible { continue }
+				// Skip Audio tracks for visual render
+				isAudio := ts.Type == "audio" || strings.HasPrefix(ts.Name, "A")
+				if isAudio { continue }
+			}
+
+			for _, item := range track {
+				if mid >= item.StartTime && mid < item.StartTime+item.Duration {
+					// Found a clip on this track
+					// Since we iterate 0..N, and usually higher index = layer on top,
+					// we just overwrite activeItem.
+					// NOTE: Ensure your frontend logic matches this (V2 > V1).
+					itemCopy := item // Copy loop var
+					activeItem = &itemCopy
+				}
+			}
+		}
+
+		if activeItem != nil {
+			// Calculate offset in source file
+			offset := start - activeItem.StartTime + activeItem.TrimStart
+			source := activeItem.OutputVideo
+			if source == "" { source = activeItem.SourceImage } // Fallback for static images (needs loop in ffmpeg, tricky)
+			
+			// For now, only support video files
+			if source != "" && strings.HasSuffix(strings.ToLower(source), ".mp4") {
+				segments = append(segments, RenderSegment{
+					SourcePath: source,
+					InPoint:    offset,
+					OutPoint:   offset + dur,
+					Duration:   dur,
+				})
+			} else {
+				// Gap or Image: We might need a black spacer or image loop.
+				// For simplicity in V1, we skip gaps (ffmpeg concat handles gaps by just playing next, but timing might shift).
+				// To keep timing, we'd need a "black.mp4" filler.
+			}
+		}
+	}
+
+	// 4. Generate Concat File
+	var concat strings.Builder
+	for _, seg := range segments {
+		safePath := strings.ReplaceAll(filepath.ToSlash(seg.SourcePath), "'", "'\\''")
+		concat.WriteString(fmt.Sprintf("file '%s'\n", safePath))
+		concat.WriteString(fmt.Sprintf("inpoint %f\n", seg.InPoint))
+		concat.WriteString(fmt.Sprintf("outpoint %f\n", seg.OutPoint))
+	}
+
+	listPath := filepath.Join(os.TempDir(), fmt.Sprintf("export_list_%d.txt", time.Now().Unix()))
+	os.WriteFile(listPath, []byte(concat.String()), 0644)
+
+	// 5. Run FFmpeg
+	// -c:v libx264 -preset fast -crf 23 (Standard good quality)
+	cmd := exec.Command("ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c:v", "libx264", "-preset", "fast", "-crf", "23", "-c:a", "aac", outPath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Sprintf("FFmpeg Error: %v\nLog: %s", err, string(output))
+	}
+
+	return "Success"
 }
 
 // =========================================================================

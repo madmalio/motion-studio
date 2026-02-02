@@ -85,26 +85,19 @@ export function useGaplessPlayback({
       let videoData = null;
       let audioData = null;
 
-      const parseTrackNum = (name?: string, prefix?: "V" | "A") => {
-        const n = (name || "").trim().toUpperCase();
-        if (!prefix || !n.startsWith(prefix)) return -1;
-        const m = n.match(/\d+/);
-        return m ? parseInt(m[0], 10) : -1;
-      };
-
-      // 1) Find winning VIDEO by highest V-number (V3 > V2 > V1), not by array index
-      let bestVideo: any = null;
-      let bestV = -1;
-
+      // 1) Find winning VIDEO.
+      // Tracks are ordered by precedence (e.g. V2 is at a lower index than V1).
+      // The first visible video track with a clip at the current time wins.
       for (let t = 0; t < tracks.length; t++) {
         const settings = trackSettings[t];
         const isAudio =
           settings?.type === "audio" ||
-          (settings?.name || "").trim().toUpperCase().startsWith("A");
+          (!settings?.type &&
+            (settings?.name || "").trim().toUpperCase().startsWith("A"));
+
         if (isAudio) continue;
         if (settings && settings.visible === false) continue;
 
-        const vNum = parseTrackNum(settings?.name, "V");
         const track = tracks[t];
         if (!track || track.length === 0) continue;
 
@@ -117,38 +110,32 @@ export function useGaplessPlayback({
           const shotEnd = shotStart + duration;
 
           if (time >= shotStart && time < shotEnd) {
-            // higher V-number wins
-            if (vNum > bestV) {
-              bestV = vNum;
-              bestVideo = {
-                shot,
-                offset: time - shotStart + (shot.trimStart || 0),
-                trackIndex: t,
-              };
-            }
-            break; // only need first hit per track
+            videoData = {
+              shot,
+              offset: time - shotStart + (shot.trimStart || 0),
+              trackIndex: t,
+            };
+            break; // Found clip on this track
           }
+        }
+        if (videoData) {
+          break; // Found winning video, no need to check lower tracks
         }
       }
 
-      videoData = bestVideo;
-
-      // AUDIO RULE:
-      // - If an A-track is active at the current time, it overrides video audio.
-      // - If no A-track is active, audio follows the winning video clip.
-      // This is intentional (rough-cut editor behavior)
-      let bestAudio: any = null;
-      let bestA = -1;
-
-      for (let t = 0; t < tracks.length; t++) {
+      // 2) Find winning AUDIO.
+      // Audio tracks are added after video tracks. Higher index = higher precedence.
+      // We iterate backwards to find the topmost audio track.
+      for (let t = tracks.length - 1; t >= 0; t--) {
         const settings = trackSettings[t];
         const isAudio =
           settings?.type === "audio" ||
-          (settings?.name || "").trim().toUpperCase().startsWith("A");
+          (!settings?.type &&
+            (settings?.name || "").trim().toUpperCase().startsWith("A"));
+
         if (!isAudio) continue;
         if (settings && settings.visible === false) continue;
 
-        const aNum = parseTrackNum(settings?.name, "A");
         const track = tracks[t];
         if (!track || track.length === 0) continue;
 
@@ -161,20 +148,18 @@ export function useGaplessPlayback({
           const shotEnd = shotStart + duration;
 
           if (time >= shotStart && time < shotEnd) {
-            if (aNum > bestA) {
-              bestA = aNum;
-              bestAudio = {
-                shot,
-                offset: time - shotStart + (shot.trimStart || 0),
-                trackIndex: t,
-              };
-            }
-            break;
+            audioData = {
+              shot,
+              offset: time - shotStart + (shot.trimStart || 0),
+              trackIndex: t,
+            };
+            break; // Found clip on this track
           }
         }
+        if (audioData) {
+          break; // Found winning audio, no need to check lower tracks
+        }
       }
-
-      audioData = bestAudio;
 
       return { videoData, audioData };
     },
@@ -328,12 +313,12 @@ export function useGaplessPlayback({
       // If an A-track is active, we do NOT want video audio (prevents echo)
       // If no A-track, video audio is allowed unless the shot is muted
       // FIX: Only mute video audio if there is a VISIBLE audio track.
-      const hasVisibleAudioTrack = trackSettings.some(
-        (t) =>
-          (t.type === "audio" ||
-            (t.name || "").trim().toUpperCase().startsWith("A")) &&
-          t.visible,
-      );
+      const hasVisibleAudioTrack = trackSettings.some((t) => {
+        const isAudio =
+          t.type === "audio" ||
+          (!t.type && (t.name || "").trim().toUpperCase().startsWith("A"));
+        return isAudio && t.visible;
+      });
       p.muted =
         Boolean(audioData) || Boolean(vShot.muted) || hasVisibleAudioTrack;
 

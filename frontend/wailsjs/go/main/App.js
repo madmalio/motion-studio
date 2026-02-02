@@ -34,6 +34,10 @@ export function DeleteWorkflow(arg1) {
   return window['go']['main']['App']['DeleteWorkflow'](arg1);
 }
 
+export function ExportVideo(arg1, arg2, arg3) {
+  return window['go']['main']['App']['ExportVideo'](arg1, arg2, arg3);
+}
+
 export function ExtractAudioPeaks(arg1, arg2) {
   return window['go']['main']['App']['ExtractAudioPeaks'](arg1, arg2);
 }
