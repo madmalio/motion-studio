@@ -4,6 +4,7 @@ export namespace main {
 	    format: string;
 	    includeVideo: boolean;
 	    includeAudio: boolean;
+	    quality: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new ExportOptions(source);
@@ -14,6 +15,7 @@ export namespace main {
 	        this.format = source["format"];
 	        this.includeVideo = source["includeVideo"];
 	        this.includeAudio = source["includeAudio"];
+	        this.quality = source["quality"];
 	    }
 	}
 	export class Project {

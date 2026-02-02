@@ -149,6 +149,7 @@ type ExportOptions struct {
 	Format       string `json:"format"`       // mp4, mov, mkv, mp3, wav
 	IncludeVideo bool   `json:"includeVideo"`
 	IncludeAudio bool   `json:"includeAudio"`
+	Quality      string `json:"quality"`
 }
 
 type TimelineData struct {
@@ -1526,30 +1527,41 @@ func (a *App) ExportVideo(projectId string, sceneId string, options ExportOption
 		listPath := filepath.Join(tempDir, fmt.Sprintf("export_list_%d.txt", time.Now().Unix()))
 		os.WriteFile(listPath, []byte(concat.String()), 0644)
 
-		// Dynamic extension for temp file (helps debugging)
 		videoOutput = filepath.Join(tempDir, fmt.Sprintf("temp_video_%d.%s", time.Now().Unix(), options.Format))
-
-		// Build FFmpeg Command
 		args := []string{"-y", "-f", "concat", "-safe", "0", "-i", listPath}
+
+		// --- QUALITY LOGIC ---
+		// H.264 (MP4/MKV): Lower CRF = Higher Quality.
+		// ProRes (MOV): Higher Profile = Higher Quality.
+		crf := "23"         // Default Medium
+		proresProfile := "2" // Default Standard (422)
+
+		switch options.Quality {
+		case "high":
+			crf = "18"          // Visually Lossless
+			proresProfile = "3" // HQ (High Quality)
+		case "low":
+			crf = "28"          // Compressed / Small
+			proresProfile = "0" // Proxy (Low Res/High Speed)
+		default: // medium
+			crf = "23"
+			proresProfile = "2"
+		}
 
 		if options.Format == "mov" {
 			// --- PRORES LOGIC ---
-			// -c:v prores_ks   : Use the best software ProRes encoder
-			// -profile:v 3     : ProRes 422 HQ (High Quality)
-			// -vendor apl0     : Tag as Apple-compatible
-			// -pix_fmt yuv422p10le : 10-bit color (required for ProRes)
 			args = append(args,
 				"-c:v", "prores_ks",
-				"-profile:v", "3",
+				"-profile:v", proresProfile,
 				"-vendor", "apl0",
 				"-pix_fmt", "yuv422p10le",
 				"-an", videoOutput)
 		} else {
-			// --- H.264 LOGIC (Standard MP4) ---
+			// --- H.264 LOGIC (MP4 / MKV) ---
 			args = append(args,
 				"-c:v", "libx264",
 				"-preset", "fast",
-				"-crf", "23",
+				"-crf", crf, // Uses the dynamic CRF calculated above
 				"-an", videoOutput)
 		}
 

@@ -152,6 +152,25 @@ function WailsGuard({ children }: { children: React.ReactNode }) {
   );
 }
 
+// --- HELPERS FOR MODAL ---
+const formatTime = (seconds: number) => {
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${s.toString().padStart(2, "0")}`;
+};
+
+const estimateFileSize = (duration: number, format: string) => {
+  // Rough estimates: MP4 (15MB/min), ProRes (200MB/min), Audio (2MB/min)
+  let mbPerMin = 15;
+  if (format === "mov") mbPerMin = 200;
+  if (format === "mp3" || format === "wav") mbPerMin = 2;
+
+  const estimatedMB = (duration / 60) * mbPerMin;
+  return estimatedMB < 1000
+    ? `${estimatedMB.toFixed(1)} MB`
+    : `${(estimatedMB / 1024).toFixed(2)} GB`;
+};
+
 function StudioContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -174,6 +193,7 @@ function StudioContent() {
     format: "mp4",
     includeVideo: true,
     includeAudio: true,
+    quality: "medium",
   });
 
   // Timeline & Playback State
@@ -1530,84 +1550,178 @@ function StudioContent() {
         ) : null}
       </DragOverlay>
 
-      {/* EXPORT MODAL */}
+      {/* PROFESSIONAL EXPORT MODAL */}
       {showExportModal && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm">
-          <div className="bg-[#18181b] border border-zinc-800 rounded-lg shadow-2xl w-[450px] p-6 flex flex-col gap-4">
-            <div className="flex items-center justify-between">
-              <h2 className="text-lg font-bold text-white">Export Timeline</h2>
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-md">
+          <div className="bg-[#121214] border border-zinc-800 rounded-xl shadow-2xl w-[800px] overflow-hidden flex flex-col">
+            {/* HEADER */}
+            <div className="h-14 border-b border-zinc-800 flex items-center justify-between px-6 bg-[#18181b]">
+              <div className="flex items-center gap-2">
+                <Download size={18} className="text-[#D2FF44]" />
+                <h2 className="font-bold text-zinc-100 tracking-wide">
+                  Export Project
+                </h2>
+              </div>
               <button
-                onClick={() => setShowExportModal(false)}
+                onClick={() => !isExporting && setShowExportModal(false)}
+                className="text-zinc-500 hover:text-white transition-colors"
                 disabled={isExporting}
-                className="text-zinc-500 hover:text-white"
               >
                 <X size={20} />
               </button>
             </div>
 
             {isExporting ? (
-              <div className="flex flex-col gap-4 py-4">
-                <div className="flex items-center gap-3 text-[#D2FF44]">
-                  <Loader2 className="animate-spin" size={24} />
-                  <span className="font-bold text-lg">Rendering...</span>
-                </div>
-                <div className="h-2 w-full bg-zinc-800 rounded-full overflow-hidden">
-                  <div
-                    className="h-full bg-[#D2FF44] transition-all duration-300"
-                    style={{ width: `${exportProgress}%` }}
+              /* RENDERING STATE */
+              <div className="p-12 flex flex-col items-center justify-center gap-8 min-h-[400px]">
+                <div className="relative">
+                  <div className="absolute inset-0 bg-[#D2FF44] blur-xl opacity-20 rounded-full animate-pulse" />
+                  <Loader2
+                    className="animate-spin text-[#D2FF44] relative z-10"
+                    size={64}
                   />
                 </div>
-                <div className="text-xs font-mono text-zinc-400 truncate">
-                  {exportStatus}
+
+                <div className="text-center space-y-2 w-full max-w-md">
+                  <h3 className="text-2xl font-bold text-white">
+                    Rendering Video...
+                  </h3>
+                  <div className="flex justify-between text-xs font-mono text-zinc-400 uppercase tracking-widest">
+                    <span>Processing</span>
+                    <span>{exportProgress}%</span>
+                  </div>
+
+                  {/* Custom Progress Bar */}
+                  <div className="h-2 w-full bg-zinc-800 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-gradient-to-r from-[#D2FF44] to-[#a3d616] transition-all duration-300 ease-out shadow-[0_0_10px_#D2FF44]"
+                      style={{ width: `${exportProgress}%` }}
+                    />
+                  </div>
+
+                  <p className="text-xs text-zinc-500 font-mono mt-4 border border-zinc-800/50 bg-black/20 p-2 rounded text-center">
+                    {exportStatus || "Initializing engine..."}
+                  </p>
                 </div>
               </div>
             ) : (
-              <div className="flex flex-col gap-4">
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="flex flex-col gap-2">
-                    <label className="text-xs font-bold text-zinc-500">
-                      Format
+              /* SETTINGS STATE */
+              <div className="flex h-[450px]">
+                {/* LEFT COLUMN: CONTROLS */}
+                <div className="w-[60%] p-8 flex flex-col gap-8">
+                  {/* Preset Buttons */}
+                  <div className="space-y-3">
+                    <label className="text-xs font-bold text-zinc-500 uppercase tracking-wider">
+                      Quick Presets
                     </label>
-                    <select
-                      value={exportOptions.format}
-                      onChange={(e) =>
-                        setExportOptions({
-                          ...exportOptions,
-                          format: e.target.value,
-                        })
-                      }
-                      className="bg-zinc-900 border border-zinc-700 rounded p-2 text-sm text-white focus:border-[#D2FF44] outline-none"
-                    >
-                      <option value="mp4">MP4 (H.264)</option>
-                      <option value="mov">MOV (ProRes-ish)</option>
-                      <option value="mkv">MKV</option>
-                      <option value="mp3">MP3 (Audio Only)</option>
-                      <option value="wav">WAV (Audio Only)</option>
-                    </select>
+                    <div className="grid grid-cols-3 gap-2">
+                      {[
+                        { id: "web", label: "Web (MP4)", fmt: "mp4" },
+                        { id: "master", label: "Master (MOV)", fmt: "mov" },
+                        { id: "audio", label: "Audio Only", fmt: "mp3" },
+                      ].map((preset) => (
+                        <button
+                          key={preset.id}
+                          onClick={() =>
+                            setExportOptions((prev) => ({
+                              ...prev,
+                              format: preset.fmt,
+                              includeVideo: preset.fmt !== "mp3",
+                              includeAudio: true,
+                            }))
+                          }
+                          className={`py-2 px-3 rounded border text-xs font-bold transition-all ${
+                            exportOptions.format === preset.fmt
+                              ? "bg-[#D2FF44]/10 border-[#D2FF44] text-[#D2FF44]"
+                              : "bg-zinc-900 border-zinc-800 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
+                          }`}
+                        >
+                          {preset.label}
+                        </button>
+                      ))}
+                    </div>
                   </div>
-                  <div className="flex flex-col gap-2">
-                    <label className="text-xs font-bold text-zinc-500">
+
+                  {/* Manual Controls */}
+                  <div className="grid grid-cols-2 gap-6">
+                    <div className="space-y-2">
+                      <label className="text-xs font-bold text-zinc-500 uppercase tracking-wider">
+                        Format
+                      </label>
+                      <select
+                        value={exportOptions.format}
+                        onChange={(e) =>
+                          setExportOptions({
+                            ...exportOptions,
+                            format: e.target.value,
+                          })
+                        }
+                        className="w-full bg-zinc-900 border border-zinc-700 rounded-md p-2.5 text-sm text-white focus:border-[#D2FF44] focus:ring-1 focus:ring-[#D2FF44] outline-none"
+                      >
+                        <option value="mp4">MP4 (H.264)</option>
+                        <option value="mov">MOV (ProRes 422)</option>
+                        <option value="mkv">MKV (Matroska)</option>
+                        <option value="mp3">MP3 (Audio)</option>
+                        <option value="wav">WAV (Lossless)</option>
+                      </select>
+                    </div>
+
+                    <div className="space-y-2">
+                      <label className="text-xs font-bold text-zinc-500 uppercase tracking-wider">
+                        Quality
+                      </label>
+                      <select
+                        value={exportOptions.quality}
+                        onChange={(e) =>
+                          setExportOptions({
+                            ...exportOptions,
+                            quality: e.target.value,
+                          })
+                        }
+                        disabled={
+                          exportOptions.format === "mp3" ||
+                          exportOptions.format === "wav"
+                        }
+                        className="w-full bg-zinc-900 border border-zinc-700 rounded-md p-2.5 text-sm text-white focus:border-[#D2FF44] focus:ring-1 focus:ring-[#D2FF44] outline-none disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        <option value="high">High (Best Quality)</option>
+                        <option value="medium">Medium (Balanced)</option>
+                        <option value="low">Low (Draft / Small)</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  {/* Toggles */}
+                  <div className="space-y-3">
+                    <label className="text-xs font-bold text-zinc-500 uppercase tracking-wider">
                       Streams
                     </label>
-                    <div className="flex flex-col gap-2">
-                      <label className="flex items-center gap-2 text-sm text-zinc-300 cursor-pointer">
+                    <div className="flex flex-col gap-3 bg-zinc-900/50 p-4 rounded-lg border border-zinc-800">
+                      <label className="flex items-center justify-between cursor-pointer group">
+                        <span className="text-sm text-zinc-300 font-medium group-hover:text-white transition-colors">
+                          Export Video
+                        </span>
                         <input
                           type="checkbox"
                           checked={exportOptions.includeVideo}
+                          disabled={
+                            exportOptions.format === "mp3" ||
+                            exportOptions.format === "wav"
+                          }
                           onChange={(e) =>
                             setExportOptions({
                               ...exportOptions,
                               includeVideo: e.target.checked,
                             })
                           }
-                          disabled={
-                            exportOptions.format === "mp3" ||
-                            exportOptions.format === "wav"
-                          }
+                          className="accent-[#D2FF44] h-4 w-4"
                         />
-                        Video
                       </label>
-                      <label className="flex items-center gap-2 text-sm text-zinc-300 cursor-pointer">
+                      <div className="h-px bg-zinc-800" />
+                      <label className="flex items-center justify-between cursor-pointer group">
+                        <span className="text-sm text-zinc-300 font-medium group-hover:text-white transition-colors">
+                          Export Audio
+                        </span>
                         <input
                           type="checkbox"
                           checked={exportOptions.includeAudio}
@@ -1617,31 +1731,90 @@ function StudioContent() {
                               includeAudio: e.target.checked,
                             })
                           }
+                          className="accent-[#D2FF44] h-4 w-4"
                         />
-                        Audio
                       </label>
                     </div>
                   </div>
                 </div>
+
+                {/* RIGHT COLUMN: SUMMARY */}
+                <div className="w-[40%] bg-[#0d0d10] border-l border-zinc-800 p-8 flex flex-col justify-between">
+                  <div className="space-y-6">
+                    <h3 className="text-sm font-bold text-white uppercase tracking-widest border-b border-zinc-800 pb-2">
+                      Summary
+                    </h3>
+
+                    {/* Stat Grid */}
+                    <div className="grid grid-cols-1 gap-4">
+                      <div className="flex justify-between items-center">
+                        <span className="text-xs text-zinc-500">Duration</span>
+                        <span className="text-sm font-mono text-zinc-200">
+                          {formatTime(totalDuration)}
+                        </span>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="text-xs text-zinc-500">
+                          Resolution
+                        </span>
+                        <span className="text-sm font-mono text-zinc-200">
+                          1920 x 1080
+                        </span>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="text-xs text-zinc-500">
+                          Frame Rate
+                        </span>
+                        <span className="text-sm font-mono text-zinc-200">
+                          24 FPS
+                        </span>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="text-xs text-zinc-500">Codec</span>
+                        <span className="text-sm font-mono text-zinc-200 uppercase">
+                          {exportOptions.format === "mov"
+                            ? "ProRes 422"
+                            : "H.264 / AAC"}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="bg-zinc-900/50 p-4 rounded border border-dashed border-zinc-800">
+                      <div className="flex justify-between items-end">
+                        <span className="text-xs text-zinc-500">
+                          Est. File Size
+                        </span>
+                        <span className="text-lg font-bold text-[#D2FF44]">
+                          ~
+                          {estimateFileSize(
+                            totalDuration,
+                            exportOptions.format,
+                          )}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* ACTION BUTTONS */}
+                  <div className="flex flex-col gap-3">
+                    <button
+                      onClick={handleExport}
+                      disabled={isExporting}
+                      className="w-full py-3 bg-[#D2FF44] hover:bg-[#b8e635] text-black font-bold rounded-lg transition-all hover:scale-[1.02] active:scale-[0.98] flex items-center justify-center gap-2"
+                    >
+                      <Download size={18} />
+                      Render Video
+                    </button>
+                    <button
+                      onClick={() => setShowExportModal(false)}
+                      className="w-full py-2 text-xs font-bold text-zinc-500 hover:text-white transition-colors"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
               </div>
             )}
-
-            <div className="flex justify-end gap-2 mt-4">
-              <button
-                onClick={() => setShowExportModal(false)}
-                disabled={isExporting}
-                className="px-4 py-2 rounded bg-zinc-800 text-zinc-300 hover:bg-zinc-700 text-sm"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleExport}
-                disabled={isExporting}
-                className="px-4 py-2 rounded bg-[#D2FF44] text-black font-bold hover:bg-[#b8e635] text-sm flex items-center gap-2"
-              >
-                Export
-              </button>
-            </div>
           </div>
         </div>
       )}
