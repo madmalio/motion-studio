@@ -46,31 +46,51 @@ const TimelineWaveform = memo(function TimelineWaveform({
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    const SAMPLES_PER_SEC = 20;
-    const totalDuration = data.length / SAMPLES_PER_SEC;
-    const width = Math.max(1, totalDuration * zoom);
-    const height = canvas.clientHeight || 64;
+    // Define the drawing logic
+    const draw = () => {
+      const SAMPLES_PER_SEC = 20;
+      const totalDuration = data.length / SAMPLES_PER_SEC;
 
-    const dpr = window.devicePixelRatio || 1;
-    canvas.width = width * dpr;
-    canvas.height = height * dpr;
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      // Calculate dimensions based on current DOM state
+      const width = Math.max(1, totalDuration * zoom);
+      const height = canvas.clientHeight || 64; // <--- Gets new height on resize
 
-    ctx.clearRect(0, 0, width, height);
-    ctx.fillStyle = color;
+      const dpr = window.devicePixelRatio || 1;
 
-    const pixelsPerSample = zoom / SAMPLES_PER_SEC;
-    const barWidth = Math.max(0.5, pixelsPerSample);
+      // Update canvas resolution to match display size
+      canvas.width = width * dpr;
+      canvas.height = height * dpr;
 
-    for (let i = 0; i < data.length; i++) {
-      const x = i * pixelsPerSample;
-      const barHeight = Math.max(2, data[i] * height * 0.8);
-      const y = (height - barHeight) / 2;
-      ctx.fillRect(x, y, barWidth, barHeight);
-    }
+      // Normalize coordinate system
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, width, height);
+      ctx.fillStyle = color;
+
+      const pixelsPerSample = zoom / SAMPLES_PER_SEC;
+      const barWidth = Math.max(0.5, pixelsPerSample);
+
+      for (let i = 0; i < data.length; i++) {
+        const x = i * pixelsPerSample;
+        // Dynamically scale bar height to 80% of container height
+        const barHeight = Math.max(2, data[i] * height * 0.8);
+        const y = (height - barHeight) / 2;
+        ctx.fillRect(x, y, barWidth, barHeight);
+      }
+    };
+
+    // 1. Initial Draw
+    draw();
+
+    // 2. Add Observer to handle resizing events
+    const observer = new ResizeObserver(() => {
+      window.requestAnimationFrame(draw);
+    });
+    observer.observe(canvas);
+
+    return () => observer.disconnect();
   }, [data, zoom, color]);
 
-  return <canvas ref={canvasRef} className="w-full h-full" />;
+  return <canvas ref={canvasRef} className="w-full h-full block" />;
 });
 
 // --- TIMELINE ITEM ---
@@ -535,6 +555,7 @@ const TrackRow = memo(function TrackRow({
   onDeleteTrack,
   onToggleTrackLock,
   onToggleTrackVisibility,
+  onResizeTrack,
   isAudio,
   currentTime,
   setGlobalSplitHover,
@@ -547,19 +568,95 @@ const TrackRow = memo(function TrackRow({
     name: `Track ${trackIndex + 1}`,
     height: defaultHeight,
   };
-  const height = settings.height || defaultHeight;
+
+  const [localHeight, setLocalHeight] = useState(
+    settings.height || defaultHeight,
+  );
+  const [isResizing, setIsResizing] = useState(false);
+
+  // Sync state when props change (and not dragging)
+  useEffect(() => {
+    if (!isResizing) {
+      setLocalHeight(settings.height || defaultHeight);
+    }
+    // FIX: Only re-run if the PARENT settings actually change.
+    // We removed 'isResizing' from the list below so it doesn't snap back
+    // immediately when you stop dragging.
+  }, [settings.height]);
+
+  // --- RESIZE LOGIC ---
+  const handleResizeStart = (e: React.PointerEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsResizing(true);
+
+    const startY = e.clientY;
+    const startHeight = localHeight;
+
+    const onPointerMove = (moveEvent: PointerEvent) => {
+      const deltaY = moveEvent.clientY - startY;
+
+      let newHeight;
+      if (isAudio) {
+        // AUDIO: Dragging DOWN (positive delta) INCREASES height
+        newHeight = startHeight + deltaY;
+      } else {
+        // VIDEO: Dragging UP (negative delta) INCREASES height
+        newHeight = startHeight - deltaY;
+      }
+
+      // Constrain height
+      const clamped = Math.max(32, Math.min(400, newHeight));
+      setLocalHeight(clamped);
+    };
+
+    const onPointerUp = (upEvent: PointerEvent) => {
+      const deltaY = upEvent.clientY - startY;
+
+      let finalHeight;
+      if (isAudio) {
+        finalHeight = startHeight + deltaY;
+      } else {
+        finalHeight = startHeight - deltaY;
+      }
+
+      const clamped = Math.max(32, Math.min(400, finalHeight));
+
+      setIsResizing(false);
+      if (onResizeTrack) {
+        onResizeTrack(trackIndex, clamped);
+      }
+
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+      document.body.style.cursor = "";
+    };
+
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+    document.body.style.cursor = "row-resize";
+  };
 
   return (
     <div
       className="flex border-b border-zinc-800 bg-[#151517] relative shrink-0"
-      style={{ height }}
+      style={{ height: localHeight }}
     >
       {/* LEFT HEADER */}
       <div
         className={`shrink-0 flex flex-col p-2 gap-1 justify-between relative group ${LEFT_PANEL_BG} ${LEFT_PANEL_BORDER}`}
         style={{ width: LEFT_PANEL_W }}
       >
-        <div className="flex justify-between items-center text-zinc-400">
+        {/* --- VIDEO RESIZE HANDLE (TOP) --- */}
+        {!isAudio && (
+          <div
+            onPointerDown={handleResizeStart}
+            className="absolute -top-1 left-0 right-0 h-2 cursor-row-resize hover:bg-[#D2FF44] transition-colors z-50 opacity-0 group-hover:opacity-100"
+            title="Drag to resize video track"
+          />
+        )}
+
+        <div className="flex justify-between items-center text-zinc-400 mt-1">
           <input
             type="text"
             className="bg-transparent border-none text-xs font-bold text-zinc-400 focus:text-white focus:outline-none min-w-0 w-20 truncate"
@@ -593,6 +690,15 @@ const TrackRow = memo(function TrackRow({
             <Trash2 size={12} />
           </button>
         </div>
+
+        {/* --- AUDIO RESIZE HANDLE (BOTTOM) --- */}
+        {isAudio && (
+          <div
+            onPointerDown={handleResizeStart}
+            className="absolute bottom-0 left-0 right-0 h-1.5 cursor-row-resize hover:bg-[#D2FF44] transition-colors z-50"
+            title="Drag to resize audio track"
+          />
+        )}
       </div>
 
       {/* RIGHT TRACK CONTENT */}
