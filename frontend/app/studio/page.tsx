@@ -168,6 +168,13 @@ function StudioContent() {
   const [isLoading, setIsLoading] = useState(true);
   const [showExportModal, setShowExportModal] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
+  const [exportProgress, setExportProgress] = useState(0);
+  const [exportStatus, setExportStatus] = useState("");
+  const [exportOptions, setExportOptions] = useState({
+    format: "mp4",
+    includeVideo: true,
+    includeAudio: true,
+  });
 
   // Timeline & Playback State
   const [tracks, setTracks] = useState<TimelineItem[][]>([[], []]);
@@ -1216,17 +1223,36 @@ function StudioContent() {
 
   const handleExport = async () => {
     setIsExporting(true);
+    setExportProgress(0);
+    setExportStatus("Initializing...");
+
+    // Listen for progress
+    const cleanupStatus = (window as any).runtime.EventsOn(
+      "export:status",
+      (msg: string) => {
+        setExportStatus(msg);
+      },
+    );
+    const cleanupProgress = (window as any).runtime.EventsOn(
+      "export:progress",
+      (pct: number) => {
+        setExportProgress(pct);
+      },
+    );
+
     try {
       // Call backend directly
       const result = await (window as any).go.main.App.ExportVideo(
         project?.id,
         scene?.id,
-        "mp4",
+        exportOptions,
       );
       if (result !== "Success" && result !== "Cancelled") {
         alert("Export failed: " + result);
       }
     } finally {
+      cleanupStatus();
+      cleanupProgress();
       setIsExporting(false);
       setShowExportModal(false);
     }
@@ -1507,25 +1533,103 @@ function StudioContent() {
       {/* EXPORT MODAL */}
       {showExportModal && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm">
-          <div className="bg-[#18181b] border border-zinc-800 rounded-lg shadow-2xl w-[400px] p-6 flex flex-col gap-4">
+          <div className="bg-[#18181b] border border-zinc-800 rounded-lg shadow-2xl w-[450px] p-6 flex flex-col gap-4">
             <div className="flex items-center justify-between">
               <h2 className="text-lg font-bold text-white">Export Timeline</h2>
               <button
                 onClick={() => setShowExportModal(false)}
+                disabled={isExporting}
                 className="text-zinc-500 hover:text-white"
               >
                 <X size={20} />
               </button>
             </div>
 
-            <div className="text-sm text-zinc-400">
-              Render the current timeline to a video file. This will flatten all
-              visible video tracks.
-            </div>
+            {isExporting ? (
+              <div className="flex flex-col gap-4 py-4">
+                <div className="flex items-center gap-3 text-[#D2FF44]">
+                  <Loader2 className="animate-spin" size={24} />
+                  <span className="font-bold text-lg">Rendering...</span>
+                </div>
+                <div className="h-2 w-full bg-zinc-800 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-[#D2FF44] transition-all duration-300"
+                    style={{ width: `${exportProgress}%` }}
+                  />
+                </div>
+                <div className="text-xs font-mono text-zinc-400 truncate">
+                  {exportStatus}
+                </div>
+              </div>
+            ) : (
+              <div className="flex flex-col gap-4">
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="flex flex-col gap-2">
+                    <label className="text-xs font-bold text-zinc-500">
+                      Format
+                    </label>
+                    <select
+                      value={exportOptions.format}
+                      onChange={(e) =>
+                        setExportOptions({
+                          ...exportOptions,
+                          format: e.target.value,
+                        })
+                      }
+                      className="bg-zinc-900 border border-zinc-700 rounded p-2 text-sm text-white focus:border-[#D2FF44] outline-none"
+                    >
+                      <option value="mp4">MP4 (H.264)</option>
+                      <option value="mov">MOV (ProRes-ish)</option>
+                      <option value="mkv">MKV</option>
+                      <option value="mp3">MP3 (Audio Only)</option>
+                      <option value="wav">WAV (Audio Only)</option>
+                    </select>
+                  </div>
+                  <div className="flex flex-col gap-2">
+                    <label className="text-xs font-bold text-zinc-500">
+                      Streams
+                    </label>
+                    <div className="flex flex-col gap-2">
+                      <label className="flex items-center gap-2 text-sm text-zinc-300 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={exportOptions.includeVideo}
+                          onChange={(e) =>
+                            setExportOptions({
+                              ...exportOptions,
+                              includeVideo: e.target.checked,
+                            })
+                          }
+                          disabled={
+                            exportOptions.format === "mp3" ||
+                            exportOptions.format === "wav"
+                          }
+                        />
+                        Video
+                      </label>
+                      <label className="flex items-center gap-2 text-sm text-zinc-300 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={exportOptions.includeAudio}
+                          onChange={(e) =>
+                            setExportOptions({
+                              ...exportOptions,
+                              includeAudio: e.target.checked,
+                            })
+                          }
+                        />
+                        Audio
+                      </label>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
 
             <div className="flex justify-end gap-2 mt-4">
               <button
                 onClick={() => setShowExportModal(false)}
+                disabled={isExporting}
                 className="px-4 py-2 rounded bg-zinc-800 text-zinc-300 hover:bg-zinc-700 text-sm"
               >
                 Cancel
@@ -1535,8 +1639,7 @@ function StudioContent() {
                 disabled={isExporting}
                 className="px-4 py-2 rounded bg-[#D2FF44] text-black font-bold hover:bg-[#b8e635] text-sm flex items-center gap-2"
               >
-                {isExporting && <Loader2 size={14} className="animate-spin" />}
-                {isExporting ? "Rendering..." : "Export Video"}
+                Export
               </button>
             </div>
           </div>

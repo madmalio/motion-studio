@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sort"
@@ -142,6 +143,12 @@ type TrackSetting struct {
 	Visible bool   `json:"visible"`
 	Name    string `json:"name"`
 	Type    string `json:"type"`
+}
+
+type ExportOptions struct {
+	Format       string `json:"format"`       // mp4, mov, mkv, mp3, wav
+	IncludeVideo bool   `json:"includeVideo"`
+	IncludeAudio bool   `json:"includeAudio"`
 }
 
 type TimelineData struct {
@@ -1335,20 +1342,28 @@ type RenderSegment struct {
 	InPoint    float64
 	OutPoint   float64
 	Duration   float64
+	IsImage    bool
+	AudioSource string
 }
 
-func (a *App) ExportVideo(projectId string, sceneId string, format string) string {
+func (a *App) ExportVideo(projectId string, sceneId string, options ExportOptions) string {
 	// 1. Select Output File
+	ext := "." + options.Format
+	filterPattern := "*" + ext
+	
 	outPath, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
-		Title:           "Export Video",
-		DefaultFilename: "timeline_export.mp4",
+		Title:           "Export " + strings.ToUpper(options.Format),
+		DefaultFilename: "export" + ext,
 		Filters: []runtime.FileFilter{
-			{DisplayName: "MP4 Video", Pattern: "*.mp4"},
+			{DisplayName: strings.ToUpper(options.Format) + " File", Pattern: filterPattern},
 		},
 	})
 	if err != nil || outPath == "" {
 		return "Cancelled"
 	}
+
+	// Emit initial progress
+	runtime.EventsEmit(a.ctx, "export:progress", 0)
 
 	// 2. Load Timeline
 	timeline := a.GetTimeline(projectId, sceneId)
@@ -1356,13 +1371,23 @@ func (a *App) ExportVideo(projectId string, sceneId string, format string) strin
 		return "Empty timeline"
 	}
 
-	// 3. Flatten Timeline (Visuals)
-	// We need to determine which clip is visible at every point in time.
-	// Strategy: Collect all start/end points to create intervals, then sample center of interval.
+	tempDir := os.TempDir()
+	videoOutput := ""
+	audioOutput := ""
 	
-	// Collect all time points
-	timePoints := []float64{0.0}
-	
+	// 0. Prepare Black Frame for Gaps
+	blackPath := filepath.Join(tempDir, "black.png")
+	if _, err := os.Stat(blackPath); os.IsNotExist(err) {
+		data, _ := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+		os.WriteFile(blackPath, data, 0644)
+	}
+
+	// 0.5 Prepare Silence for Audio Gaps (1 hour buffer)
+	silencePath := filepath.Join(tempDir, "silence.wav")
+	if _, err := os.Stat(silencePath); os.IsNotExist(err) {
+		exec.Command("ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo", "-t", "3600", "-c:a", "pcm_s16le", silencePath).Run()
+	}
+
 	// Helper to parse map to struct-like
 	type Item struct {
 		ID          string
@@ -1372,7 +1397,18 @@ func (a *App) ExportVideo(projectId string, sceneId string, format string) strin
 		OutputVideo string
 		AudioPath   string
 		SourceImage string
+		PairID		string
 	}
+
+	// --- PASS 1: ANALYZE TIMELINE (VISUALS) ---
+	runtime.EventsEmit(a.ctx, "export:status", "Analyzing Timeline...")
+
+	// Map to track which PairIDs are currently visible on screen
+	// If a video is covered up, its PairID won't be in this map.
+	visiblePairIDs := make(map[string]bool)
+
+	// 1. Collect all time points
+	timePoints := []float64{0.0}
 
 	var tracks [][]Item
 	for _, rawTrack := range timeline.Tracks {
@@ -1385,7 +1421,8 @@ func (a *App) ExportVideo(projectId string, sceneId string, format string) strin
 			if v, ok := rawItem["outputVideo"].(string); ok { item.OutputVideo = v }
 			if v, ok := rawItem["audioPath"].(string); ok { item.AudioPath = v }
 			if v, ok := rawItem["sourceImage"].(string); ok { item.SourceImage = v }
-			
+			if v, ok := rawItem["pairId"].(string); ok { item.PairID = v } // <--- Parse PairID
+
 			track = append(track, item)
 			timePoints = append(timePoints, item.StartTime)
 			timePoints = append(timePoints, item.StartTime+item.Duration)
@@ -1393,13 +1430,13 @@ func (a *App) ExportVideo(projectId string, sceneId string, format string) strin
 		tracks = append(tracks, track)
 	}
 
-	// Sort and Unique
+	// 2. Sort and Unique
 	sort.Float64s(timePoints)
 	uniquePoints := []float64{}
 	if len(timePoints) > 0 {
 		uniquePoints = append(uniquePoints, timePoints[0])
 		for i := 1; i < len(timePoints); i++ {
-			if timePoints[i] > timePoints[i-1] + 0.001 { // Epsilon
+			if timePoints[i] > timePoints[i-1]+0.001 {
 				uniquePoints = append(uniquePoints, timePoints[i])
 			}
 		}
@@ -1407,86 +1444,411 @@ func (a *App) ExportVideo(projectId string, sceneId string, format string) strin
 
 	var segments []RenderSegment
 
-	// Iterate intervals
+	// 3. Iterate Time Slices
 	for i := 0; i < len(uniquePoints)-1; i++ {
 		start := uniquePoints[i]
 		end := uniquePoints[i+1]
 		mid := (start + end) / 2
 		dur := end - start
 
-		// Find top-most visible video track
 		var activeItem *Item
 
-		// Iterate tracks (assuming standard order: V1, V2... we want highest V-index to win?)
-		// The frontend logic: "higher V-number wins". 
-		// Usually V1 is index 0. If V2 is index 1, V2 covers V1.
-		// We need to check trackSettings to know if it's a video track.
-		
+		// 4. Find Top-Most Visible Video
 		for tIdx, track := range tracks {
-			// Check visibility
 			if tIdx < len(timeline.TrackSettings) {
 				ts := timeline.TrackSettings[tIdx]
 				if !ts.Visible { continue }
-				// Skip Audio tracks for visual render
 				isAudio := ts.Type == "audio" || strings.HasPrefix(ts.Name, "A")
 				if isAudio { continue }
 			}
 
+			foundClip := false
 			for _, item := range track {
 				if mid >= item.StartTime && mid < item.StartTime+item.Duration {
-					// Found a clip on this track
-					// Since we iterate 0..N, and usually higher index = layer on top,
-					// we just overwrite activeItem.
-					// NOTE: Ensure your frontend logic matches this (V2 > V1).
-					itemCopy := item // Copy loop var
+					itemCopy := item
 					activeItem = &itemCopy
+					foundClip = true
+					break
+				}
+			}
+			if foundClip { break }
+		}
+
+		if activeItem != nil {
+			// Register this clip as "Visible"
+			if activeItem.PairID != "" {
+				visiblePairIDs[activeItem.PairID] = true
+			}
+
+			offset := start - activeItem.StartTime + activeItem.TrimStart
+			source := activeItem.OutputVideo
+			if source == "" { source = activeItem.SourceImage }
+
+			// ECHO FIX: Force AudioSource to Silence.
+			// We will rely entirely on Pass 3 (Audio Tracks) to render the audio.
+			// This prevents the "Video File" and "Audio File" from playing at the same time.
+			segments = append(segments, RenderSegment{
+				SourcePath:  source,
+				InPoint:     offset,
+				OutPoint:    offset + dur,
+				Duration:    dur,
+				IsImage:     strings.HasSuffix(source, ".png") || strings.HasSuffix(source, ".jpg"),
+				AudioSource: silencePath, // <--- Key Change
+			})
+		} else {
+			segments = append(segments, RenderSegment{
+				SourcePath:  blackPath,
+				AudioSource: silencePath,
+				Duration:    dur,
+				IsImage:     true,
+				InPoint:     0,
+				OutPoint:    dur,
+			})
+		}
+	}
+
+	// --- PASS 2: RENDER VIDEO ---
+	if options.IncludeVideo && (options.Format == "mp4" || options.Format == "mov" || options.Format == "mkv") {
+		var concat strings.Builder
+		concat.WriteString("ffconcat version 1.0\n")
+		for _, seg := range segments {
+			safePath := strings.ReplaceAll(filepath.ToSlash(seg.SourcePath), "'", "'\\''")
+			concat.WriteString(fmt.Sprintf("file '%s'\n", safePath))
+			if !seg.IsImage {
+				concat.WriteString(fmt.Sprintf("inpoint %f\n", seg.InPoint))
+				concat.WriteString(fmt.Sprintf("outpoint %f\n", seg.OutPoint))
+			}
+			if seg.IsImage {
+				concat.WriteString(fmt.Sprintf("duration %f\n", seg.Duration))
+			}
+		}
+
+		listPath := filepath.Join(tempDir, fmt.Sprintf("export_list_%d.txt", time.Now().Unix()))
+		os.WriteFile(listPath, []byte(concat.String()), 0644)
+
+		// Dynamic extension for temp file (helps debugging)
+		videoOutput = filepath.Join(tempDir, fmt.Sprintf("temp_video_%d.%s", time.Now().Unix(), options.Format))
+
+		// Build FFmpeg Command
+		args := []string{"-y", "-f", "concat", "-safe", "0", "-i", listPath}
+
+		if options.Format == "mov" {
+			// --- PRORES LOGIC ---
+			// -c:v prores_ks   : Use the best software ProRes encoder
+			// -profile:v 3     : ProRes 422 HQ (High Quality)
+			// -vendor apl0     : Tag as Apple-compatible
+			// -pix_fmt yuv422p10le : 10-bit color (required for ProRes)
+			args = append(args,
+				"-c:v", "prores_ks",
+				"-profile:v", "3",
+				"-vendor", "apl0",
+				"-pix_fmt", "yuv422p10le",
+				"-an", videoOutput)
+		} else {
+			// --- H.264 LOGIC (Standard MP4) ---
+			args = append(args,
+				"-c:v", "libx264",
+				"-preset", "fast",
+				"-crf", "23",
+				"-an", videoOutput)
+		}
+
+		if err := a.runFFmpegWithProgress(args, "Video"); err != nil {
+			return "Video Render Error: " + err.Error()
+		}
+	}
+
+// --- PASS 3: RENDER AUDIO ---
+	if options.IncludeAudio {
+		runtime.EventsEmit(a.ctx, "export:status", "Rendering Audio...")
+
+		// 3a. Render "Main" Audio (from Video Tracks) using Concat
+		// This ensures audio follows video visibility (V2 mutes V1)
+		var audioConcat strings.Builder
+		audioConcat.WriteString("ffconcat version 1.0\n")
+		for _, seg := range segments {
+			safePath := strings.ReplaceAll(filepath.ToSlash(seg.AudioSource), "'", "'\\''")
+			audioConcat.WriteString(fmt.Sprintf("file '%s'\n", safePath))
+			audioConcat.WriteString(fmt.Sprintf("inpoint %f\n", seg.InPoint))
+			audioConcat.WriteString(fmt.Sprintf("outpoint %f\n", seg.OutPoint))
+		}
+
+		audioListPath := filepath.Join(tempDir, fmt.Sprintf("export_audio_list_%d.txt", time.Now().Unix()))
+		os.WriteFile(audioListPath, []byte(audioConcat.String()), 0644)
+
+		mainAudioOutput := filepath.Join(tempDir, fmt.Sprintf("temp_audio_main_%d.wav", time.Now().Unix()))
+		// Render Main Audio
+		if err := a.runFFmpegWithProgress([]string{"-y", "-f", "concat", "-safe", "0", "-i", audioListPath, "-c:a", "pcm_s16le", mainAudioOutput}, "Main Audio"); err != nil {
+			return "Main Audio Error: " + err.Error()
+		}
+
+		type AudioOp struct {
+			Source    string
+			Start     float64 // Timeline start
+			Duration  float64
+			TrimStart float64 // Source offset
+			Volume    float64
+		}
+		var audioOps []AudioOp
+
+		// --- AUDIO FLATTENING LOGIC (The Fix) ---
+		// Instead of just looping and adding, we slice time and let higher tracks overwrite lower ones.
+
+		// 1. Gather all Audio-Only Tracks
+		var audioTracks [][]Item
+		audioTimePoints := []float64{0.0}
+
+		for tIdx, rawTrack := range timeline.Tracks {
+			// Check visibility & Type
+			if tIdx < len(timeline.TrackSettings) {
+				ts := timeline.TrackSettings[tIdx]
+				if !ts.Visible {
+					continue
+				}
+				// We only care about AUDIO tracks here (A1, A2...)
+				isAudio := ts.Type == "audio" || strings.HasPrefix(ts.Name, "A")
+				if !isAudio {
+					continue
+				}
+
+				var track []Item
+				for _, rawItem := range rawTrack {
+					item := Item{}
+					if v, ok := rawItem["startTime"].(float64); ok { item.StartTime = v }
+					if v, ok := rawItem["duration"].(float64); ok { item.Duration = v }
+					if v, ok := rawItem["trimStart"].(float64); ok { item.TrimStart = v }
+					if v, ok := rawItem["outputVideo"].(string); ok { item.OutputVideo = v }
+					if v, ok := rawItem["audioPath"].(string); ok { item.AudioPath = v }
+					if v, ok := rawItem["pairId"].(string); ok { item.PairID = v }
+					// Volume default
+					item.Duration = item.Duration // hack to keep type
+					
+					// Add to our list
+					track = append(track, item)
+
+					// Collect Time Points
+					audioTimePoints = append(audioTimePoints, item.StartTime)
+					audioTimePoints = append(audioTimePoints, item.StartTime+item.Duration)
+				}
+				audioTracks = append(audioTracks, track)
+			}
+		}
+
+		// 2. Sort and Unique Audio Time Points
+		sort.Float64s(audioTimePoints)
+		uniqueAudioPoints := []float64{}
+		if len(audioTimePoints) > 0 {
+			uniqueAudioPoints = append(uniqueAudioPoints, audioTimePoints[0])
+			for i := 1; i < len(audioTimePoints); i++ {
+				if audioTimePoints[i] > audioTimePoints[i-1]+0.001 {
+					uniqueAudioPoints = append(uniqueAudioPoints, audioTimePoints[i])
 				}
 			}
 		}
 
-		if activeItem != nil {
-			// Calculate offset in source file
-			offset := start - activeItem.StartTime + activeItem.TrimStart
-			source := activeItem.OutputVideo
-			if source == "" { source = activeItem.SourceImage } // Fallback for static images (needs loop in ffmpeg, tricky)
-			
-			// For now, only support video files
-			if source != "" && strings.HasSuffix(strings.ToLower(source), ".mp4") {
-				segments = append(segments, RenderSegment{
-					SourcePath: source,
-					InPoint:    offset,
-					OutPoint:   offset + dur,
-					Duration:   dur,
-				})
-			} else {
-				// Gap or Image: We might need a black spacer or image loop.
-				// For simplicity in V1, we skip gaps (ffmpeg concat handles gaps by just playing next, but timing might shift).
-				// To keep timing, we'd need a "black.mp4" filler.
+		// 3. Iterate Time Segments (Flattening)
+		for i := 0; i < len(uniqueAudioPoints)-1; i++ {
+			start := uniqueAudioPoints[i]
+			end := uniqueAudioPoints[i+1]
+			mid := (start + end) / 2
+			dur := end - start
+
+			var activeItem *Item
+
+			// 4. Find the Winner for this segment
+			// We iterate ALL audio tracks (0..N).
+			// If we find a clip, we overwrite `activeItem`.
+			// This means the LAST track (highest index, e.g. A2) will overwrite A1.
+			for _, track := range audioTracks {
+				for _, item := range track {
+					if mid >= item.StartTime && mid < item.StartTime+item.Duration {
+						// Special Case: Video-Paired Audio
+						// If this audio is tied to a video, and that video was hidden (covered),
+						// then this audio clip is NOT valid.
+						if item.PairID != "" && !visiblePairIDs[item.PairID] {
+							continue
+						}
+
+						itemCopy := item
+						activeItem = &itemCopy
+						break // Found the clip for THIS track, move to next track to see if it overwrites
+					}
+				}
+			}
+
+			// 5. Add to Ops
+			if activeItem != nil {
+				// Calculate trim
+				offset := start - activeItem.StartTime + activeItem.TrimStart
+				src := activeItem.OutputVideo
+				if src == "" { src = activeItem.AudioPath }
+				
+				if src != "" {
+					audioOps = append(audioOps, AudioOp{
+						Source:    src,
+						Start:     start, // Use segment start, not item start
+						Duration:  dur,   // Use segment duration
+						TrimStart: offset,
+						Volume:    1.0, // Default volume
+					})
+				}
+			}
+		}
+
+		if len(audioOps) > 0 {
+			// Build Complex Filter Graph
+			var args []string
+			args = append(args, "-y")
+
+			// Input 0 is Main Audio (from video tracks)
+			args = append(args, "-i", mainAudioOutput)
+
+			// Inputs 1..N are Extra Audio Clips
+			for _, op := range audioOps {
+				args = append(args, "-i", op.Source)
+			}
+
+			// Filter
+			var filterComplex strings.Builder
+
+			// Process Extra Audio Clips
+			for i, op := range audioOps {
+				inputIdx := i + 1
+				delayMs := int(op.Start * 1000)
+				// Use exact duration logic for cleaner cuts
+				end := op.TrimStart + op.Duration
+				
+				// Apply Trim -> Reset Timestamp -> Delay -> Volume
+				filterComplex.WriteString(fmt.Sprintf("[%d:a]atrim=start=%f:end=%f,asetpts=PTS-STARTPTS,adelay=%d|%d,volume=%f[a%d];",
+					inputIdx, op.TrimStart, end, delayMs, delayMs, op.Volume, i))
+			}
+
+			// Mix
+			filterComplex.WriteString("[0:a]")
+			for i := 0; i < len(audioOps); i++ {
+				filterComplex.WriteString(fmt.Sprintf("[a%d]", i))
+			}
+			// Normalize=0 prevents volume drop when mixing
+			filterComplex.WriteString(fmt.Sprintf("amix=inputs=%d:dropout_transition=0:normalize=0[outa]", len(audioOps)+1))
+
+			audioOutput = filepath.Join(tempDir, fmt.Sprintf("temp_audio_%d.m4a", time.Now().Unix()))
+
+			args = append(args, "-filter_complex", filterComplex.String(), "-map", "[outa]", "-c:a", "aac", "-b:a", "192k", audioOutput)
+
+			if err := a.runFFmpegWithProgress(args, "Audio"); err != nil {
+				return "Audio Render Error: " + err.Error()
+			}
+		} else {
+			// No extra audio, just convert main audio to AAC
+			audioOutput = filepath.Join(tempDir, fmt.Sprintf("temp_audio_%d.m4a", time.Now().Unix()))
+			if err := a.runFFmpegWithProgress([]string{"-y", "-i", mainAudioOutput, "-c:a", "aac", "-b:a", "192k", audioOutput}, "Audio Convert"); err != nil {
+				return "Audio Convert Error: " + err.Error()
 			}
 		}
 	}
+	
+	// --- MUX / FINALIZE ---
+	runtime.EventsEmit(a.ctx, "export:status", "Finalizing...")
 
-	// 4. Generate Concat File
-	var concat strings.Builder
-	for _, seg := range segments {
-		safePath := strings.ReplaceAll(filepath.ToSlash(seg.SourcePath), "'", "'\\''")
-		concat.WriteString(fmt.Sprintf("file '%s'\n", safePath))
-		concat.WriteString(fmt.Sprintf("inpoint %f\n", seg.InPoint))
-		concat.WriteString(fmt.Sprintf("outpoint %f\n", seg.OutPoint))
+	finalArgs := []string{"-y"}
+
+	if videoOutput != "" {
+		finalArgs = append(finalArgs, "-i", videoOutput)
+	}
+	if audioOutput != "" {
+		finalArgs = append(finalArgs, "-i", audioOutput)
 	}
 
-	listPath := filepath.Join(os.TempDir(), fmt.Sprintf("export_list_%d.txt", time.Now().Unix()))
-	os.WriteFile(listPath, []byte(concat.String()), 0644)
-
-	// 5. Run FFmpeg
-	// -c:v libx264 -preset fast -crf 23 (Standard good quality)
-	cmd := exec.Command("ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c:v", "libx264", "-preset", "fast", "-crf", "23", "-c:a", "aac", outPath)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Sprintf("FFmpeg Error: %v\nLog: %s", err, string(output))
+	if videoOutput == "" && audioOutput == "" {
+		return "Nothing to export"
 	}
 
+	// 1. Handle Video Stream
+	if videoOutput != "" {
+		finalArgs = append(finalArgs, "-map", "0:v")
+		finalArgs = append(finalArgs, "-c:v", "copy") // Copy the video we already rendered
+	}
+
+	// 2. Handle Audio Stream
+	if audioOutput != "" {
+		// If video exists, audio is input #1. If not, audio is input #0.
+		idx := "0"
+		if videoOutput != "" {
+			idx = "1"
+		}
+		finalArgs = append(finalArgs, "-map", idx+":a")
+
+		// --- AUDIO CODEC LOGIC ---
+		// We must convert the temp audio (AAC) to the user's requested format.
+		if options.Format == "mp3" {
+			// Convert to MP3
+			finalArgs = append(finalArgs, "-c:a", "libmp3lame", "-b:a", "320k")
+		} else if options.Format == "wav" {
+			// Convert to WAV (Uncompressed)
+			finalArgs = append(finalArgs, "-c:a", "pcm_s16le")
+		} else {
+			// For Video (MP4/MOV/MKV), keeping the AAC audio is standard and fast.
+			finalArgs = append(finalArgs, "-c:a", "copy")
+		}
+	}
+
+	finalArgs = append(finalArgs, outPath)
+
+	cmd := exec.Command("ffmpeg", finalArgs...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return "Mux Error: " + string(out)
+	}
+
+	// Cleanup Temp Files
+	if videoOutput != "" {
+		os.Remove(videoOutput)
+	}
+	if audioOutput != "" {
+		os.Remove(audioOutput)
+	}
+
+	runtime.EventsEmit(a.ctx, "export:progress", 100)
 	return "Success"
+}
+
+func (a *App) runFFmpegWithProgress(args []string, label string) error {
+	cmd := exec.Command("ffmpeg", args...)
+	
+	// Capture stderr for progress
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return err
+	}
+	
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+
+	// Parse progress
+	// FFmpeg outputs: "frame=  123 ... time=00:00:05.23 ..."
+	// We can try to parse 'time=' to calculate percentage if we knew total duration,
+	// but for now, let's just pulse or show activity, or try to parse time.
+	// Since we don't easily know total duration inside this helper without passing it,
+	// we will just emit the raw time string or a "working" event.
+	
+	go func() {
+		scanner := bufio.NewScanner(stderr)
+		scanner.Split(bufio.ScanLines)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if strings.Contains(line, "time=") {
+				// Extract time
+				re := regexp.MustCompile(`time=(\d{2}):(\d{2}):(\d{2}\.\d{2})`)
+				matches := re.FindStringSubmatch(line)
+				if len(matches) == 4 {
+					// Just emit the raw string for the UI to display
+					runtime.EventsEmit(a.ctx, "export:status", fmt.Sprintf("%s: %s:%s:%s", label, matches[1], matches[2], matches[3]))
+				}
+			}
+		}
+	}()
+
+	return cmd.Wait()
 }
 
 // =========================================================================

@@ -1,5 +1,21 @@
 export namespace main {
 	
+	export class ExportOptions {
+	    format: string;
+	    includeVideo: boolean;
+	    includeAudio: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new ExportOptions(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.format = source["format"];
+	        this.includeVideo = source["includeVideo"];
+	        this.includeAudio = source["includeAudio"];
+	    }
+	}
 	export class Project {
 	    id: string;
 	    name: string;
