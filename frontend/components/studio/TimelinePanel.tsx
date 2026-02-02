@@ -561,7 +561,7 @@ const TrackRow = memo(function TrackRow({
   setGlobalSplitHover,
   globalSplitHover,
 }: any) {
-  const defaultHeight = isAudio ? 48 : 96;
+  const defaultHeight = 48;
   const settings = trackSettings?.[trackIndex] || {
     locked: false,
     visible: true,

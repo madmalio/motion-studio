@@ -178,7 +178,7 @@ function StudioContent() {
       type?: "video" | "audio";
     }[]
   >([
-    { locked: false, visible: true, name: "V1", height: 96, type: "video" },
+    { locked: false, visible: true, name: "V1", height: 48, type: "video" },
     { locked: false, visible: true, name: "A1", height: 48, type: "audio" },
   ]);
 
@@ -415,6 +415,11 @@ function StudioContent() {
           undo();
         }
       }
+
+      if (e.code === "Space") {
+        e.preventDefault();
+        togglePlay();
+      }
     };
     const handleKeyUp = (e: KeyboardEvent) => {
       if (e.key === "Control") isCtrlPressed.current = false;
@@ -425,7 +430,7 @@ function StudioContent() {
       window.removeEventListener("keydown", handleKeyDown);
       window.removeEventListener("keyup", handleKeyUp);
     };
-  }, [history, redoStack, tracks, shots]);
+  }, [history, redoStack, tracks, shots, togglePlay]);
 
   // --- HELPER: GENERATE WAVEFORM ---
   const generateWaveform = async (shotId: string, filePath: string) => {
@@ -548,7 +553,7 @@ function StudioContent() {
               locked: false,
               visible: true,
               name: "V1",
-              height: 96,
+              height: 48,
               type: "video",
             },
             {
@@ -567,7 +572,7 @@ function StudioContent() {
             locked: false,
             visible: true,
             name: "V1",
-            height: 96,
+            height: 48,
             type: "video",
           },
           {
@@ -799,7 +804,7 @@ function StudioContent() {
         locked: false,
         visible: true,
         name,
-        height: 96,
+        height: 48,
         type: "video",
       });
 
@@ -1040,15 +1045,31 @@ function StudioContent() {
           newTracks[targetTrackIndex],
           newItem,
         );
-        let audioTrackIndex = trackSettings.findIndex((t) =>
-          (t.name || "").trim().toUpperCase().startsWith("A"),
+
+        // Auto-pair Audio Track (V3 -> A3)
+        const targetTrackName = trackSettings[targetTrackIndex]?.name || "V1";
+        const match = targetTrackName.match(/V(\d+)/i);
+        const trackNum = match ? match[1] : "1";
+        const targetAudioName = `A${trackNum}`;
+
+        let audioTrackIndex = trackSettings.findIndex(
+          (t) =>
+            (t.name || "").trim().toUpperCase() ===
+            targetAudioName.toUpperCase(),
         );
+
         if (audioTrackIndex === -1) {
           newTracks = [...newTracks, []];
           audioTrackIndex = newTracks.length - 1;
           setTrackSettings((prevSettings) => [
             ...prevSettings,
-            { locked: false, visible: true, name: "A1", height: 64 },
+            {
+              locked: false,
+              visible: true,
+              name: targetAudioName,
+              height: 64,
+              type: "audio",
+            },
           ]);
         }
         const audioItem: TimelineItem = {
