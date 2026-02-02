@@ -1256,6 +1256,9 @@ export default function TimelinePanel({
           className="flex flex-col relative overflow-y-auto overflow-x-hidden timeline-scrollbar w-full"
           style={{ flex: "0 0 60%" }} // Increased to 60% for better drag-scroll
         >
+          {/* Spacer glue (pushes real tracks to bottom) */}
+          <div className="flex-grow" />
+
           {/* BLANK VIDEO TRACK (Top Buffer) - Styled to match tracks */}
           <div className="flex border-b border-zinc-800 bg-[#151517] shrink-0 h-24">
             <div
@@ -1264,9 +1267,6 @@ export default function TimelinePanel({
             />
             <div className="flex-1 bg-[#121214]" />
           </div>
-
-          {/* Spacer glue (pushes real tracks to bottom) */}
-          <div className="flex-grow" />
 
           {videoTrackIndices.map((idx) => (
             <TrackRow
