@@ -233,7 +233,7 @@ export function useGaplessPlayback({
       }
 
       const activeEl = primaryVideoRef.current;
-      const minReady = isPlaying && !force ? 3 : 2;
+      const minReady = isPlaying && !force ? 2 : 2; // Relaxed requirement
 
       if (activeEl && activeEl.readyState >= minReady) {
         ctx.drawImage(activeEl, 0, 0, canvas.width, canvas.height);
@@ -242,7 +242,7 @@ export function useGaplessPlayback({
     [getShotAtTime, isPlaying],
   );
 
-  // 3. PLAYBACK LOOP
+  // 3. PLAYBACK LOOP (FIXED RACE CONDITION)
   useEffect(() => {
     if (!isPlaying) return;
 
@@ -255,11 +255,34 @@ export function useGaplessPlayback({
       const delta = (now - lastTick) / 1000;
       lastTick = now;
 
+      // --- SYNC CHECK: WAIT FOR BUFFERING ---
+      // Check if the ACTIVE media element is actually ready to play.
+      // If it is seeking or buffering, we DO NOT advance the time.
+      const { videoData, audioData } = getShotAtTime(currentTimeRef.current);
+      let activeEl = null;
+
+      // Determine "Leader" element
+      if (videoData) activeEl = primaryVideoRef.current;
+      else if (audioData) activeEl = secondaryVideoRef.current;
+
+      if (activeEl) {
+        // readyState 3 = HAVE_FUTURE_DATA (Smooth)
+        // readyState 2 = HAVE_CURRENT_DATA (Frame available)
+        // If we are less than 3, or seeking, we STALL.
+        if (activeEl.readyState < 3 || activeEl.seeking) {
+          // By returning here, we effectively PAUSE the timeline,
+          // but because we updated `lastTick` above, the delta won't accumulate.
+          // This prevents the "Jump" when playback resumes.
+          animationFrameId = requestAnimationFrame(loop);
+          return;
+        }
+      }
+      // --------------------------------------
+
       let nextTime = currentTimeRef.current + delta;
 
       if (nextTime >= totalDuration && totalDuration > 0) {
         setIsPlaying(false);
-        // Do not clear loadedShotIds here to prevent black flash on replay
         return;
       }
 
@@ -273,11 +296,9 @@ export function useGaplessPlayback({
     animationFrameId = requestAnimationFrame(loop);
 
     return () => cancelAnimationFrame(animationFrameId);
-  }, [isPlaying, totalDuration, renderFrame]);
+  }, [isPlaying, totalDuration, renderFrame, getShotAtTime]);
 
-  // 4. SYNC PLAYERS (Overwrite model)
-  // - PRIMARY = visuals (always)
-  // - SECONDARY = audio-only when an audio track is active
+  // 4. SYNC PLAYERS
   useEffect(() => {
     const { videoData, audioData } = getShotAtTime(currentTime);
 
@@ -291,7 +312,6 @@ export function useGaplessPlayback({
       const vShot = videoData.shot;
       const vOffset = videoData.offset ?? 0;
 
-      // Load or seek
       if (loadedShotIds.current.primary !== vShot.id) {
         loadShot(vShot, "primary", vOffset, true);
       } else {
@@ -306,13 +326,9 @@ export function useGaplessPlayback({
         }
       }
 
-      // Play/pause
       if (isPlaying && p.paused) p.play().catch(() => {});
       if (!isPlaying && !p.paused) p.pause();
 
-      // If an A-track is active, we do NOT want video audio (prevents echo)
-      // If no A-track, video audio is allowed unless the shot is muted
-      // FIX: Only mute video audio if there is a VISIBLE audio track.
       const hasVisibleAudioTrack = trackSettings.some((t) => {
         const isAudio =
           t.type === "audio" ||
@@ -322,10 +338,8 @@ export function useGaplessPlayback({
       p.muted =
         Boolean(audioData) || Boolean(vShot.muted) || hasVisibleAudioTrack;
 
-      // When paused, force a redraw so scrubbing shows correct frame
       if (!isPlaying) requestAnimationFrame(() => renderFrame(currentTime));
     } else {
-      // No active video: pause visuals
       if (p) {
         p.pause();
         p.muted = true;
@@ -336,12 +350,10 @@ export function useGaplessPlayback({
     // AUDIO
     // -------------------------
     if (s) {
-      // If there is an audio track active at this time, play it on SECONDARY.
       if (audioData?.shot) {
         const aShot = audioData.shot;
         const aOffset = audioData.offset ?? 0;
 
-        // Load or seek
         if (loadedShotIds.current.secondary !== aShot.id) {
           loadShot(aShot, "secondary", aOffset, true);
         } else {
@@ -356,14 +368,11 @@ export function useGaplessPlayback({
           }
         }
 
-        // Audio should be audible unless explicitly muted
         s.muted = Boolean(aShot.muted);
 
-        // Play/pause
         if (isPlaying && s.paused) s.play().catch(() => {});
         if (!isPlaying && !s.paused) s.pause();
       } else {
-        // No active A-track: secondary must be silent
         s.pause();
         s.muted = true;
       }
