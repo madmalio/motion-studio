@@ -331,6 +331,10 @@ function TimelineItemComponent({
       style={style}
       {...listeners}
       {...attributes}
+      onKeyDown={(e) => {
+        if (e.key === " ") return;
+        listeners?.onKeyDown?.(e);
+      }}
       className={`absolute top-0 bottom-0 group select-none ${activeTool === "split" ? "cursor-none" : "cursor-grab active:cursor-grabbing"}`}
       onClick={handleClick}
       onPointerMove={handlePointerMove}
@@ -854,6 +858,12 @@ export default function TimelinePanel({
 
       const key = e.key.toLowerCase();
 
+      if (key === " ") {
+        e.preventDefault();
+        togglePlay();
+        return;
+      }
+
       if ((e.ctrlKey || e.metaKey) && key === "z") {
         e.preventDefault();
         if (e.shiftKey) {
@@ -870,7 +880,7 @@ export default function TimelinePanel({
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onUndo, onRedo, canUndo, canRedo]);
+  }, [onUndo, onRedo, canUndo, canRedo, togglePlay]);
 
   // KEYBOARD SCRUBBING (Left/Right Arrows)
   useEffect(() => {
