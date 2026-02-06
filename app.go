@@ -835,7 +835,7 @@ func (a *App) RenderShot(projectId string, sceneId string, shotId string, workfl
 	json.NewDecoder(resp.Body).Decode(&promptResp)
 	promptID := promptResp["prompt_id"].(string)
 
-	// 7. LISTEN FOR WEBSOCKET PROGRESS
+	// 7. LISTEN FOR WEBSOCKET PROGRESS (ROBUST MODE)
 	outputFilename := ""
 	outputSubfolder := ""
 	outputType := ""
@@ -845,11 +845,11 @@ func (a *App) RenderShot(projectId string, sceneId string, shotId string, workfl
 
 	if conn != nil {
 		go func() {
+			defer close(doneChan) // Close channel when connection dies/finishes
 			for {
 				_, message, err := conn.ReadMessage()
 				if err != nil {
-					close(doneChan)
-					return
+					return // Connection died, just exit goroutine
 				}
 
 				var msg map[string]interface{}
@@ -864,14 +864,12 @@ func (a *App) RenderShot(projectId string, sceneId string, shotId string, workfl
 					percentage := int((val / max) * 100)
 					runtime.EventsEmit(a.ctx, "comfy:progress", percentage)
 				}
-
-				// Emit Status Text
+				
+				// Emit Status
 				if msgType == "executing" {
 					node := data["node"]
-					if node == nil {
-						// execution finished (node is null)
-					} else {
-						runtime.EventsEmit(a.ctx, "comfy:status", fmt.Sprintf("Executing Node %v", node))
+					if node != nil {
+						runtime.EventsEmit(a.ctx, "comfy:status", fmt.Sprintf("Processing Node %v", node))
 					}
 				}
 
@@ -879,42 +877,47 @@ func (a *App) RenderShot(projectId string, sceneId string, shotId string, workfl
 				if msgType == "execution_success" {
 					sid, _ := data["prompt_id"].(string)
 					if sid == promptID {
-						close(doneChan)
-						return
+						return // Success!
 					}
 				}
 			}
 		}()
-	} else {
-		// Fallback for no WS: just close doneChan immediately to trigger polling
-		close(doneChan)
 	}
 
-	// Wait for WS completion or Timeout
+	// 7.5 INTELLIGENT WAITING LOOP
+	// This loop will run until the job is found in history or 60 minutes pass.
+	// It ignores WebSocket failures and relies on checking the server directly.
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
+
+	timeout := time.After(60 * time.Minute) // 60 Minute Timeout for Local/Wan2.1
 
 loop:
 	for {
 		select {
 		case <-doneChan:
-			break loop
+			// WebSocket closed. Do NOT break loop. 
+			// We check history to see if it actually finished.
+			// If not, we just fall through to the ticker to keep polling.
+		case <-timeout:
+			return *shot, fmt.Errorf("timeout: generation took longer than 60 minutes")
 		case <-ticker.C:
-			// Fallback: Check history API in case WS missed the event (e.g. sleep)
+			// Check History directly (The source of truth)
 			if resp, err := http.Get(a.comfyURL + "/history/" + promptID); err == nil {
 				var h map[string]interface{}
 				json.NewDecoder(resp.Body).Decode(&h)
 				resp.Body.Close()
+				
+				// If the promptID exists in history, the job is truly done.
 				if _, ok := h[promptID]; ok {
 					break loop
 				}
 			}
-		case <-time.After(10 * time.Minute):
-			return *shot, fmt.Errorf("timeout")
 		}
 	}
 
-	// 8. Poll History (Retry logic to handle race conditions)
+	// 8. Poll History (Error-Aware Mode)
+	// We check history to see if the job finished successfully or crashed.
 	for i := 0; i < 5; i++ {
 		histResp, err := http.Get(a.comfyURL + "/history/" + promptID)
 		if err == nil {
@@ -923,54 +926,45 @@ loop:
 			histResp.Body.Close()
 
 			if data, ok := histMap[promptID].(map[string]interface{}); ok {
-				// Check for explicit errors
+				
+				// A. CHECK FOR CRASHES / ERRORS FIRST
 				if status, ok := data["status"].(map[string]interface{}); ok {
 					if statusStr, ok := status["status_str"].(string); ok && statusStr == "error" {
-						// Try to find the error message
+						// Attempt to extract the error message
 						if messages, ok := status["messages"].([]interface{}); ok && len(messages) > 0 {
-							for _, msg := range messages {
-								if pair, ok := msg.([]interface{}); ok && len(pair) >= 2 {
-									if typeStr, ok := pair[0].(string); ok && typeStr == "execution_error" {
-										// Try to extract clean exception message
-										if errMap, ok := pair[1].(map[string]interface{}); ok {
-											if excMsg, ok := errMap["exception_message"].(string); ok {
-												return *shot, fmt.Errorf("ComfyUI Error: %s", excMsg)
-											}
-										}
-										return *shot, fmt.Errorf("ComfyUI Error: %v", pair[1])
-									}
-								}
+							// ComfyUI error messages are nested arrays: [["execution_error", { "exception_message": "..." }]]
+							if errPair, ok := messages[0].([]interface{}); ok && len(errPair) >= 2 {
+                                if errDetails, ok := errPair[1].(map[string]interface{}); ok {
+                                    if msg, ok := errDetails["exception_message"].(string); ok {
+                                        return *shot, fmt.Errorf("ComfyUI Crashed: %s", msg)
+                                    }
+                                }
 							}
-							// Fallback: return the last message
-							return *shot, fmt.Errorf("ComfyUI Error: %v", messages[len(messages)-1])
 						}
-						return *shot, fmt.Errorf("ComfyUI reported an error during execution")
+						return *shot, fmt.Errorf("ComfyUI reported a fatal error during generation")
 					}
 				}
 
+				// B. SEARCH FOR OUTPUT FILE
 				if outputs, ok := data["outputs"].(map[string]interface{}); ok {
 					for _, outNode := range outputs {
 						outNodeMap, ok := outNode.(map[string]interface{})
-						if !ok {
-							continue
+						if !ok { continue }
+
+						// Brute-force search for "filename" in any category (videos, images, gifs)
+						for _, categoryValue := range outNodeMap {
+							if items, ok := categoryValue.([]interface{}); ok && len(items) > 0 {
+								if item, ok := items[0].(map[string]interface{}); ok {
+									if fn, ok := item["filename"].(string); ok {
+										outputFilename = fn
+										if s, ok := item["subfolder"].(string); ok { outputSubfolder = s }
+										if t, ok := item["type"].(string); ok { outputType = t }
+										break
+									}
+								}
+							}
 						}
-						// Check images/videos/gifs
-						if items, ok := outNodeMap["videos"].([]interface{}); ok && len(items) > 0 {
-							d := items[0].(map[string]interface{})
-							outputFilename = d["filename"].(string)
-							outputSubfolder, _ = d["subfolder"].(string)
-							outputType, _ = d["type"].(string)
-						} else if items, ok := outNodeMap["images"].([]interface{}); ok && len(items) > 0 {
-							d := items[0].(map[string]interface{})
-							outputFilename = d["filename"].(string)
-							outputSubfolder, _ = d["subfolder"].(string)
-							outputType, _ = d["type"].(string)
-						} else if items, ok := outNodeMap["gifs"].([]interface{}); ok && len(items) > 0 {
-							d := items[0].(map[string]interface{})
-							outputFilename = d["filename"].(string)
-							outputSubfolder, _ = d["subfolder"].(string)
-							outputType, _ = d["type"].(string)
-						}
+						if outputFilename != "" { break }
 					}
 				}
 			}
@@ -983,7 +977,7 @@ loop:
 	}
 
 	if outputFilename == "" {
-		return *shot, fmt.Errorf("job finished but no output file was found")
+		return *shot, fmt.Errorf("job finished but no output file was found (check ComfyUI console)")
 	}
 
 	// 9. Download Result
