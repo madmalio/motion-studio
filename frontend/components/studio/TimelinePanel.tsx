@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState, useEffect, memo } from "react";
+import { useRef, useState, useEffect, memo, useCallback, useMemo } from "react";
 import {
   Play,
   Pause,
@@ -94,14 +94,16 @@ const TimelineWaveform = memo(function TimelineWaveform({
 });
 
 // --- TIMELINE ITEM ---
-function TimelineItemComponent({
+const TimelineItemComponent = memo(function TimelineItemComponent({
   id,
-  data,
+  item,
+  isActive,
+  trackIndex,
   width,
   left,
-  onRemove,
-  onUpdate,
-  onClick,
+  onRemoveItem,
+  onUpdateItem,
+  onShotClick,
   zoom,
   activeTool,
   onSplitItem,
@@ -110,10 +112,20 @@ function TimelineItemComponent({
   setGlobalSplitHover,
   globalSplitHover,
 }: any) {
+  const dndData = useMemo(
+    () => ({
+      ...item,
+      type: "timeline-item",
+      trackIndex,
+      isActive,
+    }),
+    [item, trackIndex, isActive],
+  );
+
   const { attributes, listeners, setNodeRef, transform, isDragging } =
     useDraggable({
       id,
-      data: { type: "timeline-item" },
+      data: dndData,
       disabled: activeTool === "split" || locked,
     });
 
@@ -145,12 +157,12 @@ function TimelineItemComponent({
       setHoverX(x);
 
       // Calculate absolute time to sync with pair
-      const absTime = data.startTime + x / zoom;
+      const absTime = item.startTime + x / zoom;
 
       if (setGlobalSplitHover) {
         setGlobalSplitHover({
           time: absTime,
-          pairId: data.pairId,
+          pairId: item.pairId,
           sourceItemId: id,
         });
       }
@@ -177,8 +189,8 @@ function TimelineItemComponent({
 
     // FIX #2: Allow resizing.
     // If sourceDuration exists, use it. Otherwise default to 1 hour (3600s) to allow expansion.
-    const sourceDur = data.sourceDuration || data.maxDuration || 3600;
-    const trimStart = data.trimStart || 0;
+    const sourceDur = item.sourceDuration || item.maxDuration || 3600;
+    const trimStart = item.trimStart || 0;
     const maxLen = Math.max(0, sourceDur - trimStart);
     const maxPx = maxLen * zoom;
 
@@ -201,7 +213,7 @@ function TimelineItemComponent({
       const newW = Math.max(10, Math.min(startWidth + diff, maxPx));
 
       // FIX #3: Save to database ONLY when mouse is released
-      onUpdate({ startTime: startLeft / zoom, duration: newW / zoom });
+      onUpdateItem(id, { startTime: startLeft / zoom, duration: newW / zoom });
     };
 
     window.addEventListener("pointermove", onMove);
@@ -218,7 +230,7 @@ function TimelineItemComponent({
     const startX = e.clientX;
     const startWidth = localState.width;
     const startLeft = localState.left;
-    const startTrim = data.trimStart || 0;
+    const startTrim = item.trimStart || 0;
 
     const onMove = (ev: PointerEvent) => {
       const diff = ev.clientX - startX;
@@ -263,7 +275,7 @@ function TimelineItemComponent({
       }
       if (newLeft < 0) newLeft = 0;
 
-      onUpdate({
+      onUpdateItem(id, {
         startTime: newLeft / zoom,
         duration: newWidth / zoom,
         trimStart: newTrim,
@@ -279,10 +291,10 @@ function TimelineItemComponent({
       e.stopPropagation();
       const rect = e.currentTarget.getBoundingClientRect();
       const x = e.clientX - rect.left;
-      const time = data.startTime + x / zoom;
-      if (onSplitItem) onSplitItem(data.timelineId, time);
+      const time = item.startTime + x / zoom;
+      if (onSplitItem) onSplitItem(item.timelineId, time);
     } else {
-      onClick && onClick();
+      onShotClick && onShotClick(item.id);
     }
   };
 
@@ -296,12 +308,12 @@ function TimelineItemComponent({
       splitLineX = hoverX;
     } else if (
       globalSplitHover &&
-      data.pairId &&
-      globalSplitHover.pairId === data.pairId
+      item.pairId &&
+      globalSplitHover.pairId === item.pairId
     ) {
       // Calculate relative X based on global time
-      const relativeTime = globalSplitHover.time - data.startTime;
-      if (relativeTime >= 0 && relativeTime <= (data.duration || 4)) {
+      const relativeTime = globalSplitHover.time - item.startTime;
+      if (relativeTime >= 0 && relativeTime <= (item.duration || 4)) {
         showSplitLine = true;
         splitLineX = relativeTime * zoom;
       }
@@ -319,11 +331,11 @@ function TimelineItemComponent({
   };
 
   const SAMPLES_PER_SEC = 20;
-  const fullWaveformDuration = data.waveform
-    ? data.waveform.length / SAMPLES_PER_SEC
+  const fullWaveformDuration = item.waveform
+    ? item.waveform.length / SAMPLES_PER_SEC
     : 0;
   const fullWaveformWidth = fullWaveformDuration * zoom;
-  const hasWaveform = data.waveform && data.waveform.length > 0;
+  const hasWaveform = item.waveform && item.waveform.length > 0;
 
   return (
     <div
@@ -345,14 +357,14 @@ function TimelineItemComponent({
       >
         {!isAudioTrack && (
           <div className="flex-1 relative overflow-hidden flex bg-zinc-800">
-            {data.previewBase64 && (
+            {item.previewBase64 && (
               <img
-                src={data.previewBase64}
+                src={item.previewBase64}
                 className="h-full w-full object-cover opacity-80"
               />
             )}
             <div className="absolute bottom-0 w-full bg-gradient-to-t from-black/90 to-transparent px-2 py-0.5 text-[9px] text-zinc-300 truncate font-mono pointer-events-none z-10">
-              {data.name}
+              {item.name}
             </div>
           </div>
         )}
@@ -363,12 +375,12 @@ function TimelineItemComponent({
               <div
                 className="absolute top-0 bottom-0"
                 style={{
-                  left: `-${(data.trimStart || 0) * zoom}px`,
+                  left: `-${(item.trimStart || 0) * zoom}px`,
                   width: `${fullWaveformWidth}px`,
                 }}
               >
                 <TimelineWaveform
-                  data={data.waveform}
+                  data={item.waveform}
                   zoom={zoom}
                   color={NEON_YELLOW}
                 />
@@ -377,7 +389,7 @@ function TimelineItemComponent({
               <div className="w-full h-px bg-[#D2FF44]/30" />
             )}
             <div className="absolute top-1 left-2 text-[9px] text-zinc-400 font-mono pointer-events-none">
-              {data.name}
+              {item.name}
             </div>
           </div>
         )}
@@ -396,7 +408,7 @@ function TimelineItemComponent({
             onPointerDown={(e) => {
               e.stopPropagation();
               e.preventDefault();
-              onRemove();
+              onRemoveItem(id);
             }}
           >
             <Trash2 size={10} />
@@ -422,9 +434,9 @@ function TimelineItemComponent({
       )}
     </div>
   );
-}
+});
 
-function TrackDroppable({
+const TrackDroppable = memo(function TrackDroppable({
   id,
   items,
   trackIndex,
@@ -457,17 +469,14 @@ function TrackDroppable({
         <TimelineItemComponent
           key={item.timelineId}
           id={item.timelineId}
-          data={{
-            ...item,
-            type: "timeline-item",
-            trackIndex,
-            isActive: item.id === activeShotId,
-          }}
+          item={item}
+          isActive={item.id === activeShotId}
+          trackIndex={trackIndex}
           width={(item.duration || 4) * zoom}
           left={(item.startTime || 0) * zoom}
-          onRemove={() => onRemoveItem(item.timelineId)}
-          onUpdate={(updates: any) => onUpdateItem(item.timelineId, updates)}
-          onClick={() => onShotClick && onShotClick(item.id)}
+          onRemoveItem={onRemoveItem}
+          onUpdateItem={onUpdateItem}
+          onShotClick={onShotClick}
           zoom={zoom}
           activeTool={activeTool}
           onSplitItem={onSplitItem}
@@ -480,16 +489,33 @@ function TrackDroppable({
       ))}
     </div>
   );
-}
+});
 
 // ---------------------------------------------------------------------------
 // SUB-COMPONENTS
 // ---------------------------------------------------------------------------
 
-const TimelineRuler = memo(function TimelineRuler({ seconds, zoom }: any) {
+const TimelineRuler = memo(function TimelineRuler({
+  seconds,
+  zoom,
+  scrollLeft,
+  containerWidth,
+}: any) {
+  // VIRTUALIZATION: Only render ticks that are currently visible
+  const startSec = Math.max(0, Math.floor(scrollLeft / zoom));
+  const endSec = Math.min(
+    seconds,
+    Math.ceil((scrollLeft + (containerWidth || 2000)) / zoom),
+  );
+
+  const visibleSeconds = [];
+  for (let i = startSec; i <= endSec; i++) {
+    visibleSeconds.push(i);
+  }
+
   return (
     <div className="absolute top-0 bottom-0 left-0 right-0 pointer-events-none">
-      {Array.from({ length: Math.ceil(seconds) }).map((_, i) => {
+      {visibleSeconds.map((i) => {
         const left = i * zoom;
         return (
           <div
@@ -827,6 +853,17 @@ export default function TimelinePanel({
   const videoScrollRef = useRef<HTMLDivElement>(null);
   const audioScrollRef = useRef<HTMLDivElement>(null);
 
+  // OPTIMIZATION: Track container width to virtualize the ruler
+  const [containerWidth, setContainerWidth] = useState(1000);
+  useEffect(() => {
+    if (!mainScrollRef.current) return;
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) setContainerWidth(entry.contentRect.width);
+    });
+    observer.observe(mainScrollRef.current);
+    return () => observer.disconnect();
+  }, []);
+
   useEffect(() => {
     // We use a small timeout to ensure the DOM layout (flex-grow)
     // has finished calculating the full height before we scroll.
@@ -962,53 +999,67 @@ export default function TimelinePanel({
     document.body.style.cursor = "ns-resize";
   };
 
+  // OPTIMIZATION: Use a Ref for tracks so we don't recreate callbacks on every render
+  const tracksRef = useRef(tracks);
+  useEffect(() => {
+    tracksRef.current = tracks;
+  }, [tracks]);
+
   // Smart Sync Handlers
-  const handleSmartUpdate = (id: string, updates: any) => {
-    onUpdateItem(id, updates);
-    let sourceItem: any = null;
-    for (const track of tracks) {
-      const found = track.find((i: any) => i.timelineId === id);
-      if (found) {
-        sourceItem = found;
-        break;
-      }
-    }
-    if (sourceItem?.pairId) {
-      for (const track of tracks) {
-        const pair = track.find(
-          (i) => i.pairId === sourceItem.pairId && i.timelineId !== id,
-        );
-        if (pair) onUpdateItem(pair.timelineId, updates);
-      }
-    }
-  };
-
-  const handleSmartSplit = (itemId: string, time: number) => {
-    if (onSplit) onSplit(itemId, time);
-    let sourceItem: any = null;
-    for (const track of tracks) {
-      const found = track.find((i: any) => i.timelineId === itemId);
-      if (found) {
-        sourceItem = found;
-        break;
-      }
-    }
-
-    if (sourceItem?.pairId && onSplit) {
-      for (const track of tracks) {
-        const pair = track.find(
-          (i) => i.pairId === sourceItem.pairId && i.timelineId !== itemId,
-        );
-        if (
-          pair &&
-          time > pair.startTime &&
-          time < pair.startTime + (pair.duration || 0)
-        ) {
-          onSplit(pair.timelineId, time);
+  const handleSmartUpdate = useCallback(
+    (id: string, updates: any) => {
+      onUpdateItem(id, updates);
+      const currentTracks = tracksRef.current;
+      let sourceItem: any = null;
+      for (const track of currentTracks) {
+        const found = track.find((i: any) => i.timelineId === id);
+        if (found) {
+          sourceItem = found;
+          break;
         }
       }
-    }
-  };
+      if (sourceItem?.pairId) {
+        for (const track of currentTracks) {
+          const pair = track.find(
+            (i) => i.pairId === sourceItem.pairId && i.timelineId !== id,
+          );
+          if (pair) onUpdateItem(pair.timelineId, updates);
+        }
+      }
+    },
+    [onUpdateItem], // 'tracks' dependency removed to prevent re-renders
+  );
+
+  const handleSmartSplit = useCallback(
+    (itemId: string, time: number) => {
+      if (onSplit) onSplit(itemId, time);
+      const currentTracks = tracksRef.current;
+      let sourceItem: any = null;
+      for (const track of currentTracks) {
+        const found = track.find((i: any) => i.timelineId === itemId);
+        if (found) {
+          sourceItem = found;
+          break;
+        }
+      }
+
+      if (sourceItem?.pairId && onSplit) {
+        for (const track of currentTracks) {
+          const pair = track.find(
+            (i) => i.pairId === sourceItem.pairId && i.timelineId !== itemId,
+          );
+          if (
+            pair &&
+            time > pair.startTime &&
+            time < pair.startTime + (pair.duration || 0)
+          ) {
+            onSplit(pair.timelineId, time);
+          }
+        }
+      }
+    },
+    [onSplit], // 'tracks' dependency removed
+  );
 
   const formatTime = (seconds: number) => {
     const adjusted = seconds + 3600;
@@ -1246,7 +1297,12 @@ export default function TimelinePanel({
               height: "100%",
             }}
           >
-            <TimelineRuler seconds={timelineSeconds} zoom={zoom} />
+            <TimelineRuler
+              seconds={timelineSeconds}
+              zoom={zoom}
+              scrollLeft={scrollLeft}
+              containerWidth={containerWidth}
+            />
             <Playhead time={currentTime} zoom={zoom} />
           </div>
         </div>

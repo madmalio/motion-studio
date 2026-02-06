@@ -232,6 +232,15 @@ export function useGaplessPlayback({
         return;
       }
 
+      // FIX: Check if the loaded video matches the requested shot.
+      // If IDs don't match, we are transitioning (React effect hasn't run yet),
+      // so draw black to prevent showing the previous shot's frozen frame.
+      if (loadedShotIds.current.primary !== videoData.shot.id) {
+        ctx.fillStyle = "black";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        return;
+      }
+
       const activeEl = primaryVideoRef.current;
       const minReady = isPlaying && !force ? 2 : 2; // Relaxed requirement
 
@@ -343,6 +352,14 @@ export function useGaplessPlayback({
       if (p) {
         p.pause();
         p.muted = true;
+      }
+      // FIX: Clear canvas if in gap (handles scrubbing/pausing in empty space)
+      if (!videoData && canvasRef.current) {
+        const ctx = canvasRef.current.getContext("2d");
+        if (ctx) {
+          ctx.fillStyle = "black";
+          ctx.fillRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+        }
       }
     }
 
