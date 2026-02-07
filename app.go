@@ -541,12 +541,6 @@ func (a *App) GetWorkflows() []Workflow {
 			})
 		}
 	}
-	// Ensure default exists if list is empty
-	if len(workflows) == 0 {
-		defaultPath := filepath.Join(dir, "default.json")
-		a.createDefaultWorkflow(defaultPath)
-		workflows = append(workflows, Workflow{ID: "default", Name: "default", HasAudio: false})
-	}
 	return workflows
 }
 
@@ -619,9 +613,6 @@ func (a *App) RenameWorkflow(oldName, newName string) string {
 }
 
 func (a *App) DeleteWorkflow(name string) string {
-	if name == "default" {
-		return "Cannot delete default workflow"
-	}
 	dir := a.getWorkflowsDir()
 	path := filepath.Join(dir, name+".json")
 	err := os.Remove(path)
@@ -745,11 +736,7 @@ func (a *App) RenderShot(projectId string, sceneId string, shotId string, workfl
 	}
 	workflowPath := filepath.Join(a.getWorkflowsDir(), workflowName+".json")
 	if _, err := os.Stat(workflowPath); os.IsNotExist(err) {
-		if workflowName == "default" {
-			a.createDefaultWorkflow(workflowPath)
-		} else {
-			return *shot, fmt.Errorf("workflow %s not found", workflowName)
-		}
+		return *shot, fmt.Errorf("workflow %s not found", workflowName)
 	}
 
 	// 4. Prepare Workflow JSON

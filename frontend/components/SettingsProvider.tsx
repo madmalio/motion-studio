@@ -368,15 +368,13 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
                             >
                               <Edit3 size={14} />
                             </button>
-                            {wf.id !== "default" && (
-                              <button
-                                onClick={() => handleDelete(wf.id)}
-                                className="p-1.5 text-zinc-600 hover:text-red-500 hover:bg-red-500/10 rounded transition-colors"
-                                title="Delete"
-                              >
-                                <Trash2 size={14} />
-                              </button>
-                            )}
+                            <button
+                              onClick={() => handleDelete(wf.id)}
+                              className="p-1.5 text-zinc-600 hover:text-red-500 hover:bg-red-500/10 rounded transition-colors"
+                              title="Delete"
+                            >
+                              <Trash2 size={14} />
+                            </button>
                           </div>
                         </div>
                       ))}

@@ -229,6 +229,7 @@ function StudioContent() {
   const isResizingLib = useRef(false);
   const isResizingTime = useRef(false);
   const generatorWidthRef = useRef(generatorWidth);
+  const libraryRef = useRef<HTMLDivElement>(null);
 
   // --- PERSIST LAYOUT ---
   useEffect(() => {
@@ -446,6 +447,7 @@ function StudioContent() {
       }
 
       if (e.code === "Space") {
+        if (libraryRef.current?.contains(e.target as Node)) return;
         e.preventDefault();
         togglePlay();
       }
@@ -476,6 +478,24 @@ function StudioContent() {
           ),
         ),
       );
+    }
+  };
+
+  const refreshVideoBlob = async (path: string) => {
+    try {
+      const url = `http://localhost:3456/video/${path.replace(/\\/g, "/")}?t=${Date.now()}`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const blob = await res.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      setVideoBlobs((prev) => {
+        const next = new Map(prev);
+        if (next.has(path)) URL.revokeObjectURL(next.get(path)!);
+        next.set(path, objectUrl);
+        return next;
+      });
+    } catch (e) {
+      console.error("Failed to refresh blob:", path, e);
     }
   };
 
@@ -703,8 +723,15 @@ function StudioContent() {
     if (!activeShotId) return;
     const shot = shots.find((s) => s.id === activeShotId);
     if (shot) {
-      if (updates.outputVideo && updates.outputVideo !== shot.outputVideo) {
-        generateWaveform(shot.id, updates.outputVideo);
+      const isNewRender = updates.status === "DONE";
+      const path = updates.outputVideo || shot.outputVideo;
+      if (
+        (isNewRender ||
+          (updates.outputVideo && updates.outputVideo !== shot.outputVideo)) &&
+        path
+      ) {
+        refreshVideoBlob(path);
+        generateWaveform(shot.id, path);
       }
       if (updates.audioPath && updates.audioPath !== shot.audioPath) {
         generateWaveform(shot.id, updates.audioPath);
@@ -901,6 +928,11 @@ function StudioContent() {
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
     useSensor(KeyboardSensor, {
       coordinateGetter: sortableKeyboardCoordinates,
+      keyboardCodes: {
+        start: ["Enter"],
+        cancel: ["Escape"],
+        end: ["Enter"],
+      },
     }),
   );
 
@@ -1390,6 +1422,7 @@ function StudioContent() {
                 </>
               )}
               <div
+                ref={libraryRef}
                 style={{ width: libraryWidth }}
                 className="border-r border-zinc-800 bg-[#09090b] flex flex-col min-h-0 shrink-0"
               >
