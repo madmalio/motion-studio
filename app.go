@@ -211,6 +211,7 @@ func (a *App) loadNodeMappings() {
 		"AudioLoader":              {"audio_file": "AUDIO"},
 		"EmptyLatentVideo":         {"frame_count": "MAX_FRAMES"},
 		"MultiTalkWav2VecEmbeds":   {"num_frames": "MAX_FRAMES"},
+		"WanImageToVideo":          {"length": "WAN_LENGTH"},
 	}
 
 	if err == nil {
@@ -248,6 +249,8 @@ func (a *App) analyzeWorkflowForMappings(workflowData []byte) {
 
 					for key := range inputs {
 						lowerKey := strings.ToLower(key)
+						
+						// --- EXISTING RULES ---
 						if lowerKey == "seed" || lowerKey == "noise_seed" {
 							newRules[key] = "SEED"
 						} else if lowerKey == "text" || lowerKey == "prompt" || lowerKey == "positive" || lowerKey == "text_g" || lowerKey == "text_l" {
@@ -258,6 +261,10 @@ func (a *App) analyzeWorkflowForMappings(workflowData []byte) {
 							newRules[key] = "AUDIO"
 						} else if (lowerKey == "max_frames" || lowerKey == "frame_count" || lowerKey == "video_length" || lowerKey == "num_frames") {
 							newRules[key] = "MAX_FRAMES"
+						
+						// --- NEW RULE: CATCH "LENGTH" ---
+						} else if lowerKey == "length" { 
+							newRules[key] = "WAN_LENGTH" 
 						}
 					}
 
@@ -688,12 +695,12 @@ func (a *App) RenderShot(projectId string, sceneId string, shotId string, workfl
 		}
 	}
 
-	// Calculate Max Frames
+	// Calculate Max Frames for Audio-based workflows (standard 25fps)
 	if finalDuration <= 0 { finalDuration = 1.0 }
 	maxFrames := int(finalDuration * 25)
 	
 	// ---------------------------------------------------------
-	// 2. UPLOAD ASSETS TO COMFYUI (The Fix)
+	// 2. UPLOAD ASSETS TO COMFYUI
 	// ---------------------------------------------------------
 	
 	// A. Upload Image
@@ -705,8 +712,6 @@ func (a *App) RenderShot(projectId string, sceneId string, shotId string, workfl
 	// B. Upload Audio (If exists)
 	comfyAudioName := ""
 	if localAudioPath != "" {
-		// We reuse the image upload function because ComfyUI's /upload/image endpoint 
-		// handles audio files correctly by placing them in the input folder.
 		uploadedName, err := a.uploadImageToComfy(localAudioPath)
 		if err != nil {
 			return *shot, fmt.Errorf("audio upload failed: %v", err)
@@ -752,15 +757,27 @@ func (a *App) RenderShot(projectId string, sceneId string, shotId string, workfl
 	var workflow map[string]interface{}
 	json.Unmarshal(workflowData, &workflow)
 
-	// 5. Inject Values (Dynamic System)
+	// =========================================================
+	// 5. INJECT VALUES (UPDATED WITH FORCE FIX)
+	// =========================================================
 	imageInjected := false
+	
+	// --- A. Calculate Wan2 Frame Count ---
+	// Formula: 16 fps * duration + 1
+	// 5s = 81 frames, 10s = 161 frames
+	wanDuration := shot.Duration
+	if wanDuration <= 0 { wanDuration = 5 } // Default to 5s if unset
+	wanFrames := int(wanDuration*16) + 1
+
+	fmt.Printf("DEBUG: Generating Wan2 with %d seconds (%d frames)\n", int(wanDuration), wanFrames)
 	
 	// Prepare Injection Values
 	injectValues := map[string]interface{}{
-		"IMAGE":  comfyImageName,
-		"PROMPT": shot.Prompt,
-		"SEED":   shot.Seed,
-		"MOTION": shot.MotionStrength,
+		"IMAGE":      comfyImageName,
+		"PROMPT":     shot.Prompt,
+		"SEED":       shot.Seed,
+		"MOTION":     shot.MotionStrength,
+		"WAN_LENGTH": wanFrames, // <--- Value for mapped "length" inputs
 	}
 	
 	if comfyAudioName != "" {
@@ -775,34 +792,35 @@ func (a *App) RenderShot(projectId string, sceneId string, shotId string, workfl
 		classType, _ := nodeMap["class_type"].(string)
 		inputs, _ := nodeMap["inputs"].(map[string]interface{})
 		
-		// Check if we have mappings for this node type
+		// --- B. Standard Mapping Injection ---
 		if rules, known := a.nodeMappings[classType]; known {
 			for inputKey, valueType := range rules {
-				// Only inject if the node actually has this input
 				if _, inputExists := inputs[inputKey]; inputExists {
-					// Safety: Don't overwrite existing links (arrays) with injected values
-					if _, isLink := inputs[inputKey].([]interface{}); isLink {
-						continue
-					}
+					if _, isLink := inputs[inputKey].([]interface{}); isLink { continue }
 
 					if val, hasVal := injectValues[valueType]; hasVal {
 						inputs[inputKey] = val
-						if valueType == "IMAGE" {
-							imageInjected = true
-						}
+						if valueType == "IMAGE" { imageInjected = true }
 					}
 				}
 			}
 		}
 
-		// Smart Fallback: Check Node Title (for generic nodes like INTConstant)
-		// This handles your specific case where "INTConstant" is named "Max frames"
+		// --- C. FORCE FIX FOR WAN2 (Node 9) ---
+		// We explicitly check for the WanImageToVideo class and force the length.
+		// This bypasses any mapping errors if "node_mappings.json" is stale.
+		if classType == "WanImageToVideo" {
+			// Force the length input if it exists in the node
+			inputs["length"] = wanFrames
+			fmt.Printf("DEBUG: Forced WanImageToVideo length to %d\n", wanFrames)
+		}
+
+		// --- D. Smart Fallback for Primitive Nodes ---
 		if meta, ok := nodeMap["_meta"].(map[string]interface{}); ok {
 			if title, ok := meta["title"].(string); ok {
 				lowerTitle := strings.ToLower(title)
 				if strings.Contains(lowerTitle, "max frames") || strings.Contains(lowerTitle, "frame count") {
 					if val, hasVal := injectValues["MAX_FRAMES"]; hasVal {
-						// Inject into 'value' (standard for INTConstant/Primitive nodes)
 						if _, ok := inputs["value"]; ok { inputs["value"] = val }
 					}
 				}
@@ -817,7 +835,7 @@ func (a *App) RenderShot(projectId string, sceneId string, shotId string, workfl
 	// 6. Queue Prompt with Client ID
 	promptReq := map[string]interface{}{
 		"prompt":    workflow,
-		"client_id": a.clientID, // <--- Key for WebSocket
+		"client_id": a.clientID,
 	}
 	promptBytes, _ := json.Marshal(promptReq)
 	resp, err := http.Post(a.comfyURL+"/prompt", "application/json", bytes.NewBuffer(promptBytes))
@@ -840,16 +858,15 @@ func (a *App) RenderShot(projectId string, sceneId string, shotId string, workfl
 	outputSubfolder := ""
 	outputType := ""
 
-	// We use a channel to signal completion from the WS loop
 	doneChan := make(chan bool)
 
 	if conn != nil {
 		go func() {
-			defer close(doneChan) // Close channel when connection dies/finishes
+			defer close(doneChan)
 			for {
 				_, message, err := conn.ReadMessage()
 				if err != nil {
-					return // Connection died, just exit goroutine
+					return
 				}
 
 				var msg map[string]interface{}
@@ -857,7 +874,6 @@ func (a *App) RenderShot(projectId string, sceneId string, shotId string, workfl
 				msgType, _ := msg["type"].(string)
 				data, _ := msg["data"].(map[string]interface{})
 
-				// Emit Progress
 				if msgType == "progress" {
 					val := data["value"].(float64)
 					max := data["max"].(float64)
@@ -865,7 +881,6 @@ func (a *App) RenderShot(projectId string, sceneId string, shotId string, workfl
 					runtime.EventsEmit(a.ctx, "comfy:progress", percentage)
 				}
 				
-				// Emit Status
 				if msgType == "executing" {
 					node := data["node"]
 					if node != nil {
@@ -873,11 +888,10 @@ func (a *App) RenderShot(projectId string, sceneId string, shotId string, workfl
 					}
 				}
 
-				// Execution Finished
 				if msgType == "execution_success" {
 					sid, _ := data["prompt_id"].(string)
 					if sid == promptID {
-						return // Success!
+						return
 					}
 				}
 			}
@@ -885,8 +899,6 @@ func (a *App) RenderShot(projectId string, sceneId string, shotId string, workfl
 	}
 
 	// 7.5 INTELLIGENT WAITING LOOP
-	// This loop will run until the job is found in history or 60 minutes pass.
-	// It ignores WebSocket failures and relies on checking the server directly.
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
@@ -896,19 +908,16 @@ loop:
 	for {
 		select {
 		case <-doneChan:
-			// WebSocket closed. Do NOT break loop. 
-			// We check history to see if it actually finished.
-			// If not, we just fall through to the ticker to keep polling.
+			// WebSocket finished, but we still check history to be sure.
 		case <-timeout:
 			return *shot, fmt.Errorf("timeout: generation took longer than 60 minutes")
 		case <-ticker.C:
-			// Check History directly (The source of truth)
+			// Check History directly
 			if resp, err := http.Get(a.comfyURL + "/history/" + promptID); err == nil {
 				var h map[string]interface{}
 				json.NewDecoder(resp.Body).Decode(&h)
 				resp.Body.Close()
 				
-				// If the promptID exists in history, the job is truly done.
 				if _, ok := h[promptID]; ok {
 					break loop
 				}
@@ -917,7 +926,6 @@ loop:
 	}
 
 	// 8. Poll History (Error-Aware Mode)
-	// We check history to see if the job finished successfully or crashed.
 	for i := 0; i < 5; i++ {
 		histResp, err := http.Get(a.comfyURL + "/history/" + promptID)
 		if err == nil {
@@ -927,12 +935,10 @@ loop:
 
 			if data, ok := histMap[promptID].(map[string]interface{}); ok {
 				
-				// A. CHECK FOR CRASHES / ERRORS FIRST
+				// A. CHECK FOR CRASHES
 				if status, ok := data["status"].(map[string]interface{}); ok {
 					if statusStr, ok := status["status_str"].(string); ok && statusStr == "error" {
-						// Attempt to extract the error message
 						if messages, ok := status["messages"].([]interface{}); ok && len(messages) > 0 {
-							// ComfyUI error messages are nested arrays: [["execution_error", { "exception_message": "..." }]]
 							if errPair, ok := messages[0].([]interface{}); ok && len(errPair) >= 2 {
                                 if errDetails, ok := errPair[1].(map[string]interface{}); ok {
                                     if msg, ok := errDetails["exception_message"].(string); ok {
@@ -951,7 +957,6 @@ loop:
 						outNodeMap, ok := outNode.(map[string]interface{})
 						if !ok { continue }
 
-						// Brute-force search for "filename" in any category (videos, images, gifs)
 						for _, categoryValue := range outNodeMap {
 							if items, ok := categoryValue.([]interface{}); ok && len(items) > 0 {
 								if item, ok := items[0].(map[string]interface{}); ok {

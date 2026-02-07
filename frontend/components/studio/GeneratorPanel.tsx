@@ -320,6 +320,31 @@ const GeneratorPanel = memo(function GeneratorPanel({
           </div>
         </div>
 
+        {/* --- NEW: WAN2 DURATION SELECTOR --- */}
+        {selectedWorkflow.toLowerCase().includes("wan2") && (
+          <div className="space-y-2 animate-in fade-in slide-in-from-top-1">
+            <label className="text-xs text-zinc-400">Generation Length</label>
+            <div className="grid grid-cols-2 gap-2">
+              {[5, 10].map((dur) => (
+                <button
+                  key={dur}
+                  onClick={() => updateActiveShot({ duration: dur })}
+                  className={`
+                    py-3 px-3 rounded text-xs border transition-all font-bold uppercase tracking-wider
+                    ${
+                      Math.abs(activeShot.duration - dur) < 0.1
+                        ? "bg-[#D2FF44] text-black border-[#D2FF44] shadow-[0_0_10px_rgba(210,255,68,0.2)]"
+                        : "bg-zinc-900 text-zinc-500 border-zinc-800 hover:text-zinc-300 hover:border-zinc-700"
+                    }
+                  `}
+                >
+                  {dur} Seconds
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* SEED SETTING */}
         <div className="space-y-2">
           <div className="flex justify-between text-xs text-zinc-400">
