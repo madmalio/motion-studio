@@ -18,6 +18,7 @@ import {
   Redo2,
   Volume2,
   VolumeX,
+  Link,
 } from "lucide-react";
 import { useDroppable, useDraggable } from "@dnd-kit/core";
 import { CSS } from "@dnd-kit/utilities";
@@ -109,6 +110,7 @@ const TimelineItemComponent = memo(function TimelineItemComponent({
   zoom,
   activeTool,
   onSplitItem,
+  onExtend,
   locked,
   isAudioTrack,
   setGlobalSplitHover,
@@ -452,6 +454,20 @@ const TimelineItemComponent = memo(function TimelineItemComponent({
 
         {!locked && (
           <button
+            className="absolute top-1 right-5 bg-black/60 hover:bg-[#D2FF44] hover:text-black text-white p-1 rounded z-50 transition-colors opacity-0 group-hover:opacity-100"
+            onPointerDown={(e) => {
+              e.stopPropagation();
+              e.preventDefault();
+              onExtend && onExtend(item.timelineId);
+            }}
+            title="Extend Clip"
+          >
+            <Link size={10} />
+          </button>
+        )}
+
+        {!locked && (
+          <button
             className="absolute top-1 right-1 bg-black/60 hover:bg-red-600 text-white p-1 rounded z-50 transition-colors opacity-0 group-hover:opacity-100"
             onPointerDown={(e) => {
               e.stopPropagation();
@@ -495,6 +511,7 @@ const TrackDroppable = memo(function TrackDroppable({
   activeShotId,
   activeTool,
   onSplitItem,
+  onExtend,
   locked,
   visible,
   videoBlobs,
@@ -529,6 +546,7 @@ const TrackDroppable = memo(function TrackDroppable({
           zoom={zoom}
           activeTool={activeTool}
           onSplitItem={onSplitItem}
+          onExtend={onExtend}
           locked={locked}
           videoBlobs={videoBlobs}
           isAudioTrack={isAudioTrack}
@@ -629,6 +647,7 @@ const TrackRow = memo(function TrackRow({
   onUpdateItem,
   onShotClick,
   onSplit,
+  onExtend,
   videoBlobs,
   onRenameTrack,
   onDeleteTrack,
@@ -801,6 +820,7 @@ const TrackRow = memo(function TrackRow({
             activeShotId={activeShotId}
             activeTool={activeTool}
             onSplitItem={onSplit}
+            onExtend={onExtend}
             locked={settings.locked}
             visible={settings.visible}
             videoBlobs={videoBlobs}
@@ -835,6 +855,7 @@ interface TimelinePanelProps {
   onShotClick?: (id: string) => void;
   shots?: any[];
   onSplit?: (itemId: string, time: number) => void;
+  onExtend?: (itemId: string) => void;
   onUndo?: () => void;
   onRedo?: () => void;
   canUndo?: boolean;
@@ -871,6 +892,7 @@ export default function TimelinePanel({
   setZoom,
   activeShotId,
   onSplit,
+  onExtend,
   onShotClick,
   onUndo,
   onRedo,
@@ -1399,6 +1421,7 @@ export default function TimelinePanel({
               onUpdateItem={handleSmartUpdate}
               onShotClick={onShotClick}
               onSplit={handleSmartSplit}
+              onExtend={onExtend}
               videoBlobs={videoBlobs}
               onRenameTrack={onRenameTrack}
               onDeleteTrack={onDeleteTrack}
@@ -1441,6 +1464,7 @@ export default function TimelinePanel({
               onUpdateItem={handleSmartUpdate}
               onShotClick={onShotClick}
               onSplit={handleSmartSplit}
+              onExtend={onExtend}
               videoBlobs={videoBlobs}
               onRenameTrack={onRenameTrack}
               onDeleteTrack={onDeleteTrack}

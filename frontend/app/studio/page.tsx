@@ -104,6 +104,45 @@ const isTimelineDropTarget = (overId: string, tracks: TimelineItem[][]) => {
   return tracks.some((t) => t.some((item) => item.timelineId === overId));
 };
 
+const applyOverwrite = (trackItems: TimelineItem[], newItem: TimelineItem) => {
+  const result: TimelineItem[] = [];
+  const start = newItem.startTime;
+  const end = newItem.startTime + (newItem.duration || 0);
+  for (const item of trackItems) {
+    if (item.timelineId === newItem.timelineId) continue;
+    const itemStart = item.startTime;
+    const itemEnd = round(item.startTime + (item.duration || 0));
+    if (start < itemEnd && end > itemStart) {
+      if (start <= itemStart && end >= itemEnd) {
+        continue;
+      } else if (start > itemStart && end < itemEnd) {
+        result.push({ ...item, duration: round(start - itemStart) });
+        result.push({
+          ...item,
+          timelineId: crypto.randomUUID(),
+          startTime: end,
+          duration: round(itemEnd - end),
+          trimStart: round((item.trimStart || 0) + (end - itemStart)),
+        });
+      } else if (start > itemStart && start < itemEnd) {
+        result.push({ ...item, duration: round(start - itemStart) });
+      } else if (end > itemStart && end < itemEnd) {
+        const cut = end - itemStart;
+        result.push({
+          ...item,
+          startTime: end,
+          duration: round((item.duration || 0) - cut),
+          trimStart: round((item.trimStart || 0) + cut),
+        });
+      }
+    } else {
+      result.push(item);
+    }
+  }
+  result.push(newItem);
+  return result;
+};
+
 function WailsGuard({ children }: { children: React.ReactNode }) {
   const [isReady, setIsReady] = useState(false);
   const [showError, setShowError] = useState(false);
@@ -682,29 +721,100 @@ function StudioContent() {
     setActiveShotId(newId);
   };
 
-  const handleExtendShot = async (originalShot: Shot) => {
+  const createExtensionShot = async (originalShot: Shot) => {
     const sourcePath = originalShot.outputVideo || originalShot.sourceImage;
-    if (!sourcePath) return alert("Select source first");
+    if (!sourcePath) {
+      alert("Select source first");
+      return null;
+    }
     const lastFramePath = await ExtractLastFrame(sourcePath);
-    if (!lastFramePath) return;
+    if (!lastFramePath) return null;
     const b64 = await ReadImageBase64(lastFramePath);
-    recordHistory();
     const newId = crypto.randomUUID();
+    const newShot: Shot = {
+      ...originalShot,
+      id: newId,
+      name: `${originalShot.name} (Ext)`,
+      sourceImage: lastFramePath,
+      audioPath: "",
+      waveform: [],
+      previewBase64: b64,
+      status: "DRAFT",
+      outputVideo: "",
+      duration: 4,
+    };
+    return newShot;
+  };
+
+  const handleExtendShot = async (originalShot: Shot) => {
+    const newShot = await createExtensionShot(originalShot);
+    if (!newShot) return;
+
+    recordHistory();
     setShots((prev) => {
-      const newShot: Shot = {
-        ...originalShot,
-        id: newId,
-        name: `${originalShot.name} (Ext)`,
-        sourceImage: lastFramePath,
-        audioPath: "",
-        waveform: [],
-        previewBase64: b64,
-        status: "DRAFT",
-        outputVideo: "",
-      };
-      return [...prev, newShot];
+      const idx = prev.findIndex((s) => s.id === originalShot.id);
+      if (idx === -1) return [...prev, newShot];
+      const next = [...prev];
+      next.splice(idx + 1, 0, newShot);
+      return next;
     });
-    setActiveShotId(newId);
+    setActiveShotId(newShot.id);
+  };
+
+  const handleTimelineExtend = async (timelineId: string) => {
+    let sourceItem: TimelineItem | undefined;
+    let trackIndex = -1;
+
+    for (let i = 0; i < tracks.length; i++) {
+      const found = tracks[i].find((it) => it.timelineId === timelineId);
+      if (found) {
+        sourceItem = found;
+        trackIndex = i;
+        break;
+      }
+    }
+
+    if (!sourceItem) return;
+
+    const newShot = await createExtensionShot(sourceItem);
+    if (!newShot) return;
+
+    recordHistory();
+
+    // 1. Update Library
+    setShots((prev) => {
+      const idx = prev.findIndex((s) => s.id === sourceItem!.id);
+      if (idx === -1) return [...prev, newShot];
+      const next = [...prev];
+      next.splice(idx + 1, 0, newShot);
+      return next;
+    });
+
+    // 2. Update Timeline
+    setTracks((prev) => {
+      const newTracks = [...prev];
+      const track = newTracks[trackIndex];
+      const startTime = round(
+        sourceItem!.startTime + (sourceItem!.duration || 0),
+      );
+
+      const newItem: TimelineItem = {
+        ...newShot,
+        timelineId: crypto.randomUUID(),
+        pairId: crypto.randomUUID(),
+        trackIndex: trackIndex,
+        startTime: startTime,
+        duration: newShot.duration,
+        maxDuration: newShot.duration,
+        volume: 1,
+        muted: false,
+      };
+
+      newTracks[trackIndex] = applyOverwrite(track, newItem);
+      return newTracks;
+    });
+
+    setActiveShotId(newShot.id);
   };
 
   const handleDeleteShot = (e: React.MouseEvent, id: string) => {
@@ -1055,48 +1165,6 @@ function StudioContent() {
       }
     }
     newStartTime = round(newStartTime);
-
-    const applyOverwrite = (
-      trackItems: TimelineItem[],
-      newItem: TimelineItem,
-    ) => {
-      const result: TimelineItem[] = [];
-      const start = newItem.startTime;
-      const end = newItem.startTime + (newItem.duration || 0);
-      for (const item of trackItems) {
-        if (item.timelineId === newItem.timelineId) continue;
-        const itemStart = item.startTime;
-        const itemEnd = round(item.startTime + (item.duration || 0));
-        if (start < itemEnd && end > itemStart) {
-          if (start <= itemStart && end >= itemEnd) {
-            continue;
-          } else if (start > itemStart && end < itemEnd) {
-            result.push({ ...item, duration: round(start - itemStart) });
-            result.push({
-              ...item,
-              timelineId: crypto.randomUUID(),
-              startTime: end,
-              duration: round(itemEnd - end),
-              trimStart: round((item.trimStart || 0) + (end - itemStart)),
-            });
-          } else if (start > itemStart && start < itemEnd) {
-            result.push({ ...item, duration: round(start - itemStart) });
-          } else if (end > itemStart && end < itemEnd) {
-            const cut = end - itemStart;
-            result.push({
-              ...item,
-              startTime: end,
-              duration: round((item.duration || 0) - cut),
-              trimStart: round((item.trimStart || 0) + cut),
-            });
-          }
-        } else {
-          result.push(item);
-        }
-      }
-      result.push(newItem);
-      return result;
-    };
 
     const isLibraryItem =
       active.data.current?.type === "shot" ||
@@ -1511,6 +1579,7 @@ function StudioContent() {
                 zoom={zoom}
                 setZoom={setZoom}
                 onSplit={handleSplit}
+                onExtend={handleTimelineExtend}
                 onUndo={undo}
                 onRedo={redo}
                 canUndo={history.length > 0}
