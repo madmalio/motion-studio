@@ -8,6 +8,8 @@ import {
   Settings,
   Music,
   X,
+  Video,
+  Sparkles,
 } from "lucide-react";
 import { memo, useState, useEffect } from "react";
 
@@ -23,7 +25,9 @@ import { EventsOn } from "../../wailsjs/runtime";
 import { useSettings } from "../SettingsProvider";
 import { ExtractAudioPeaks } from "../../lib/wailsSafe";
 import TrimmableWaveform from "./TrimmableWaveform";
-import AssetPickerModal from "./AssetPickerModal"; // <--- IMPORT NEW COMPONENT
+import AssetPickerModal from "./AssetPickerModal";
+import CameraModal from "./CameraModal"; // <--- NEW
+import PromptWizardModal from "./PromptWizardModal"; // <--- NEW
 
 const GeneratorPanel = memo(function GeneratorPanel({
   activeShot,
@@ -48,6 +52,10 @@ const GeneratorPanel = memo(function GeneratorPanel({
   // --- MODAL STATE ---
   const [showModal, setShowModal] = useState(false);
   const [modalType, setModalType] = useState<"image" | "audio">("image");
+
+  // --- NEW WIZARD STATES ---
+  const [showCamera, setShowCamera] = useState(false);
+  const [showWizard, setShowWizard] = useState(false);
 
   // Auto-select workflow
   useEffect(() => {
@@ -110,6 +118,16 @@ const GeneratorPanel = memo(function GeneratorPanel({
         audioDuration: 0,
       });
     }
+  };
+
+  // --- SMART PROMPT APPENDER ---
+  const handleAppendPrompt = (text: string) => {
+    let current = activeShot.prompt || "";
+    // If prompt is not empty and doesn't end with a comma/space, add a comma
+    if (current.trim().length > 0 && !current.trim().endsWith(",")) {
+      current = current.trim() + ", ";
+    }
+    updateActiveShot({ prompt: current + text });
   };
 
   const handleClearAudio = (e: React.MouseEvent) => {
@@ -268,11 +286,30 @@ const GeneratorPanel = memo(function GeneratorPanel({
           </div>
         )}
 
-        {/* PROMPT INPUT */}
+        {/* PROMPT INPUT WITH TOOLS */}
         <div>
-          <h3 className="text-xs font-bold text-zinc-500 uppercase tracking-wider mb-3 flex items-center gap-2">
-            <Wand2 size={12} /> Prompt
-          </h3>
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-xs font-bold text-zinc-500 uppercase tracking-wider flex items-center gap-2">
+              <Wand2 size={12} /> Prompt
+            </h3>
+            <div className="flex gap-1">
+              <button
+                onClick={() => setShowCamera(true)}
+                className="flex items-center gap-1 px-2 py-0.5 rounded bg-zinc-900 border border-zinc-800 text-[10px] text-zinc-400 hover:text-white hover:border-[#D2FF44] transition-all"
+                title="Camera Movements"
+              >
+                <Video size={10} /> Camera
+              </button>
+              <button
+                onClick={() => setShowWizard(true)}
+                className="flex items-center gap-1 px-2 py-0.5 rounded bg-zinc-900 border border-zinc-800 text-[10px] text-zinc-400 hover:text-white hover:border-[#D2FF44] transition-all"
+                title="Prompt Wizard"
+              >
+                <Sparkles size={10} /> Wizard
+              </button>
+            </div>
+          </div>
+
           <textarea
             className="w-full bg-zinc-900 border border-zinc-800 rounded-md p-3 text-xs text-white focus:border-[#D2FF44] outline-none resize-none h-24 placeholder-zinc-600"
             placeholder="Describe the motion..."
@@ -378,13 +415,27 @@ const GeneratorPanel = memo(function GeneratorPanel({
         </div>
       </div>
 
-      {/* --- ASSET PICKER MODAL (Reusable Component) --- */}
+      {/* --- ASSET PICKER MODAL --- */}
       <AssetPickerModal
         isOpen={showModal}
         onClose={() => setShowModal(false)}
         type={modalType}
         project={project}
         onSelect={handleAssetSelected}
+      />
+
+      {/* --- NEW CAMERA MODAL --- */}
+      <CameraModal
+        isOpen={showCamera}
+        onClose={() => setShowCamera(false)}
+        onSelect={handleAppendPrompt}
+      />
+
+      {/* --- NEW PROMPT WIZARD MODAL --- */}
+      <PromptWizardModal
+        isOpen={showWizard}
+        onClose={() => setShowWizard(false)}
+        onSelect={handleAppendPrompt}
       />
     </>
   );
