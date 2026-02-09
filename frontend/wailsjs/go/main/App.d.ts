@@ -28,6 +28,8 @@ export function GetComfyURL():Promise<string>;
 
 export function GetProject(arg1:string):Promise<main.Project>;
 
+export function GetProjectAssets(arg1:string):Promise<Array<main.ProjectAsset>>;
+
 export function GetProjects():Promise<Array<main.Project>>;
 
 export function GetScenes(arg1:string):Promise<Array<main.Scene>>;

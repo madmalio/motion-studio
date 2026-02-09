@@ -54,6 +54,10 @@ export function GetProject(arg1) {
   return window['go']['main']['App']['GetProject'](arg1);
 }
 
+export function GetProjectAssets(arg1) {
+  return window['go']['main']['App']['GetProjectAssets'](arg1);
+}
+
 export function GetProjects() {
   return window['go']['main']['App']['GetProjects']();
 }

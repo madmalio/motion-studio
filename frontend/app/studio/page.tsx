@@ -1433,6 +1433,7 @@ function StudioContent() {
                   handleAddShot={handleAddShot}
                   handleExtendShot={handleExtendShot}
                   handleDeleteShot={handleDeleteShot}
+                  projectId={project.id}
                 />
               </div>
               <div

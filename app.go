@@ -134,6 +134,12 @@ type Shot struct {
 	Waveform       []float64 `json:"waveform"`
 }
 
+type ProjectAsset struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+	Type string `json:"type"` // "image" or "audio"
+}
+
 type Config struct {
 	ComfyURL string `json:"comfyUrl"`
 }
@@ -1145,6 +1151,41 @@ func (a *App) ImportImage(projectId string) string {
 
 	// 5. Return the NEW safe path inside the project
 	return destPath
+}
+
+func (a *App) GetProjectAssets(projectId string) []ProjectAsset {
+	assetsDir := filepath.Join(a.getAppDir(), projectId, "assets")
+	entries, err := os.ReadDir(assetsDir)
+	if err != nil {
+		return []ProjectAsset{}
+	}
+
+	var assets []ProjectAsset
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			ext := strings.ToLower(filepath.Ext(entry.Name()))
+			assetType := "unknown"
+			
+			// Identify Images
+			if ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".webp" {
+				assetType = "image"
+			} 
+			// Identify Audio
+			if ext == ".mp3" || ext == ".wav" || ext == ".ogg" || ext == ".m4a" || ext == ".flac" {
+				assetType = "audio"
+			}
+
+			if assetType != "unknown" {
+				fullPath := filepath.Join(assetsDir, entry.Name())
+				assets = append(assets, ProjectAsset{
+					Name: entry.Name(),
+					Path: fullPath,
+					Type: assetType,
+				})
+			}
+		}
+	}
+	return assets
 }
 
 // ImportAudio opens a dialog, copies the file to the project assets, and returns the new path

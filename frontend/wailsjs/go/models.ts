@@ -40,6 +40,22 @@ export namespace main {
 	        this.sceneCount = source["sceneCount"];
 	    }
 	}
+	export class ProjectAsset {
+	    name: string;
+	    path: string;
+	    type: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new ProjectAsset(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.path = source["path"];
+	        this.type = source["type"];
+	    }
+	}
 	export class Scene {
 	    id: string;
 	    projectId: string;
