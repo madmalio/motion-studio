@@ -234,10 +234,8 @@ export function useGaplessPlayback({
 
       // FIX: Check if the loaded video matches the requested shot.
       // If IDs don't match, we are transitioning (React effect hasn't run yet),
-      // so draw black to prevent showing the previous shot's frozen frame.
+      // so we return to keep the previous frame (persistence) instead of flashing black.
       if (loadedShotIds.current.primary !== videoData.shot.id) {
-        ctx.fillStyle = "black";
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
         return;
       }
 

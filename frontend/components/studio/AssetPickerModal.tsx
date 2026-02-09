@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import {
   X,
   Upload,
@@ -8,6 +8,9 @@ import {
   Image as ImageIcon,
   Music,
   FileAudio,
+  Play,
+  Pause,
+  AudioLines,
 } from "lucide-react";
 import {
   ImportImage,
@@ -33,6 +36,22 @@ export default function AssetPickerModal({
   const [activeTab, setActiveTab] = useState<"upload" | "library">("upload");
   const [assets, setAssets] = useState<any[]>([]);
 
+  // --- AUDIO PREVIEW STATE ---
+  const [playingAsset, setPlayingAsset] = useState<string | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  // Stop audio when closing or switching tabs
+  useEffect(() => {
+    if (!isOpen || activeTab !== "library") {
+      stopAudio();
+    }
+  }, [isOpen, activeTab]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => stopAudio();
+  }, []);
+
   // Reset tab and load assets when opening
   useEffect(() => {
     if (isOpen) {
@@ -43,8 +62,44 @@ export default function AssetPickerModal({
     }
   }, [isOpen, project]);
 
+  const stopAudio = () => {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current = null;
+    }
+    setPlayingAsset(null);
+  };
+
+  // Helper to generate a local URL for the asset
+  const getAssetUrl = (path: string) => {
+    const safePath = path.replace(/\\/g, "/");
+    return `http://localhost:3456/video/${safePath}`;
+  };
+
+  const togglePreview = (e: React.MouseEvent, path: string) => {
+    e.stopPropagation(); // Don't trigger the "Select" click
+
+    if (playingAsset === path) {
+      // Pause
+      stopAudio();
+    } else {
+      // Play New
+      stopAudio(); // Stop previous
+      const url = getAssetUrl(path);
+      const audio = new Audio(url);
+      audio.volume = 0.5;
+
+      audio.onended = () => setPlayingAsset(null);
+      audio.play().catch((err) => console.error("Playback failed", err));
+
+      audioRef.current = audio;
+      setPlayingAsset(path);
+    }
+  };
+
   const handleUploadSystem = async () => {
     if (!project?.id) return;
+    stopAudio(); // Stop any preview
 
     let path = "";
     if (type === "image") {
@@ -56,12 +111,6 @@ export default function AssetPickerModal({
     if (path) {
       onSelect({ path, type, name: path.split(/[\\/]/).pop() });
     }
-  };
-
-  // Helper to generate a local URL for the asset
-  const getAssetUrl = (path: string) => {
-    const safePath = path.replace(/\\/g, "/");
-    return `http://localhost:3456/video/${safePath}`;
   };
 
   if (!isOpen) return null;
@@ -76,7 +125,10 @@ export default function AssetPickerModal({
             Select {type === "image" ? "Image" : "Audio"} Source
           </h3>
           <button
-            onClick={onClose}
+            onClick={() => {
+              stopAudio();
+              onClose();
+            }}
             className="text-zinc-500 hover:text-white transition-colors"
           >
             <X size={20} />
@@ -152,17 +204,47 @@ export default function AssetPickerModal({
                     <div
                       key={i}
                       onClick={() => onSelect(asset)}
-                      className="group relative aspect-square border border-zinc-800 rounded-xl bg-zinc-900 overflow-hidden cursor-pointer hover:border-[#D2FF44] hover:shadow-[0_0_15px_rgba(210,255,68,0.1)] transition-all"
-                      title={asset.name} // Tooltip on hover
+                      className={`
+                        group relative aspect-square border rounded-xl overflow-hidden cursor-pointer transition-all
+                        ${playingAsset === asset.path ? "border-[#D2FF44] ring-1 ring-[#D2FF44]" : "border-zinc-800 hover:border-zinc-600 hover:shadow-lg"}
+                        bg-zinc-900
+                      `}
+                      title={asset.name}
                     >
-                      {/* Audio Item */}
+                      {/* --- AUDIO CARD DESIGN --- */}
                       {type === "audio" && (
-                        <div className="absolute inset-0 flex flex-col items-center justify-center text-zinc-700 group-hover:text-[#D2FF44] transition-colors bg-zinc-950/50">
-                          <FileAudio size={40} />
+                        <div className="absolute inset-0 flex flex-col items-center justify-center bg-gradient-to-br from-zinc-800 to-zinc-950 group-hover:from-zinc-800 group-hover:to-zinc-900 transition-colors">
+                          <AudioLines
+                            size={48}
+                            className={`mb-2 transition-colors ${playingAsset === asset.path ? "text-[#D2FF44]" : "text-zinc-600 group-hover:text-zinc-400"}`}
+                          />
+
+                          {/* Play/Pause Overlay Button */}
+                          <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity bg-black/40 backdrop-blur-[1px]">
+                            <button
+                              onClick={(e) => togglePreview(e, asset.path)}
+                              className="w-12 h-12 rounded-full bg-[#D2FF44] text-black flex items-center justify-center hover:scale-110 transition-transform shadow-lg"
+                              title={
+                                playingAsset === asset.path
+                                  ? "Stop Preview"
+                                  : "Preview Audio"
+                              }
+                            >
+                              {playingAsset === asset.path ? (
+                                <Pause size={20} fill="currentColor" />
+                              ) : (
+                                <Play
+                                  size={20}
+                                  fill="currentColor"
+                                  className="ml-0.5"
+                                />
+                              )}
+                            </button>
+                          </div>
                         </div>
                       )}
 
-                      {/* Image Item */}
+                      {/* --- IMAGE CARD DESIGN --- */}
                       {type === "image" && (
                         <>
                           <div className="absolute inset-0 bg-zinc-900 animate-pulse" />
@@ -174,8 +256,6 @@ export default function AssetPickerModal({
                           />
                         </>
                       )}
-
-                      {/* Removed the text label overlay */}
                     </div>
                   ))}
               </div>

@@ -1464,7 +1464,7 @@ func (a *App) ExportVideo(projectId string, sceneId string, options ExportOption
 	if len(timePoints) > 0 {
 		uniquePoints = append(uniquePoints, timePoints[0])
 		for i := 1; i < len(timePoints); i++ {
-			if timePoints[i] > timePoints[i-1]+0.001 {
+			if timePoints[i] > timePoints[i-1]+0.01 {
 				uniquePoints = append(uniquePoints, timePoints[i])
 			}
 		}

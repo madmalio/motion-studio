@@ -28,6 +28,8 @@ import {
 import { sortableKeyboardCoordinates } from "@dnd-kit/sortable";
 import { useGaplessPlayback } from "../../hooks/useGaplessPlayback";
 
+const round = (n: number) => Math.round(n * 10000) / 10000;
+
 // --- COMPONENTS ---
 import GeneratorPanel from "../../components/studio/GeneratorPanel";
 import LibraryPanel from "../../components/studio/LibraryPanel";
@@ -762,6 +764,7 @@ function StudioContent() {
 
   const handleSplit = (itemId: string, splitTime: number) => {
     if (!itemId || splitTime === undefined) return;
+    splitTime = round(splitTime);
     recordHistory();
 
     setTracks((prev) => {
@@ -789,14 +792,14 @@ function StudioContent() {
         ) {
           return prev;
         }
-        const splitOffset = splitTime - item.startTime;
+        const splitOffset = round(splitTime - item.startTime);
         const leftItem = { ...item, duration: splitOffset };
         const rightItem: TimelineItem = {
           ...item,
           timelineId: crypto.randomUUID(),
           startTime: splitTime,
-          duration: (item.duration || 0) - splitOffset,
-          trimStart: (item.trimStart || 0) + splitOffset,
+          duration: round((item.duration || 0) - splitOffset),
+          trimStart: round((item.trimStart || 0) + splitOffset),
         };
         const newTrack = [...track];
         newTrack[targetItemIndex] = leftItem;
@@ -1051,6 +1054,7 @@ function StudioContent() {
         });
       }
     }
+    newStartTime = round(newStartTime);
 
     const applyOverwrite = (
       trackItems: TimelineItem[],
@@ -1062,28 +1066,28 @@ function StudioContent() {
       for (const item of trackItems) {
         if (item.timelineId === newItem.timelineId) continue;
         const itemStart = item.startTime;
-        const itemEnd = item.startTime + (item.duration || 0);
+        const itemEnd = round(item.startTime + (item.duration || 0));
         if (start < itemEnd && end > itemStart) {
           if (start <= itemStart && end >= itemEnd) {
             continue;
           } else if (start > itemStart && end < itemEnd) {
-            result.push({ ...item, duration: start - itemStart });
+            result.push({ ...item, duration: round(start - itemStart) });
             result.push({
               ...item,
               timelineId: crypto.randomUUID(),
               startTime: end,
-              duration: itemEnd - end,
-              trimStart: (item.trimStart || 0) + (end - itemStart),
+              duration: round(itemEnd - end),
+              trimStart: round((item.trimStart || 0) + (end - itemStart)),
             });
           } else if (start > itemStart && start < itemEnd) {
-            result.push({ ...item, duration: start - itemStart });
+            result.push({ ...item, duration: round(start - itemStart) });
           } else if (end > itemStart && end < itemEnd) {
             const cut = end - itemStart;
             result.push({
               ...item,
               startTime: end,
-              duration: (item.duration || 0) - cut,
-              trimStart: (item.trimStart || 0) + cut,
+              duration: round((item.duration || 0) - cut),
+              trimStart: round((item.trimStart || 0) + cut),
             });
           }
         } else {

@@ -26,6 +26,7 @@ const LEFT_PANEL_W = 160;
 const LEFT_PANEL_BG = "bg-[#2c2f33]";
 const LEFT_PANEL_BORDER = "border-r border-zinc-700";
 const NEON_YELLOW = "#D2FF44";
+const round = (n: number) => Math.round(n * 10000) / 10000;
 
 // --- WAVEFORM COMPONENT ---
 const TimelineWaveform = memo(function TimelineWaveform({
@@ -97,6 +98,7 @@ const TimelineWaveform = memo(function TimelineWaveform({
 const TimelineItemComponent = memo(function TimelineItemComponent({
   id,
   item,
+  siblings, // <--- New Prop
   isActive,
   trackIndex,
   width,
@@ -133,11 +135,9 @@ const TimelineItemComponent = memo(function TimelineItemComponent({
   const [localState, setLocalState] = useState({ width, left });
   const [hoverX, setHoverX] = useState<number | null>(null);
 
-  // FIX #1: Safety Check - Prevent infinite loops by ignoring tiny changes
   useEffect(() => {
     if (!isResizing) {
       setLocalState((prev) => {
-        // If the difference is less than 0.1px, don't trigger a re-render
         if (
           Math.abs(prev.width - width) < 0.1 &&
           Math.abs(prev.left - left) < 0.1
@@ -149,16 +149,12 @@ const TimelineItemComponent = memo(function TimelineItemComponent({
     }
   }, [width, left, isResizing]);
 
-  // Handle local hover for split tool
   const handlePointerMove = (e: React.PointerEvent) => {
     if (activeTool === "split" && !locked) {
       const rect = e.currentTarget.getBoundingClientRect();
       const x = e.clientX - rect.left;
       setHoverX(x);
-
-      // Calculate absolute time to sync with pair
       const absTime = item.startTime + x / zoom;
-
       if (setGlobalSplitHover) {
         setGlobalSplitHover({
           time: absTime,
@@ -176,7 +172,7 @@ const TimelineItemComponent = memo(function TimelineItemComponent({
     }
   };
 
-  // Resize Logic (Right) - FIXED
+  // --- RESIZE RIGHT (End) ---
   const handleResizeStart = (e: React.PointerEvent) => {
     if (activeTool === "split" || locked) return;
     e.stopPropagation();
@@ -187,8 +183,6 @@ const TimelineItemComponent = memo(function TimelineItemComponent({
     const startWidth = localState.width;
     const startLeft = localState.left;
 
-    // FIX #2: Allow resizing.
-    // If sourceDuration exists, use it. Otherwise default to 1 hour (3600s) to allow expansion.
     const sourceDur = item.sourceDuration || item.maxDuration || 3600;
     const trimStart = item.trimStart || 0;
     const maxLen = Math.max(0, sourceDur - trimStart);
@@ -196,31 +190,56 @@ const TimelineItemComponent = memo(function TimelineItemComponent({
 
     const onMove = (ev: PointerEvent) => {
       const diff = ev.clientX - startX;
-      // Clamp between 10px and the maximum file length
-      const newW = Math.max(10, Math.min(startWidth + diff, maxPx));
+      let newW = Math.max(10, Math.min(startWidth + diff, maxPx));
 
-      // ONLY update local visual state. DO NOT call onUpdate here.
+      // --- SNAP LOGIC (Right Edge) ---
+      const SNAP_PX = 10;
+      const myEnd = startLeft + newW;
+
+      for (const sib of siblings) {
+        if (sib.timelineId === id) continue;
+        const sibStart = (sib.startTime || 0) * zoom;
+        // If my end is close to their start -> Snap
+        if (Math.abs(myEnd - sibStart) < SNAP_PX) {
+          newW = sibStart - startLeft;
+          break; // Found snap target
+        }
+      }
+      // -------------------------------
+
       setLocalState((prev) => ({ ...prev, width: newW }));
     };
 
     const onUp = (ev: PointerEvent) => {
-      // Clean up first
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       setIsResizing(false);
 
+      // Re-calculate final width with snap
       const diff = ev.clientX - startX;
-      const newW = Math.max(10, Math.min(startWidth + diff, maxPx));
+      let newW = Math.max(10, Math.min(startWidth + diff, maxPx));
 
-      // FIX #3: Save to database ONLY when mouse is released
-      onUpdateItem(id, { startTime: startLeft / zoom, duration: newW / zoom });
+      const SNAP_PX = 10;
+      const myEnd = startLeft + newW;
+      for (const sib of siblings) {
+        if (sib.timelineId === id) continue;
+        const sibStart = (sib.startTime || 0) * zoom;
+        if (Math.abs(myEnd - sibStart) < SNAP_PX) {
+          newW = sibStart - startLeft;
+          break;
+        }
+      }
+
+      onUpdateItem(id, {
+        duration: round(newW / zoom),
+      });
     };
 
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
   };
 
-  // Resize Logic (Left)
+  // --- RESIZE LEFT (Start) ---
   const handleResizeStartLeft = (e: React.PointerEvent) => {
     if (activeTool === "split" || locked) return;
     e.stopPropagation();
@@ -237,6 +256,22 @@ const TimelineItemComponent = memo(function TimelineItemComponent({
       let newLeft = startLeft + diff;
       let newWidth = startWidth - diff;
       let newTrim = startTrim + diff / zoom;
+
+      // --- SNAP LOGIC (Left Edge) ---
+      const SNAP_PX = 10;
+      for (const sib of siblings) {
+        if (sib.timelineId === id) continue;
+        const sibEnd = (sib.startTime + (sib.duration || 0)) * zoom;
+        // If my start is close to their end -> Snap
+        if (Math.abs(newLeft - sibEnd) < SNAP_PX) {
+          const snapDiff = newLeft - sibEnd; // How much we snapped
+          newLeft = sibEnd;
+          newWidth = startWidth - (diff - snapDiff); // Adjust width to compensate
+          newTrim = startTrim + (diff - snapDiff) / zoom;
+          break;
+        }
+      }
+      // -------------------------------
 
       if (newWidth < 10) {
         newLeft = startLeft + startWidth - 10;
@@ -258,10 +293,24 @@ const TimelineItemComponent = memo(function TimelineItemComponent({
       window.removeEventListener("pointerup", onUp);
       setIsResizing(false);
 
+      // Re-calculate final logic with snap
       const diff = ev.clientX - startX;
       let newLeft = startLeft + diff;
       let newWidth = startWidth - diff;
       let newTrim = startTrim + diff / zoom;
+
+      const SNAP_PX = 10;
+      for (const sib of siblings) {
+        if (sib.timelineId === id) continue;
+        const sibEnd = (sib.startTime + (sib.duration || 0)) * zoom;
+        if (Math.abs(newLeft - sibEnd) < SNAP_PX) {
+          const snapDiff = newLeft - sibEnd;
+          newLeft = sibEnd;
+          newWidth = startWidth - (diff - snapDiff);
+          newTrim = startTrim + (diff - snapDiff) / zoom;
+          break;
+        }
+      }
 
       if (newWidth < 10) {
         newLeft = startLeft + startWidth - 10;
@@ -276,9 +325,9 @@ const TimelineItemComponent = memo(function TimelineItemComponent({
       if (newLeft < 0) newLeft = 0;
 
       onUpdateItem(id, {
-        startTime: newLeft / zoom,
-        duration: newWidth / zoom,
-        trimStart: newTrim,
+        startTime: round(newLeft / zoom),
+        duration: round(newWidth / zoom),
+        trimStart: round(newTrim),
       });
     };
 
@@ -291,7 +340,7 @@ const TimelineItemComponent = memo(function TimelineItemComponent({
       e.stopPropagation();
       const rect = e.currentTarget.getBoundingClientRect();
       const x = e.clientX - rect.left;
-      const time = item.startTime + x / zoom;
+      const time = round(item.startTime + x / zoom);
       if (onSplitItem) onSplitItem(item.timelineId, time);
     } else {
       onShotClick && onShotClick(item.id);
@@ -311,7 +360,6 @@ const TimelineItemComponent = memo(function TimelineItemComponent({
       item.pairId &&
       globalSplitHover.pairId === item.pairId
     ) {
-      // Calculate relative X based on global time
       const relativeTime = globalSplitHover.time - item.startTime;
       if (relativeTime >= 0 && relativeTime <= (item.duration || 4)) {
         showSplitLine = true;
@@ -470,6 +518,7 @@ const TrackDroppable = memo(function TrackDroppable({
           key={item.timelineId}
           id={item.timelineId}
           item={item}
+          siblings={items} // <--- ADD THIS LINE (Pass neighbors for snapping)
           isActive={item.id === activeShotId}
           trackIndex={trackIndex}
           width={(item.duration || 4) * zoom}
