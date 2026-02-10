@@ -52,6 +52,8 @@ export function ReadImageBase64(arg1:string):Promise<string>;
 
 export function RenameWorkflow(arg1:string,arg2:string):Promise<string>;
 
+export function RenderRemoteShot(arg1:string,arg2:string,arg3:string,arg4:string,arg5:string,arg6:string):Promise<main.Shot>;
+
 export function RenderShot(arg1:string,arg2:string,arg3:string,arg4:string):Promise<main.Shot>;
 
 export function SaveShots(arg1:string,arg2:string,arg3:Array<main.Shot>):Promise<void>;

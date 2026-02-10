@@ -2047,3 +2047,83 @@ func StartStreamServer() {
 	fmt.Println("🎥 Video Engine listening on http://localhost:3456/stream")
 	http.ListenAndServe(":3456", mux)
 }
+
+// RenderRemoteShot sends a prompt and image to the Cloud (Modal) and saves the result
+func (a *App) RenderRemoteShot(projectId string, sceneId string, shotId string, prompt string, imagePath string, modalUrl string) (Shot, error) {
+	// 1. Get the current shots for this scene
+	shots := a.GetShots(projectId, sceneId) 
+	
+	var shotIndex int = -1
+
+	// Find the specific shot we are working on
+	for i, s := range shots {
+		if s.ID == shotId {
+			shotIndex = i
+			break
+		}
+	}
+
+	if shotIndex == -1 {
+		return Shot{}, fmt.Errorf("could not find shot with ID: %s", shotId)
+	}
+
+	// 2. Prepare the upload form
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	_ = writer.WriteField("prompt", prompt)
+
+	file, err := os.Open(imagePath)
+	if err != nil {
+		return Shot{}, fmt.Errorf("could not open image: %w", err)
+	}
+	
+	part, _ := writer.CreateFormFile("image", filepath.Base(imagePath))
+	io.Copy(part, file)
+	file.Close()
+	writer.Close()
+
+	// 3. Send to Modal
+	req, err := http.NewRequest("POST", modalUrl, body)
+	if err != nil {
+		return Shot{}, err
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	client := &http.Client{Timeout: 300 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return Shot{}, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return Shot{}, fmt.Errorf("modal error: %d", resp.StatusCode)
+	}
+
+	// 4. SAVE THE VIDEO FILE TO THE CORRECT SCENE FOLDER
+	filename := fmt.Sprintf("shot_%s_wan_%d.mp4", shotId, time.Now().Unix())
+	
+	// FIXED: Uses getAppDir to save in Documents/MotionStudio/[Project]/scenes/[Scene]
+	outputDir := filepath.Join(a.getAppDir(), projectId, "scenes", sceneId) 
+	outputPath := filepath.Join(outputDir, filename)
+
+	// Ensure the folder exists
+	os.MkdirAll(outputDir, 0755)
+
+	outFile, err := os.Create(outputPath)
+	if err != nil {
+		return Shot{}, fmt.Errorf("failed to create file: %w", err)
+	}
+	defer outFile.Close()
+	io.Copy(outFile, resp.Body)
+
+	// 5. Update only the fields we need to change
+	// This preserves your Name, Prompt, and Seed exactly as they were 
+	shots[shotIndex].OutputVideo = outputPath
+	shots[shotIndex].Status = "done"
+
+	// 6. Save to your JSON database so it's permanent 
+	a.SaveShots(projectId, sceneId, shots)
+
+	return shots[shotIndex], nil
+}

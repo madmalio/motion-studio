@@ -1,7 +1,13 @@
 "use client";
 
 import { useDraggable } from "@dnd-kit/core";
-import { Plus, Trash2, Link as LinkIcon, AlertCircle } from "lucide-react";
+import {
+  Plus,
+  Trash2,
+  Link as LinkIcon,
+  AlertCircle,
+  Play,
+} from "lucide-react";
 import { memo } from "react";
 
 // --- DRAGGABLE ITEM (Internal) ---
@@ -44,6 +50,20 @@ const DraggableShotItem = memo(function DraggableShotItem({
 
       {/* Hover Actions */}
       <div className="absolute top-1 right-1 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+        {/* NEW: Play Button for Renders */}
+        {shot.outputVideo && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation(); // Prevents selecting the shot
+              onClick(); // Triggers the preview
+            }}
+            className="bg-black/60 hover:bg-[#D2FF44] hover:text-black text-white p-1 rounded backdrop-blur"
+            title="Play Preview"
+          >
+            <Play size={10} fill="currentColor" />
+          </button>
+        )}
+
         <button
           onClick={onExtend}
           className="bg-black/60 hover:bg-[#D2FF44] hover:text-black text-white p-1 rounded backdrop-blur"
@@ -51,6 +71,7 @@ const DraggableShotItem = memo(function DraggableShotItem({
         >
           <LinkIcon size={10} />
         </button>
+
         <button
           onClick={onDelete}
           className="bg-black/60 hover:bg-red-500 text-white p-1 rounded backdrop-blur"

@@ -23,7 +23,7 @@ import {
 
 import { EventsOn } from "../../wailsjs/runtime";
 import { useSettings } from "../SettingsProvider";
-import { ExtractAudioPeaks } from "../../lib/wailsSafe";
+import { ExtractAudioPeaks, RenderRemoteShot } from "../../lib/wailsSafe";
 import TrimmableWaveform from "./TrimmableWaveform";
 import AssetPickerModal from "./AssetPickerModal";
 import CameraModal from "./CameraModal"; // <--- NEW
@@ -39,7 +39,7 @@ const GeneratorPanel = memo(function GeneratorPanel({
   setVideoCache,
   setVideoSrc,
 }: any) {
-  const { workflows, openSettings, status } = useSettings();
+  const { workflows, openSettings, status, remoteUrl } = useSettings();
   const [selectedWorkflow, setSelectedWorkflow] = useState<string>("");
 
   // --- PROGRESS STATE ---
@@ -99,6 +99,22 @@ const GeneratorPanel = memo(function GeneratorPanel({
     }
   }, [activeShot?.audioPath]);
 
+  useEffect(() => {
+    if (activeShot?.outputVideo) {
+      // 1. Convert the file path to Base64
+      ReadImageBase64(activeShot.outputVideo).then((b64) => {
+        // 2. IMPORTANT: Manually push this to the big viewer source
+        setVideoSrc(b64);
+
+        // 3. Keep it in cache so switching back and forth is fast
+        setVideoCache(activeShot.id, b64);
+      });
+    } else {
+      // If there is no video, clear the viewer
+      setVideoSrc(null);
+    }
+  }, [activeShot?.id, activeShot?.outputVideo]);
+
   // --- HANDLERS ---
   const handleOpenModal = (type: "image" | "audio") => {
     setModalType(type);
@@ -150,12 +166,35 @@ const GeneratorPanel = memo(function GeneratorPanel({
     setProgressStatus("Starting...");
 
     try {
-      const updatedShot = await RenderShot(
-        project.id,
-        scene.id,
-        activeShot.id,
-        selectedWorkflow,
-      );
+      let updatedShot;
+
+      // 1. CHECK IF CLOUD WORKFLOW IS SELECTED
+      if (selectedWorkflow === "wan-2.2-cloud") {
+        if (!remoteUrl) {
+          alert("Please set your Remote URL in Settings first!");
+          setIsRendering(false);
+          return;
+        }
+
+        // 2. CALL THE CLOUD
+        updatedShot = await RenderRemoteShot(
+          project.id,
+          scene.id,
+          activeShot.id,
+          activeShot.prompt,
+          activeShot.sourceImage,
+          remoteUrl,
+        );
+      } else {
+        // 3. CALL LOCAL COMFYUI (Existing Logic)
+        updatedShot = await RenderShot(
+          project.id,
+          scene.id,
+          activeShot.id,
+          selectedWorkflow,
+        );
+      }
+
       if (updatedShot.outputVideo) {
         const b64 = await ReadImageBase64(updatedShot.outputVideo);
         setVideoCache(updatedShot.id, b64);

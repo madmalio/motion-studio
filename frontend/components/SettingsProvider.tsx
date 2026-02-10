@@ -19,6 +19,7 @@ import {
   Trash2,
   Edit3,
   RefreshCw,
+  Cloud,
 } from "lucide-react";
 import {
   GetComfyURL,
@@ -36,6 +37,7 @@ interface SettingsContextType {
   workflows: { id: string; name: string; hasAudio: boolean }[]; // <--- UPDATED
   refreshWorkflows: () => Promise<void>;
   status: "idle" | "testing" | "success" | "error";
+  remoteUrl: string;
 }
 
 const SettingsContext = createContext<SettingsContextType | undefined>(
@@ -60,6 +62,19 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<
     "idle" | "testing" | "success" | "error"
   >("idle");
+
+  const [remoteUrl, setRemoteUrl] = useState("");
+
+  // Load saved URL on startup
+  useEffect(() => {
+    const saved = localStorage.getItem("motion-studio-remote-url");
+    if (saved) setRemoteUrl(saved);
+  }, []);
+
+  // Save URL whenever it changes
+  useEffect(() => {
+    if (remoteUrl) localStorage.setItem("motion-studio-remote-url", remoteUrl);
+  }, [remoteUrl]);
 
   // Workflow State (Now includes hasAudio)
   const [workflows, setWorkflows] = useState<
@@ -121,6 +136,11 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
   const refreshWorkflows = async () => {
     // The backend now returns { id, name, hasAudio }
     const list = await GetWorkflows();
+    list.unshift({
+      id: "wan-2.2-cloud",
+      name: "☁️ Wan 2.2 (14B) - Cloud",
+      hasAudio: false,
+    });
     setWorkflows(list);
   };
 
@@ -197,6 +217,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
         workflows,
         refreshWorkflows,
         status,
+        remoteUrl,
       }}
     >
       {children}
@@ -252,6 +273,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
                 {/* GENERAL TAB */}
                 {activeTab === "general" && (
                   <div className="space-y-6">
+                    {/* 1. EXISTING COMFYUI URL */}
                     <div className="space-y-2">
                       <label className="text-xs font-bold text-zinc-500 uppercase tracking-wider flex items-center gap-2">
                         <Server size={12} /> ComfyUI Backend URL
@@ -309,6 +331,23 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
                           </p>
                         )}
                       </div>
+                    </div>
+
+                    {/* 2. NEW REMOTE URL SECTION */}
+                    <div className="space-y-2 pt-4 border-t border-zinc-800">
+                      <label className="text-xs font-bold text-zinc-500 uppercase tracking-wider flex items-center gap-2">
+                        <Cloud size={12} /> Wan 2.2 Remote URL
+                      </label>
+                      <input
+                        className="w-full bg-zinc-900 border border-zinc-800 rounded p-2 text-sm text-white outline-none focus:border-[#D2FF44] font-mono placeholder-zinc-600"
+                        value={remoteUrl}
+                        onChange={(e) => setRemoteUrl(e.target.value)}
+                        placeholder="https://your-app-name.modal.run"
+                      />
+                      <p className="text-[10px] text-zinc-500">
+                        Paste your Modal.com function URL here to enable cloud
+                        rendering.
+                      </p>
                     </div>
                   </div>
                 )}

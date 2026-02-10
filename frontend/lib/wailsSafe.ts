@@ -63,3 +63,24 @@ export const DeleteWorkflow = (id: string) =>
   callGo(() => App.DeleteWorkflow(id), "DeleteWorkflow");
 export const RenameWorkflow = (id: string, newName: string) =>
   callGo(() => App.RenameWorkflow(id, newName), "RenameWorkflow");
+
+export const RenderRemoteShot = (
+  projectId: string,
+  sceneId: string,
+  shotId: string,
+  prompt: string,
+  imagePath: string,
+  modalUrl: string,
+) =>
+  callGo(
+    () =>
+      App.RenderRemoteShot(
+        projectId,
+        sceneId,
+        shotId,
+        prompt,
+        imagePath,
+        modalUrl,
+      ),
+    "RenderRemoteShot",
+  );
