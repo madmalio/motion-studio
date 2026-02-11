@@ -38,6 +38,7 @@ const GeneratorPanel = memo(function GeneratorPanel({
   setIsRendering,
   setVideoCache,
   setVideoSrc,
+  primaryVideoRef,
 }: any) {
   const { workflows, openSettings, status, remoteUrl } = useSettings();
   const [selectedWorkflow, setSelectedWorkflow] = useState<string>("");
@@ -98,22 +99,6 @@ const GeneratorPanel = memo(function GeneratorPanel({
       setAudioPeaks([]);
     }
   }, [activeShot?.audioPath]);
-
-  useEffect(() => {
-    if (activeShot?.outputVideo) {
-      // 1. Convert the file path to Base64
-      ReadImageBase64(activeShot.outputVideo).then((b64) => {
-        // 2. IMPORTANT: Manually push this to the big viewer source
-        setVideoSrc(b64);
-
-        // 3. Keep it in cache so switching back and forth is fast
-        setVideoCache(activeShot.id, b64);
-      });
-    } else {
-      // If there is no video, clear the viewer
-      setVideoSrc(null);
-    }
-  }, [activeShot?.id, activeShot?.outputVideo]);
 
   // --- HANDLERS ---
   const handleOpenModal = (type: "image" | "audio") => {

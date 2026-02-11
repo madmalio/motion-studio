@@ -17,6 +17,7 @@ const DraggableShotItem = memo(function DraggableShotItem({
   onClick,
   onExtend,
   onDelete,
+  onPlay,
 }: any) {
   const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
     id: `library-${shot.id}`,
@@ -55,7 +56,7 @@ const DraggableShotItem = memo(function DraggableShotItem({
           <button
             onClick={(e) => {
               e.stopPropagation(); // Prevents selecting the shot
-              onClick(); // Triggers the preview
+              onPlay ? onPlay() : onClick(); // Triggers the preview
             }}
             className="bg-black/60 hover:bg-[#D2FF44] hover:text-black text-white p-1 rounded backdrop-blur"
             title="Play Preview"
@@ -99,6 +100,7 @@ const LibraryPanel = memo(function LibraryPanel({
   handleAddShot,
   handleExtendShot,
   handleDeleteShot,
+  handlePlayShot,
 }: any) {
   return (
     <div className="h-full flex flex-col">
@@ -126,6 +128,7 @@ const LibraryPanel = memo(function LibraryPanel({
                 handleExtendShot(shot);
               }}
               onDelete={(e: any) => handleDeleteShot(e, shot.id)}
+              onPlay={() => handlePlayShot && handlePlayShot(shot)}
             />
           ))}
           <button

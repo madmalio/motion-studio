@@ -432,6 +432,10 @@ export function useGaplessPlayback({
     currentTimeRef.current = t;
   };
 
+  const resetCache = useCallback(() => {
+    loadedShotIds.current = { primary: null, secondary: null };
+  }, []);
+
   return {
     primaryVideoRef,
     secondaryVideoRef,
@@ -443,5 +447,6 @@ export function useGaplessPlayback({
     currentTime,
     seekTo,
     duration: totalDuration,
+    resetCache,
   };
 }

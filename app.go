@@ -2101,21 +2101,26 @@ func (a *App) RenderRemoteShot(projectId string, sceneId string, shotId string, 
 	}
 
 	// 4. SAVE THE VIDEO FILE TO THE CORRECT SCENE FOLDER
-	filename := fmt.Sprintf("shot_%s_wan_%d.mp4", shotId, time.Now().Unix())
-	
-	// FIXED: Uses getAppDir to save in Documents/MotionStudio/[Project]/scenes/[Scene]
-	outputDir := filepath.Join(a.getAppDir(), projectId, "scenes", sceneId) 
-	outputPath := filepath.Join(outputDir, filename)
+    filename := fmt.Sprintf("%s.mp4", shotId) 
+    
+    // Path: Documents/MotionStudio/[ProjectID]/scenes/[SceneID]/[ShotID].mp4
+    outputDir := filepath.Join(a.getAppDir(), projectId, "scenes", sceneId) 
+    outputPath := filepath.Join(outputDir, filename)
 
-	// Ensure the folder exists
-	os.MkdirAll(outputDir, 0755)
+    // Ensure the scene folder exists
+    os.MkdirAll(outputDir, 0755)
 
-	outFile, err := os.Create(outputPath)
-	if err != nil {
-		return Shot{}, fmt.Errorf("failed to create file: %w", err)
-	}
-	defer outFile.Close()
-	io.Copy(outFile, resp.Body)
+    outFile, err := os.Create(outputPath)
+    if err != nil {
+        return Shot{}, fmt.Errorf("failed to create file: %w", err)
+    }
+    defer outFile.Close()
+    
+    // This streams the video data from the cloud response into your local file
+    _, err = io.Copy(outFile, resp.Body)
+    if err != nil {
+        return Shot{}, fmt.Errorf("failed to save video data: %w", err)
+    }
 
 	// 5. Update only the fields we need to change
 	// This preserves your Name, Prompt, and Seed exactly as they were 

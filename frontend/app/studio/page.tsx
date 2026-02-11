@@ -416,6 +416,7 @@ function StudioContent() {
     togglePlay,
     currentTime,
     seekTo,
+    resetCache,
   } = useGaplessPlayback({
     tracks: playbackTracks,
     trackSettings,
@@ -537,6 +538,48 @@ function StudioContent() {
       });
     } catch (e) {
       console.error("Failed to refresh blob:", path, e);
+    }
+  };
+
+  // --- PREVIEW PLAYER ---
+  const previewLoopRef = useRef<number>();
+
+  const handlePlayShot = async (shot: Shot) => {
+    if (isPlaying) togglePlay();
+    resetCache(); // Invalidate playback cache so timeline reloads correctly later
+
+    if (previewLoopRef.current) cancelAnimationFrame(previewLoopRef.current);
+
+    const path = shot.outputVideo || shot.audioPath;
+    if (!path) return;
+
+    let src = videoBlobs.get(path);
+    if (!src) {
+      src = `http://localhost:3456/video/${path.replace(/\\/g, "/")}`;
+    }
+
+    const video = primaryVideoRef.current;
+    const canvas = canvasRef.current;
+
+    if (video && canvas) {
+      video.src = src;
+      video.currentTime = 0;
+      video.volume = masterVolume;
+
+      try {
+        await video.play();
+        const loop = () => {
+          if (video.paused || video.ended) return;
+          const ctx = canvas.getContext("2d");
+          if (ctx) {
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          }
+          previewLoopRef.current = requestAnimationFrame(loop);
+        };
+        loop();
+      } catch (e) {
+        console.error("Preview failed", e);
+      }
     }
   };
 
@@ -1505,6 +1548,7 @@ function StudioContent() {
                   handleAddShot={handleAddShot}
                   handleExtendShot={handleExtendShot}
                   handleDeleteShot={handleDeleteShot}
+                  handlePlayShot={handlePlayShot}
                   projectId={project.id}
                 />
               </div>
