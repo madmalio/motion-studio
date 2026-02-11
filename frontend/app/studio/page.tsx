@@ -224,6 +224,7 @@ function StudioContent() {
   const [scene, setScene] = useState<Scene | null>(null);
   const [shots, setShots] = useState<Shot[]>([]);
   const [activeShotId, setActiveShotId] = useState<string | null>(null);
+  const [previewingShotId, setPreviewingShotId] = useState<string | null>(null);
   const [isRendering, setIsRendering] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [showExportModal, setShowExportModal] = useState(false);
@@ -542,16 +543,46 @@ function StudioContent() {
   };
 
   // --- PREVIEW PLAYER ---
-  const previewLoopRef = useRef<number>();
+  const previewLoopRef = useRef<number | null>(null);
 
   const handlePlayShot = async (shot: Shot) => {
+    // 1. Stop Main Timeline if playing
     if (isPlaying) togglePlay();
-    resetCache(); // Invalidate playback cache so timeline reloads correctly later
 
-    if (previewLoopRef.current) cancelAnimationFrame(previewLoopRef.current);
+    // 2. TOGGLE OFF: If clicking the same shot, stop it.
+    if (previewingShotId === shot.id) {
+      const video = primaryVideoRef.current;
+      if (video) {
+        video.pause();
+        video.currentTime = 0;
+      }
+      if (previewLoopRef.current) {
+        cancelAnimationFrame(previewLoopRef.current);
+        previewLoopRef.current = null;
+      }
+      // Clear canvas
+      const canvas = canvasRef.current;
+      const ctx = canvas?.getContext("2d");
+      if (ctx && canvas) ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      setPreviewingShotId(null);
+      return;
+    }
+
+    // 3. START PLAYBACK
+    resetCache();
+    if (previewLoopRef.current) {
+      cancelAnimationFrame(previewLoopRef.current);
+      previewLoopRef.current = null;
+    }
+
+    setPreviewingShotId(shot.id);
 
     const path = shot.outputVideo || shot.audioPath;
-    if (!path) return;
+    if (!path) {
+      setPreviewingShotId(null);
+      return;
+    }
 
     let src = videoBlobs.get(path);
     if (!src) {
@@ -566,6 +597,14 @@ function StudioContent() {
       video.currentTime = 0;
       video.volume = masterVolume;
 
+      // Auto-reset state when video ends
+      const onEnded = () => {
+        setPreviewingShotId(null);
+        if (previewLoopRef.current)
+          cancelAnimationFrame(previewLoopRef.current);
+      };
+      video.addEventListener("ended", onEnded, { once: true });
+
       try {
         await video.play();
         const loop = () => {
@@ -579,6 +618,7 @@ function StudioContent() {
         loop();
       } catch (e) {
         console.error("Preview failed", e);
+        setPreviewingShotId(null);
       }
     }
   };
@@ -1550,6 +1590,7 @@ function StudioContent() {
                   handleDeleteShot={handleDeleteShot}
                   handlePlayShot={handlePlayShot}
                   projectId={project.id}
+                  previewingShotId={previewingShotId}
                 />
               </div>
               <div

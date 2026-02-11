@@ -38,6 +38,7 @@ interface SettingsContextType {
   refreshWorkflows: () => Promise<void>;
   status: "idle" | "testing" | "success" | "error";
   remoteUrl: string;
+  remoteStatus: "idle" | "testing" | "success" | "error";
 }
 
 const SettingsContext = createContext<SettingsContextType | undefined>(
@@ -64,6 +65,9 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
   >("idle");
 
   const [remoteUrl, setRemoteUrl] = useState("");
+  const [remoteStatus, setRemoteStatus] = useState<
+    "idle" | "testing" | "success" | "error"
+  >("idle");
 
   // Load saved URL on startup
   useEffect(() => {
@@ -132,6 +136,37 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     const interval = setInterval(heartbeat, 3000);
     return () => clearInterval(interval);
   }, [status]);
+
+  // 4. REMOTE URL CHECKER
+  useEffect(() => {
+    if (!isOpen) return;
+    if (!remoteUrl) {
+      setRemoteStatus("idle");
+      return;
+    }
+    setRemoteStatus("testing");
+
+    const timer = setTimeout(() => {
+      handleTestRemote();
+    }, 800);
+
+    return () => clearTimeout(timer);
+  }, [remoteUrl, isOpen]);
+
+  const handleTestRemote = async () => {
+    if (!remoteUrl) return;
+    setRemoteStatus("testing");
+    try {
+      // Attempt to reach the endpoint. Even a 4xx/5xx response means the server is reachable.
+      await fetch(remoteUrl, {
+        method: "POST",
+        body: JSON.stringify({ ping: true }),
+      });
+      setRemoteStatus("success");
+    } catch (e) {
+      setRemoteStatus("error");
+    }
+  };
 
   const refreshWorkflows = async () => {
     // The backend now returns { id, name, hasAudio }
@@ -218,6 +253,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
         refreshWorkflows,
         status,
         remoteUrl,
+        remoteStatus,
       }}
     >
       {children}
@@ -338,16 +374,57 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
                       <label className="text-xs font-bold text-zinc-500 uppercase tracking-wider flex items-center gap-2">
                         <Cloud size={12} /> Wan 2.2 Remote URL
                       </label>
-                      <input
-                        className="w-full bg-zinc-900 border border-zinc-800 rounded p-2 text-sm text-white outline-none focus:border-[#D2FF44] font-mono placeholder-zinc-600"
-                        value={remoteUrl}
-                        onChange={(e) => setRemoteUrl(e.target.value)}
-                        placeholder="https://your-app-name.modal.run"
-                      />
-                      <p className="text-[10px] text-zinc-500">
-                        Paste your Modal.com function URL here to enable cloud
-                        rendering.
-                      </p>
+                      <div className="relative group">
+                        <input
+                          className={`w-full bg-zinc-900 border rounded p-2 pr-10 text-sm text-white outline-none font-mono placeholder-zinc-600 transition-colors
+                            ${remoteStatus === "success" ? "border-[#D2FF44]/50 focus:border-[#D2FF44]" : ""}
+                            ${remoteStatus === "error" ? "border-red-500/50 focus:border-red-500" : ""}
+                            ${remoteStatus === "testing" || remoteStatus === "idle" ? "border-zinc-800 focus:border-zinc-600" : ""}
+                          `}
+                          value={remoteUrl}
+                          onChange={(e) => setRemoteUrl(e.target.value)}
+                          placeholder="https://your-app-name.modal.run"
+                        />
+                        <div className="absolute right-3 top-2.5">
+                          {remoteStatus === "testing" && (
+                            <Loader2
+                              size={16}
+                              className="animate-spin text-zinc-500"
+                            />
+                          )}
+                          {remoteStatus === "success" && (
+                            <CheckCircle2
+                              size={16}
+                              className="text-[#D2FF44]"
+                            />
+                          )}
+                          {remoteStatus === "error" && (
+                            <button
+                              onClick={handleTestRemote}
+                              className="text-red-500 hover:text-white transition-colors animate-in zoom-in duration-200"
+                            >
+                              <RefreshCw size={16} />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                      <div className="h-5">
+                        {remoteStatus === "testing" && (
+                          <p className="text-[10px] text-zinc-500 animate-pulse">
+                            Checking remote endpoint...
+                          </p>
+                        )}
+                        {remoteStatus === "success" && (
+                          <p className="text-[10px] text-[#D2FF44]">
+                            Connected to Cloud GPU
+                          </p>
+                        )}
+                        {remoteStatus === "error" && (
+                          <p className="text-[10px] text-red-500">
+                            Unreachable. Check URL or CORS settings.
+                          </p>
+                        )}
+                      </div>
                     </div>
                   </div>
                 )}

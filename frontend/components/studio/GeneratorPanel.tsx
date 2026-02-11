@@ -40,7 +40,8 @@ const GeneratorPanel = memo(function GeneratorPanel({
   setVideoSrc,
   primaryVideoRef,
 }: any) {
-  const { workflows, openSettings, status, remoteUrl } = useSettings();
+  const { workflows, openSettings, status, remoteUrl, remoteStatus } =
+    useSettings();
   const [selectedWorkflow, setSelectedWorkflow] = useState<string>("");
 
   // --- PROGRESS STATE ---
@@ -68,6 +69,10 @@ const GeneratorPanel = memo(function GeneratorPanel({
   // Determine if audio is needed
   const currentWorkflowData = workflows.find((w) => w.id === selectedWorkflow);
   const showAudioInput = currentWorkflowData?.hasAudio;
+
+  const isCloud = selectedWorkflow === "wan-2.2-cloud";
+  const isReady = isCloud ? remoteStatus === "success" : status === "success";
+  const displayStatus = isCloud ? remoteStatus : status;
 
   // --- LISTENER (WEBSOCKET PROGRESS) ---
   useEffect(() => {
@@ -204,25 +209,28 @@ const GeneratorPanel = memo(function GeneratorPanel({
         <div className="flex items-center justify-between">
           <h2 className="text-sm font-bold text-zinc-100">Generator</h2>
           <div
-            onClick={() => status === "error" && openSettings("general")}
+            onClick={() => displayStatus === "error" && openSettings("general")}
             className={`
                   flex items-center gap-2 px-2 py-0.5 rounded-full border cursor-default transition-all
-                  ${status === "success" ? "border-[#D2FF44]/30 bg-[#D2FF44]/5 text-[#D2FF44]" : ""}
-                  ${status === "error" ? "border-red-500/30 bg-red-500/5 text-red-500 cursor-pointer hover:bg-red-500/10" : ""}
-                  ${status === "testing" || status === "idle" ? "border-zinc-700 bg-zinc-900 text-zinc-500" : ""}
+                  ${displayStatus === "success" ? "border-[#D2FF44]/30 bg-[#D2FF44]/5 text-[#D2FF44]" : ""}
+                  ${displayStatus === "error" ? "border-red-500/30 bg-red-500/5 text-red-500 cursor-pointer hover:bg-red-500/10" : ""}
+                  ${displayStatus === "testing" || displayStatus === "idle" ? "border-zinc-700 bg-zinc-900 text-zinc-500" : ""}
               `}
           >
-            {status === "testing" ? (
+            {displayStatus === "testing" ? (
               <Loader2 size={8} className="animate-spin" />
             ) : (
               <div
-                className={`w-1.5 h-1.5 rounded-full ${status === "success" ? "bg-[#D2FF44]" : status === "error" ? "bg-red-500" : "bg-zinc-600"}`}
+                className={`w-1.5 h-1.5 rounded-full ${displayStatus === "success" ? "bg-[#D2FF44]" : displayStatus === "error" ? "bg-red-500" : "bg-zinc-600"}`}
               />
             )}
             <span className="text-[9px] font-bold uppercase tracking-wider">
-              {status === "success" && "System Ready"}
-              {status === "error" && "Offline"}
-              {(status === "testing" || status === "idle") && "Connecting..."}
+              {displayStatus === "success" &&
+                (isCloud ? "Cloud Ready" : "System Ready")}
+              {displayStatus === "error" &&
+                (isCloud ? "Cloud Offline" : "System Offline")}
+              {(displayStatus === "testing" || displayStatus === "idle") &&
+                (isCloud ? "Connecting Cloud..." : "Connecting...")}
             </span>
           </div>
         </div>
@@ -424,15 +432,16 @@ const GeneratorPanel = memo(function GeneratorPanel({
             ) : (
               <button
                 onClick={handleRenderShot}
-                disabled={status !== "success"}
+                disabled={!isReady}
                 className={`w-full py-3 rounded font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-2 transition-all
-                      ${status !== "success" ? "bg-zinc-800 text-zinc-500 cursor-not-allowed" : "bg-[#D2FF44] text-black hover:bg-[#c2eb39]"}`}
+                      ${!isReady ? "bg-zinc-800 text-zinc-500 cursor-not-allowed" : "bg-[#D2FF44] text-black hover:bg-[#c2eb39]"}`}
               >
-                <Play
-                  size={14}
-                  fill={status === "success" ? "black" : "gray"}
-                />
-                {status === "success" ? "Render Shot" : "System Offline"}
+                <Play size={14} fill={isReady ? "black" : "gray"} />
+                {isReady
+                  ? "Render Shot"
+                  : isCloud
+                    ? "Cloud Offline"
+                    : "System Offline"}
               </button>
             )}
           </div>

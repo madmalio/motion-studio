@@ -7,6 +7,7 @@ import {
   Link as LinkIcon,
   AlertCircle,
   Play,
+  Square,
 } from "lucide-react";
 import { memo } from "react";
 
@@ -18,6 +19,7 @@ const DraggableShotItem = memo(function DraggableShotItem({
   onExtend,
   onDelete,
   onPlay,
+  isPlaying,
 }: any) {
   const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
     id: `library-${shot.id}`,
@@ -59,9 +61,13 @@ const DraggableShotItem = memo(function DraggableShotItem({
               onPlay ? onPlay() : onClick(); // Triggers the preview
             }}
             className="bg-black/60 hover:bg-[#D2FF44] hover:text-black text-white p-1 rounded backdrop-blur"
-            title="Play Preview"
+            title={isPlaying ? "Stop Preview" : "Play Preview"}
           >
-            <Play size={10} fill="currentColor" />
+            {isPlaying ? (
+              <Square size={10} fill="currentColor" />
+            ) : (
+              <Play size={10} fill="currentColor" />
+            )}
           </button>
         )}
 
@@ -101,6 +107,7 @@ const LibraryPanel = memo(function LibraryPanel({
   handleExtendShot,
   handleDeleteShot,
   handlePlayShot,
+  previewingShotId,
 }: any) {
   return (
     <div className="h-full flex flex-col">
@@ -129,6 +136,7 @@ const LibraryPanel = memo(function LibraryPanel({
               }}
               onDelete={(e: any) => handleDeleteShot(e, shot.id)}
               onPlay={() => handlePlayShot && handlePlayShot(shot)}
+              isPlaying={previewingShotId === shot.id}
             />
           ))}
           <button
