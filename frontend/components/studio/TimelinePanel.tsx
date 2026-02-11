@@ -363,7 +363,7 @@ const TimelineItemComponent = memo(function TimelineItemComponent({
       globalSplitHover.pairId === item.pairId
     ) {
       const relativeTime = globalSplitHover.time - item.startTime;
-      if (relativeTime >= 0 && relativeTime <= (item.duration || 4)) {
+      if (relativeTime >= 0 && relativeTime <= width / zoom) {
         showSplitLine = true;
         splitLineX = relativeTime * zoom;
       }
@@ -538,7 +538,12 @@ const TrackDroppable = memo(function TrackDroppable({
           siblings={items} // <--- ADD THIS LINE (Pass neighbors for snapping)
           isActive={item.id === activeShotId}
           trackIndex={trackIndex}
-          width={(item.duration || 4) * zoom}
+          width={
+            (item.duration === 4 && (item.sourceDuration || item.maxDuration)
+              ? item.sourceDuration || item.maxDuration
+              : item.duration || item.sourceDuration || item.maxDuration || 4) *
+            zoom
+          }
           left={(item.startTime || 0) * zoom}
           onRemoveItem={onRemoveItem}
           onUpdateItem={onUpdateItem}

@@ -875,7 +875,7 @@ function StudioContent() {
 
     // 2. Update Timeline
     setTracks((prev) => {
-      const newTracks = [...prev];
+      let newTracks = [...prev];
       const track = newTracks[trackIndex];
       const startTime = round(
         sourceItem!.startTime + (sourceItem!.duration || 0),
@@ -894,6 +894,52 @@ function StudioContent() {
       };
 
       newTracks[trackIndex] = applyOverwrite(track, newItem);
+
+      // Auto-pair Audio Track (V3 -> A3)
+      const targetTrackName = trackSettings[trackIndex]?.name || "V1";
+      const isVideoTrack =
+        trackSettings[trackIndex]?.type === "video" ||
+        !targetTrackName.toUpperCase().startsWith("A");
+
+      if (isVideoTrack) {
+        const match = targetTrackName.match(/V(\d+)/i);
+        const trackNum = match ? match[1] : "1";
+        const targetAudioName = `A${trackNum}`;
+
+        let audioTrackIndex = trackSettings.findIndex(
+          (t) =>
+            (t.name || "").trim().toUpperCase() ===
+            targetAudioName.toUpperCase(),
+        );
+
+        if (audioTrackIndex === -1) {
+          newTracks = [...newTracks, []];
+          audioTrackIndex = newTracks.length - 1;
+          setTrackSettings((prevSettings) => [
+            ...prevSettings,
+            {
+              locked: false,
+              visible: true,
+              name: targetAudioName,
+              height: 64,
+              type: "audio",
+            },
+          ]);
+        }
+        const audioItem: TimelineItem = {
+          ...newItem,
+          timelineId: crypto.randomUUID(),
+          pairId: newItem.pairId,
+          trackIndex: audioTrackIndex,
+          previewBase64: undefined,
+          name: `AUDIO: ${newItem.name}`,
+        };
+        newTracks[audioTrackIndex] = applyOverwrite(
+          newTracks[audioTrackIndex],
+          audioItem,
+        );
+      }
+
       return newTracks;
     });
 
@@ -944,8 +990,12 @@ function StudioContent() {
     );
   };
 
-  const handleUpdateItem = (id: string, updates: Partial<TimelineItem>) => {
-    recordHistory();
+  const handleUpdateItem = (
+    id: string,
+    updates: Partial<TimelineItem>,
+    skipHistory = false,
+  ) => {
+    if (!skipHistory) recordHistory();
     setTracks((prev) =>
       prev.map((track) =>
         track.map((item) =>
@@ -1257,13 +1307,18 @@ function StudioContent() {
       const shotData =
         active.data.current?.shot || shots.find((s) => s.id === active.id);
       if (!shotData) return;
+      const initialDuration =
+        (shotData as any).sourceDuration ||
+        (shotData as any).maxDuration ||
+        shotData.duration ||
+        4;
       const newItem: TimelineItem = {
         ...shotData,
         timelineId: crypto.randomUUID(),
         pairId: crypto.randomUUID(),
-        duration: shotData.duration || 4,
+        duration: initialDuration,
         trackIndex: targetTrackIndex,
-        maxDuration: shotData.duration || 4,
+        maxDuration: initialDuration,
         startTime: newStartTime,
         volume: 1,
         muted: false,
@@ -1316,6 +1371,38 @@ function StudioContent() {
         );
         return newTracks;
       });
+
+      // Auto-fix duration from actual media metadata
+      const mediaPath = newItem.outputVideo || newItem.audioPath;
+      if (mediaPath) {
+        const blobUrl =
+          videoBlobs.get(mediaPath) ||
+          `http://localhost:3456/video/${mediaPath.replace(/\\/g, "/")}`;
+        const tempVideo = document.createElement("video");
+        tempVideo.preload = "metadata";
+        tempVideo.onloadedmetadata = () => {
+          if (
+            Number.isFinite(tempVideo.duration) &&
+            Math.abs(tempVideo.duration - initialDuration) > 0.1
+          ) {
+            setTracks((prev) =>
+              prev.map((track) =>
+                track.map((item) => {
+                  if (item.pairId === newItem.pairId) {
+                    return {
+                      ...item,
+                      duration: tempVideo.duration,
+                      maxDuration: tempVideo.duration,
+                    };
+                  }
+                  return item;
+                }),
+              ),
+            );
+          }
+        };
+        tempVideo.src = blobUrl;
+      }
       return;
     }
 
