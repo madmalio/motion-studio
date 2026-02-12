@@ -553,7 +553,6 @@ const TrackDroppable = memo(function TrackDroppable({
           onSplitItem={onSplitItem}
           onExtend={onExtend}
           locked={locked}
-          videoBlobs={videoBlobs}
           isAudioTrack={isAudioTrack}
           setGlobalSplitHover={setGlobalSplitHover}
           globalSplitHover={globalSplitHover}
@@ -660,7 +659,6 @@ const TrackRow = memo(function TrackRow({
   onToggleTrackVisibility,
   onResizeTrack,
   isAudio,
-  currentTime,
   setGlobalSplitHover,
   globalSplitHover,
 }: any) {
@@ -1419,7 +1417,6 @@ export default function TimelinePanel({
               zoom={zoom}
               scrollLeft={scrollLeft}
               contentWidth={contentWidthPx}
-              currentTime={currentTime}
               activeShotId={activeShotId}
               activeTool={activeTool}
               onRemoveItem={onRemoveItem}
@@ -1462,7 +1459,6 @@ export default function TimelinePanel({
               zoom={zoom}
               scrollLeft={scrollLeft}
               contentWidth={contentWidthPx}
-              currentTime={currentTime}
               activeShotId={activeShotId}
               activeTool={activeTool}
               onRemoveItem={onRemoveItem}

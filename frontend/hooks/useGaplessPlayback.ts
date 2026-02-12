@@ -25,6 +25,7 @@ interface UseGaplessPlaybackProps {
   totalDuration: number;
   videoBlobs?: Map<string, string>;
   volume: number;
+  previewUrl?: string | null; // <--- NEW PROP
 }
 
 // HELPER: Convert local file path to a browser-accessible URL
@@ -43,6 +44,7 @@ export function useGaplessPlayback({
   totalDuration,
   videoBlobs,
   volume,
+  previewUrl,
 }: UseGaplessPlaybackProps) {
   const primaryVideoRef = useRef<HTMLVideoElement>(null);
   const secondaryVideoRef = useRef<HTMLVideoElement>(null);
@@ -173,6 +175,20 @@ export function useGaplessPlayback({
     startOffset: number = 0,
     forceSeek: boolean = false,
   ) => {
+    // --- PREVIEW MODE OVERRIDE ---
+    if (previewUrl && playerType === "primary") {
+      const videoEl = primaryVideoRef.current;
+      if (videoEl) {
+        if (videoEl.src !== previewUrl) {
+          videoEl.src = previewUrl;
+          videoEl.load();
+        }
+        // We don't return here, we let the logic below handle volume/seeking if needed,
+        // but mostly we just want to ensure the SRC is the preview file.
+        return; // <--- ADD THIS RETURN to prevent overwriting src below
+      }
+    }
+
     const videoEl =
       playerType === "primary"
         ? primaryVideoRef.current
@@ -223,6 +239,15 @@ export function useGaplessPlayback({
       const ctx = canvas.getContext("2d", { alpha: false });
       if (!ctx) return;
 
+      // --- PREVIEW MODE RENDER ---
+      if (previewUrl && primaryVideoRef.current) {
+        const vid = primaryVideoRef.current;
+        if (vid.readyState >= 2) {
+          ctx.drawImage(vid, 0, 0, canvas.width, canvas.height);
+        }
+        return;
+      }
+
       const { videoData } = getShotAtTime(time);
 
       if (!videoData) {
@@ -262,36 +287,51 @@ export function useGaplessPlayback({
       const delta = (now - lastTick) / 1000;
       lastTick = now;
 
-      // --- SYNC CHECK: WAIT FOR BUFFERING ---
-      // Check if the ACTIVE media element is actually ready to play.
-      // If it is seeking or buffering, we DO NOT advance the time.
-      const { videoData, audioData } = getShotAtTime(currentTimeRef.current);
-      let activeEl = null;
-
-      // Determine "Leader" element
-      if (videoData) activeEl = primaryVideoRef.current;
-      else if (audioData) activeEl = secondaryVideoRef.current;
-
-      if (activeEl) {
-        // readyState 3 = HAVE_FUTURE_DATA (Smooth)
-        // readyState 2 = HAVE_CURRENT_DATA (Frame available)
-        // If we are less than 3, or seeking, we STALL.
-        if (activeEl.readyState < 3 || activeEl.seeking) {
-          // By returning here, we effectively PAUSE the timeline,
-          // but because we updated `lastTick` above, the delta won't accumulate.
-          // This prevents the "Jump" when playback resumes.
-          animationFrameId = requestAnimationFrame(loop);
-          return;
-        }
-      }
-      // --------------------------------------
-
       let nextTime = currentTimeRef.current + delta;
 
       if (nextTime >= totalDuration && totalDuration > 0) {
         setIsPlaying(false);
         return;
       }
+
+      // --- PREVIEW MODE LOOP ---
+      if (previewUrl) {
+        const vid = primaryVideoRef.current;
+        if (vid) {
+          // Sync video player to timeline time
+          if (Math.abs(vid.currentTime - nextTime) > 0.2) {
+            vid.currentTime = nextTime;
+          }
+          if (vid.paused) vid.play().catch(() => {});
+        }
+        // Skip the complex shot loading logic below
+      } else {
+        // OPTIMIZATION: Immediate Source Switching
+        // Detect shot change before render to save ~16ms latency
+        const nextShot = getShotAtTime(nextTime);
+        if (
+          nextShot.videoData?.shot &&
+          loadedShotIds.current.primary !== nextShot.videoData.shot.id
+        ) {
+          loadShot(
+            nextShot.videoData.shot,
+            "primary",
+            nextShot.videoData.offset ?? 0,
+            true,
+          );
+        }
+        if (
+          nextShot.audioData?.shot &&
+          loadedShotIds.current.secondary !== nextShot.audioData.shot.id
+        ) {
+          loadShot(
+            nextShot.audioData.shot,
+            "secondary",
+            nextShot.audioData.offset ?? 0,
+            true,
+          );
+        }
+      } // End else
 
       currentTimeRef.current = nextTime;
       setCurrentTime(nextTime);
@@ -303,10 +343,27 @@ export function useGaplessPlayback({
     animationFrameId = requestAnimationFrame(loop);
 
     return () => cancelAnimationFrame(animationFrameId);
-  }, [isPlaying, totalDuration, renderFrame, getShotAtTime]);
+  }, [isPlaying, totalDuration, renderFrame, getShotAtTime, previewUrl]); // <--- ADD previewUrl
 
   // 4. SYNC PLAYERS
   useEffect(() => {
+    // --- PREVIEW MODE SYNC ---
+    if (previewUrl) {
+      const p = primaryVideoRef.current;
+      if (p) {
+        // Only force seek if drift is significant (e.g. user scrubbed timeline)
+        if (Math.abs(p.currentTime - currentTime) > 0.25) {
+          p.currentTime = currentTime;
+        }
+        if (isPlaying && p.paused) p.play().catch(() => {});
+        if (!isPlaying && !p.paused) p.pause();
+
+        if (!isPlaying) requestAnimationFrame(() => renderFrame(currentTime));
+      }
+      // We still let audio logic run below if needed, or we can return early if preview includes audio
+      return;
+    }
+
     const { videoData, audioData } = getShotAtTime(currentTime);
 
     const p = primaryVideoRef.current;
@@ -392,7 +449,14 @@ export function useGaplessPlayback({
         s.muted = true;
       }
     }
-  }, [currentTime, isPlaying, getShotAtTime, renderFrame, trackSettings]);
+  }, [
+    currentTime,
+    isPlaying,
+    getShotAtTime,
+    renderFrame,
+    trackSettings,
+    previewUrl,
+  ]); // <--- ADD previewUrl
 
   // 5. EVENT LISTENERS
   useEffect(() => {

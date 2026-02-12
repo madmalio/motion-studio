@@ -189,6 +189,7 @@ const GeneratorPanel = memo(function GeneratorPanel({
         const b64 = await ReadImageBase64(updatedShot.outputVideo);
         setVideoCache(updatedShot.id, b64);
         setVideoSrc(b64);
+        (updatedShot as any).previewBase64 = b64;
       }
       updateActiveShot(updatedShot);
     } catch (err) {

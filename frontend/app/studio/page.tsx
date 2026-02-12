@@ -231,6 +231,7 @@ function StudioContent() {
   const [isExporting, setIsExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
   const [exportStatus, setExportStatus] = useState("");
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null); // <--- NEW STATE
   const [exportOptions, setExportOptions] = useState({
     format: "mp4",
     includeVideo: true,
@@ -424,6 +425,7 @@ function StudioContent() {
     totalDuration,
     videoBlobs,
     volume: masterVolume,
+    previewUrl, // <--- PASS TO HOOK
   });
 
   // --- AUTO-SAVE ---
@@ -445,6 +447,29 @@ function StudioContent() {
         trackSettings,
       } as any);
     }
+  }, [tracks, trackSettings, projectId, sceneId]);
+
+  // --- SMART RENDER CACHE ---
+  useEffect(() => {
+    if (!projectId || !sceneId || !initialized.current) return;
+
+    // Debounce render
+    const timer = setTimeout(async () => {
+      // Only render if we have clips
+      const hasClips = tracks.some((t) => t.length > 0);
+      if (hasClips) {
+        // Call backend to generate preview.mp4
+        // Note: We cast to 'any' to bypass strict type checking for the new function if types aren't updated yet
+        const url = await (window as any).go.main.App.RenderTimelinePreview(
+          projectId,
+          sceneId,
+          { tracks, trackSettings },
+        );
+        if (url) setPreviewUrl(url);
+      }
+    }, 1000); // 1 second debounce
+
+    return () => clearTimeout(timer);
   }, [tracks, trackSettings, projectId, sceneId]);
 
   // --- SYNC NEW VIDEOS TO BLOBS ---
@@ -983,9 +1008,17 @@ function StudioContent() {
     );
     setTracks((prev) =>
       prev.map((track) =>
-        track.map((item) =>
-          item.id === activeShotId ? { ...item, ...updates } : item,
-        ),
+        track.map((item) => {
+          if (item.id === activeShotId) {
+            const newItem = { ...item, ...updates };
+            if (updates.duration) {
+              newItem.maxDuration = updates.duration;
+              newItem.duration = updates.duration;
+            }
+            return newItem;
+          }
+          return item;
+        }),
       ),
     );
   };

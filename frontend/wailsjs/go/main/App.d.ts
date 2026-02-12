@@ -56,6 +56,8 @@ export function RenderRemoteShot(arg1:string,arg2:string,arg3:string,arg4:string
 
 export function RenderShot(arg1:string,arg2:string,arg3:string,arg4:string):Promise<main.Shot>;
 
+export function RenderTimelinePreview(arg1:string,arg2:string,arg3:main.TimelineData):Promise<string>;
+
 export function SaveShots(arg1:string,arg2:string,arg3:Array<main.Shot>):Promise<void>;
 
 export function SaveTimeline(arg1:string,arg2:string,arg3:main.TimelineData):Promise<void>;
@@ -71,6 +73,8 @@ export function SetComfyURL(arg1:string):Promise<void>;
 export function SetProjectThumbnail(arg1:string,arg2:string):Promise<void>;
 
 export function TestComfyConnection():Promise<boolean>;
+
+export function TestRemoteConnection(arg1:string):Promise<boolean>;
 
 export function UpdateProject(arg1:main.Project):Promise<void>;
 

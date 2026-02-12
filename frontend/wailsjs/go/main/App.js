@@ -110,6 +110,10 @@ export function RenderShot(arg1, arg2, arg3, arg4) {
   return window['go']['main']['App']['RenderShot'](arg1, arg2, arg3, arg4);
 }
 
+export function RenderTimelinePreview(arg1, arg2, arg3) {
+  return window['go']['main']['App']['RenderTimelinePreview'](arg1, arg2, arg3);
+}
+
 export function SaveShots(arg1, arg2, arg3) {
   return window['go']['main']['App']['SaveShots'](arg1, arg2, arg3);
 }
@@ -140,6 +144,10 @@ export function SetProjectThumbnail(arg1, arg2) {
 
 export function TestComfyConnection() {
   return window['go']['main']['App']['TestComfyConnection']();
+}
+
+export function TestRemoteConnection(arg1) {
+  return window['go']['main']['App']['TestRemoteConnection'](arg1);
 }
 
 export function UpdateProject(arg1) {
