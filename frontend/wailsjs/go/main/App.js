@@ -74,6 +74,10 @@ export function GetTimeline(arg1, arg2) {
   return window['go']['main']['App']['GetTimeline'](arg1, arg2);
 }
 
+export function GetVideoFPS(arg1) {
+  return window['go']['main']['App']['GetVideoFPS'](arg1);
+}
+
 export function GetWorkflows() {
   return window['go']['main']['App']['GetWorkflows']();
 }
@@ -108,6 +112,10 @@ export function RenderRemoteShot(arg1, arg2, arg3, arg4, arg5, arg6) {
 
 export function RenderShot(arg1, arg2, arg3, arg4) {
   return window['go']['main']['App']['RenderShot'](arg1, arg2, arg3, arg4);
+}
+
+export function RenderTimeline(arg1) {
+  return window['go']['main']['App']['RenderTimeline'](arg1);
 }
 
 export function RenderTimelinePreview(arg1, arg2, arg3) {

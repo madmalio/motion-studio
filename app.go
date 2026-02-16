@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	stdRuntime "runtime"
 	"strconv"
 	"strings"
 	"sort"
@@ -222,9 +223,8 @@ func (a *App) RenderTimelinePreview(projectId string, sceneId string, timeline T
 		"-preset", "ultrafast", 
 		"-crf", "28", 
 		"-vf", "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2",
-		"-r", "30",              // Force constant 30fps for smooth browser playback
-		"-pix_fmt", "yuv420p",   // Ensure standard pixel format (fixes color/decoder glitches)
-		"-an", 
+		"-r", "30",
+		"-pix_fmt", "yuv420p",
 		previewPath,
 	)
 
@@ -2190,8 +2190,32 @@ func StartStreamServer() {
 	// Serve local video files for pre-loading
 	mux.HandleFunc("/video/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		// /video/C:/Path/To/File.mp4 -> C:/Path/To/File.mp4
-		path := strings.TrimPrefix(r.URL.Path, "/video/")
+
+		// 1. Get raw path
+		urlPath := r.URL.Path
+		path := strings.TrimPrefix(urlPath, "/video/")
+
+		// Debug Log: Check VS Code terminal to see if path is correct
+		fmt.Printf("📂 Serving Request: %s -> %s\n", urlPath, path)
+
+		// 2. Set Content-Type Explicitly
+		// Browsers (Chrome) often block audio if MIME type is missing
+		ext := strings.ToLower(filepath.Ext(path))
+		switch ext {
+		case ".mp3":
+			w.Header().Set("Content-Type", "audio/mpeg")
+		case ".wav":
+			w.Header().Set("Content-Type", "audio/wav")
+		case ".m4a":
+			w.Header().Set("Content-Type", "audio/mp4")
+		case ".mp4":
+			w.Header().Set("Content-Type", "video/mp4")
+		case ".png":
+			w.Header().Set("Content-Type", "image/png")
+		case ".jpg", ".jpeg":
+			w.Header().Set("Content-Type", "image/jpeg")
+		}
+
 		http.ServeFile(w, r, path)
 	})
 
@@ -2282,4 +2306,103 @@ func (a *App) RenderRemoteShot(projectId string, sceneId string, shotId string, 
 	a.SaveShots(projectId, sceneId, shots)
 
 	return shots[shotIndex], nil
+}
+
+// RenderTimeline accepts the JSON string from the frontend and triggers the Remotion render
+func (a *App) RenderTimeline(manifestJson string) (string, error) {
+	// 1. Determine paths
+	// We assume 'motion-engine' is a sibling folder to this Wails project
+	wd, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("failed to get working directory: %w", err)
+	}
+
+	// Go up one level to find the sibling folder
+	engineDir := filepath.Join(wd, "..", "motion-engine")
+	
+	// Define the files
+	manifestPath := filepath.Join(engineDir, "render-manifest.json")
+	outputFilename := fmt.Sprintf("render-%d.mp4", time.Now().Unix())
+	outputVideoPath := filepath.Join(wd, outputFilename) // Save MP4 in the project root
+
+	// 2. Write the JSON manifest file
+	// Remotion will read this file to know what to render
+	err = os.WriteFile(manifestPath, []byte(manifestJson), 0644)
+	if err != nil {
+		return "", fmt.Errorf("failed to write manifest file: %w", err)
+	}
+
+	println("🚀 Starting Remotion Render...")
+	println("📂 Engine Directory:", engineDir)
+	println("📄 Manifest:", manifestPath)
+	println("asd Output:", outputVideoPath)
+
+	// 3. Prepare the Command
+	// Command: npx remotion render HelloWorld [OutputPath] --props=[ManifestPath]
+	var cmd *exec.Cmd
+
+	if stdRuntime.GOOS == "windows" {
+		cmd = exec.Command("cmd", "/C", "npx", "remotion", "render", "HelloWorld", outputVideoPath, "--props=render-manifest.json", "--overwrite")
+	} else {
+		cmd = exec.Command("npx", "remotion", "render", "HelloWorld", outputVideoPath, "--props=render-manifest.json", "--overwrite")
+	}
+
+	// IMPORTANT: Set the working directory to the engine folder
+	cmd.Dir = engineDir
+
+	// 4. Pipe Output to Console
+	// This lets you see the Remotion progress bar in your VS Code terminal
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	// 5. Run the Render
+	err = cmd.Run()
+	if err != nil {
+		println("❌ Render Failed:", err.Error())
+		return "", fmt.Errorf("remotion render failed: %w", err)
+	}
+
+	println("✅ Render Complete:", outputVideoPath)
+	return outputVideoPath, nil
+}
+
+// GetVideoFPS probes a video file using ffprobe and returns its frame rate as a float.
+// This is used to synchronize the Remotion engine with the actual clip speed.
+func (a *App) GetVideoFPS(filePath string) (float64, error) {
+	// We run ffprobe to get the average frame rate of the first video stream
+	cmd := exec.Command("ffprobe", 
+		"-v", "error", 
+		"-select_streams", "v:0", 
+		"-show_entries", "stream=avg_frame_rate", 
+		"-of", "default=noprint_wrappers=1:nokey=1", 
+		filePath)
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		// If ffprobe fails, we log it and return a default 30fps to avoid crashing
+		fmt.Printf("🔍 [FPS Probe] Error on %s: %v\n", filePath, err)
+		return 30.0, nil 
+	}
+
+	raw := strings.TrimSpace(string(output))
+	
+	// FFmpeg often returns fractions like "24000/1001" (which is 23.976)
+	if strings.Contains(raw, "/") {
+		parts := strings.Split(raw, "/")
+		if len(parts) == 2 {
+			num, _ := strconv.ParseFloat(parts[0], 64)
+			den, _ := strconv.ParseFloat(parts[1], 64)
+			if den != 0 {
+				return num / den, nil
+			}
+		}
+	}
+
+	// If it's a simple number (like "30"), just convert it
+	fps, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return 30.0, nil
+	}
+
+	return fps, nil
 }

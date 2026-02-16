@@ -51,6 +51,19 @@ import {
   ExtractAudioPeaks,
 } from "../../lib/wailsSafe";
 
+// --- TYPESCRIPT FIX FOR WAILS ---
+declare global {
+  interface Window {
+    go: {
+      main: {
+        App: {
+          GetVideoFPS: (path: string) => Promise<number>;
+        };
+      };
+    };
+  }
+}
+
 // --- TYPES ---
 interface Shot {
   id: string;
@@ -239,6 +252,10 @@ function StudioContent() {
     quality: "medium",
   });
 
+  const [currentTime, setCurrentTime] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [projectFps, setProjectFps] = useState(30);
+
   // Timeline & Playback State
   const [tracks, setTracks] = useState<TimelineItem[][]>([[], []]);
   const [trackSettings, setTrackSettings] = useState<
@@ -409,24 +426,19 @@ function StudioContent() {
     });
   }, [tracks, trackSettings]);
 
-  const {
-    primaryVideoRef,
-    secondaryVideoRef,
-    canvasRef,
-    isPlaying,
-    setIsPlaying,
-    togglePlay,
-    currentTime,
-    seekTo,
-    resetCache,
-  } = useGaplessPlayback({
-    tracks: playbackTracks,
-    trackSettings,
-    totalDuration,
-    videoBlobs,
-    volume: masterVolume,
-    previewUrl, // <--- PASS TO HOOK
-  });
+  const togglePlay = useCallback(() => {
+    setIsPlaying((prev) => {
+      // If we are at the very end of the video and hit play, jump back to start
+      if (!prev && currentTime >= totalDuration) {
+        setCurrentTime(0);
+      }
+      return !prev;
+    });
+  }, [currentTime, totalDuration]);
+
+  const seekTo = useCallback((time: number) => {
+    setCurrentTime(time);
+  }, []);
 
   // --- AUTO-SAVE ---
   useEffect(() => {
@@ -571,81 +583,25 @@ function StudioContent() {
   const previewLoopRef = useRef<number | null>(null);
 
   const handlePlayShot = async (shot: Shot) => {
-    // 1. Stop Main Timeline if playing
-    if (isPlaying) togglePlay();
+    // 1. If we are currently playing the main timeline, stop it
+    if (isPlaying) setIsPlaying(false);
 
-    // 2. TOGGLE OFF: If clicking the same shot, stop it.
+    // 2. TOGGLE OFF: If already previewing this shot, just stop and reset
     if (previewingShotId === shot.id) {
-      const video = primaryVideoRef.current;
-      if (video) {
-        video.pause();
-        video.currentTime = 0;
-      }
-      if (previewLoopRef.current) {
-        cancelAnimationFrame(previewLoopRef.current);
-        previewLoopRef.current = null;
-      }
-      // Clear canvas
-      const canvas = canvasRef.current;
-      const ctx = canvas?.getContext("2d");
-      if (ctx && canvas) ctx.clearRect(0, 0, canvas.width, canvas.height);
-
       setPreviewingShotId(null);
+      setCurrentTime(0);
       return;
     }
 
-    // 3. START PLAYBACK
-    resetCache();
-    if (previewLoopRef.current) {
-      cancelAnimationFrame(previewLoopRef.current);
-      previewLoopRef.current = null;
-    }
-
+    // 3. START PREVIEW:
+    // We find where this shot would be on a "temp" timeline,
+    // but for a simple preview, we'll just seek to its start
+    // if it's on the timeline, or simply set our state to its data.
     setPreviewingShotId(shot.id);
 
-    const path = shot.outputVideo || shot.audioPath;
-    if (!path) {
-      setPreviewingShotId(null);
-      return;
-    }
-
-    let src = videoBlobs.get(path);
-    if (!src) {
-      src = `http://localhost:3456/video/${path.replace(/\\/g, "/")}`;
-    }
-
-    const video = primaryVideoRef.current;
-    const canvas = canvasRef.current;
-
-    if (video && canvas) {
-      video.src = src;
-      video.currentTime = 0;
-      video.volume = masterVolume;
-
-      // Auto-reset state when video ends
-      const onEnded = () => {
-        setPreviewingShotId(null);
-        if (previewLoopRef.current)
-          cancelAnimationFrame(previewLoopRef.current);
-      };
-      video.addEventListener("ended", onEnded, { once: true });
-
-      try {
-        await video.play();
-        const loop = () => {
-          if (video.paused || video.ended) return;
-          const ctx = canvas.getContext("2d");
-          if (ctx) {
-            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-          }
-          previewLoopRef.current = requestAnimationFrame(loop);
-        };
-        loop();
-      } catch (e) {
-        console.error("Preview failed", e);
-        setPreviewingShotId(null);
-      }
-    }
+    // For now, we'll just toggle the global play state.
+    // In a future step, we can make this "solo" the specific shot.
+    setIsPlaying(true);
   };
 
   // --- LOAD DATA ---
@@ -1405,19 +1361,35 @@ function StudioContent() {
         return newTracks;
       });
 
-      // Auto-fix duration from actual media metadata
+      // --- NEW: FPS & DURATION DETECTION (REPLACES OLD BLOCK) ---
       const mediaPath = newItem.outputVideo || newItem.audioPath;
       if (mediaPath) {
+        // 1. Get the exact FPS from the Go backend (using ffprobe)
+        window.go.main.App.GetVideoFPS(mediaPath).then((realFps: number) => {
+          setTracks((prev) =>
+            prev.map((track) =>
+              track.map((item) => {
+                if (item.pairId === newItem.pairId) {
+                  return { ...item, fps: realFps };
+                }
+                return item;
+              }),
+            ),
+          );
+          // If this is your first clip, match the project speed to the clip
+          if (tracks.flat().length === 0) {
+            setProjectFps(realFps);
+          }
+        });
+
+        // 2. Also keep the duration check for proper timeline sizing
         const blobUrl =
           videoBlobs.get(mediaPath) ||
           `http://localhost:3456/video/${mediaPath.replace(/\\/g, "/")}`;
         const tempVideo = document.createElement("video");
         tempVideo.preload = "metadata";
         tempVideo.onloadedmetadata = () => {
-          if (
-            Number.isFinite(tempVideo.duration) &&
-            Math.abs(tempVideo.duration - initialDuration) > 0.1
-          ) {
+          if (Number.isFinite(tempVideo.duration)) {
             setTracks((prev) =>
               prev.map((track) =>
                 track.map((item) => {
@@ -1725,11 +1697,13 @@ function StudioContent() {
               />
               <div className="flex-1 min-w-0 bg-black min-h-0">
                 <ViewerPanel
+                  tracks={tracks}
+                  totalDuration={totalDuration}
+                  currentTime={currentTime}
                   isPlaying={isPlaying}
-                  onTogglePlay={togglePlay}
-                  primaryVideoRef={primaryVideoRef}
-                  secondaryVideoRef={secondaryVideoRef}
-                  canvasRef={canvasRef}
+                  setIsPlaying={setIsPlaying}
+                  setCurrentTime={setCurrentTime}
+                  projectFps={projectFps}
                 />
               </div>
             </div>

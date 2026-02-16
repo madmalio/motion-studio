@@ -22,6 +22,8 @@ import {
 } from "lucide-react";
 import { useDroppable, useDraggable } from "@dnd-kit/core";
 import { CSS } from "@dnd-kit/utilities";
+import { convertToRemotionManifest } from "@/lib/remotionBridge";
+import { RenderTimeline } from "../../wailsjs/go/main/App";
 
 const LEFT_PANEL_W = 160;
 const LEFT_PANEL_BG = "bg-[#2c2f33]";
@@ -1280,6 +1282,25 @@ export default function TimelinePanel({
           >
             <Plus size={10} /> Add Audio
           </button>
+          <button
+            onClick={async () => {
+              // 1. Generate JSON
+              const manifest = convertToRemotionManifest(tracks, 30);
+              const jsonString = JSON.stringify(manifest);
+
+              // 2. Send to Go
+              console.log("🚀 Sending to Render Engine...");
+              try {
+                const result = await RenderTimeline(jsonString);
+                alert("Render Finished! Saved to: " + result);
+              } catch (e) {
+                alert("Render Error: " + e);
+              }
+            }}
+            className="bg-red-600 text-white px-2 py-1 rounded text-[10px] hover:bg-red-500 font-bold flex items-center gap-1"
+          >
+            RENDER MP4
+          </button>
 
           <div className="w-px h-4 bg-zinc-700 mx-1" />
 
@@ -1326,6 +1347,16 @@ export default function TimelinePanel({
               title="Redo (Ctrl+Shift+Z)"
             >
               <Redo2 size={14} />
+            </button>
+            <button
+              onClick={() => {
+                const json = convertToRemotionManifest(tracks, 30);
+                console.log("🎬 MANIFEST:", JSON.stringify(json, null, 2));
+                alert("Check Console for JSON!");
+              }}
+              className="bg-purple-600 px-2 py-1 rounded text-[10px]"
+            >
+              TEST EXPORT
             </button>
           </div>
         </div>

@@ -38,6 +38,8 @@ export function GetShots(arg1:string,arg2:string):Promise<Array<main.Shot>>;
 
 export function GetTimeline(arg1:string,arg2:string):Promise<main.TimelineData>;
 
+export function GetVideoFPS(arg1:string):Promise<number>;
+
 export function GetWorkflows():Promise<Array<main.Workflow>>;
 
 export function ImportAudio(arg1:string):Promise<string>;
@@ -55,6 +57,8 @@ export function RenameWorkflow(arg1:string,arg2:string):Promise<string>;
 export function RenderRemoteShot(arg1:string,arg2:string,arg3:string,arg4:string,arg5:string,arg6:string):Promise<main.Shot>;
 
 export function RenderShot(arg1:string,arg2:string,arg3:string,arg4:string):Promise<main.Shot>;
+
+export function RenderTimeline(arg1:string):Promise<string>;
 
 export function RenderTimelinePreview(arg1:string,arg2:string,arg3:main.TimelineData):Promise<string>;
 
