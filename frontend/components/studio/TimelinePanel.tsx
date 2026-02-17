@@ -880,6 +880,7 @@ interface TimelinePanelProps {
   videoBlobs?: Map<string, string>;
   onVolumeChange?: (volume: number) => void;
   onStop?: () => void;
+  volume?: number;
 }
 
 export default function TimelinePanel({
@@ -912,11 +913,12 @@ export default function TimelinePanel({
   videoBlobs,
   onVolumeChange,
   onStop,
+  volume: externalVolume = 1,
 }: TimelinePanelProps) {
   const [activeTool, setActiveTool] = useState<"select" | "split">("select");
   const [isMuted, setIsMuted] = useState(false);
-  const [volume, setVolume] = useState(1);
-  const [prevVolume, setPrevVolume] = useState(1);
+  const [volume, setVolume] = useState(externalVolume);
+  const [prevVolume, setPrevVolume] = useState(externalVolume);
   const [globalSplitHover, setGlobalSplitHover] = useState<{
     time: number;
     pairId: string;
@@ -950,6 +952,20 @@ export default function TimelinePanel({
     }, 0);
     return () => clearTimeout(timer);
   }, []);
+
+  // --- SYNC VOLUME WITH PARENT ---
+  useEffect(() => {
+    // Only sync if external volume actually changed significantly
+    if (Math.abs(externalVolume - volume) > 0.01) {
+      setVolume(externalVolume);
+      if (externalVolume > 0) {
+        setIsMuted(false);
+        setPrevVolume(externalVolume);
+      } else {
+        setIsMuted(true);
+      }
+    }
+  }, [externalVolume]);
 
   // 1. Keep a "Ref" of the current time for keyboard listeners
   const timeRef = useRef(currentTime);
@@ -1041,10 +1057,11 @@ export default function TimelinePanel({
   };
 
   const toggleMute = () => {
-    if (isMuted) {
+    if (isMuted || volume === 0) {
       setIsMuted(false);
-      setVolume(prevVolume);
-      if (onVolumeChange) onVolumeChange(prevVolume);
+      const restore = prevVolume > 0 ? prevVolume : 1;
+      setVolume(restore);
+      if (onVolumeChange) onVolumeChange(restore);
     } else {
       setPrevVolume(volume);
       setIsMuted(true);
@@ -1150,32 +1167,66 @@ export default function TimelinePanel({
     // Prevent default browser dragging of text/images
     e.preventDefault();
 
-    // 1. Get the ruler container and its position
+    // If the timeline is currently playing, pause FIRST and only then start seeking.
+    // Remotion can briefly overlap audio when seekTo() is called while playing.
+    const wasPlaying = isPlaying;
+    if (wasPlaying) {
+      togglePlay(); // pause
+    }
+
     const container = e.currentTarget as HTMLDivElement;
     const rect = container.getBoundingClientRect();
 
-    // Helper: Calculate time based on mouse X position
     const calculateTime = (clientX: number) => {
-      // (Mouse X - Ruler Start + Scrolled Amount) / Zoom
       const x = clientX - rect.left + scrollLeft;
-      // Prevent negative time
       return Math.max(0, x / zoom);
     };
 
-    // 2. Jump to position immediately on click
-    seekTo(calculateTime(e.clientX));
+    // Throttle seeks to 1 per animation frame to avoid spamming the Player.
+    let rafId: number | null = null;
+    let pendingTime: number | null = null;
 
-    // 3. Setup dragging listeners
+    const flushSeek = () => {
+      rafId = null;
+      if (pendingTime == null) return;
+      seekTo(pendingTime);
+      pendingTime = null;
+    };
+
+    const requestSeek = (t: number) => {
+      pendingTime = t;
+      if (rafId != null) return;
+      rafId = window.requestAnimationFrame(flushSeek);
+    };
+
+    // Jump immediately (but deferred to next frame if we just paused)
+    const startTime = calculateTime(e.clientX);
+    if (wasPlaying) {
+      window.requestAnimationFrame(() => requestSeek(startTime));
+    } else {
+      requestSeek(startTime);
+    }
+
     const onMove = (ev: PointerEvent) => {
-      seekTo(calculateTime(ev.clientX));
+      requestSeek(calculateTime(ev.clientX));
     };
 
     const onUp = () => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
+
+      if (rafId != null) {
+        window.cancelAnimationFrame(rafId);
+        rafId = null;
+      }
+      pendingTime = null;
+
+      // Resume only after the user releases the mouse/pointer
+      if (wasPlaying) {
+        togglePlay();
+      }
     };
 
-    // Attach to window so you can drag outside the ruler area comfortably
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
   };

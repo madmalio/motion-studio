@@ -13,6 +13,8 @@ interface ViewerPanelProps {
   setIsPlaying: (playing: boolean) => void;
   setCurrentTime: (time: number) => void;
   projectFps: number;
+  volume?: number; // <--- NEW: Global Volume
+  previewAsset?: string; // <--- NEW: Single Clip Mode
 }
 
 const ViewerPanel = memo(function ViewerPanel({
@@ -23,34 +25,128 @@ const ViewerPanel = memo(function ViewerPanel({
   setIsPlaying,
   setCurrentTime,
   projectFps,
+  volume = 1,
+  previewAsset,
 }: ViewerPanelProps) {
   const playerRef = useRef<PlayerRef>(null);
 
+  const seekRafRef = useRef<number | null>(null);
+  const lastSeekFrameRef = useRef<number>(-1);
+
+  const ignorePauseEventRef = useRef(false);
+  const lastAppFrameRef = useRef<number>(-1);
   // Optimize Manifest Rebuilds
   const manifest = useMemo(() => {
-    return convertToRemotionManifest(tracks, projectFps);
-  }, [tracks, projectFps]);
+    // 1. PREVIEW MODE: If a single asset is selected, ignore timeline tracks
+    if (previewAsset) {
+      return {
+        tracks: [
+          {
+            id: "preview-track",
+            clips: [
+              {
+                id: "preview-clip",
+                file: previewAsset,
+                startFrame: 0,
+                endFrame: Math.round(totalDuration * projectFps),
+                trimStart: 0,
+                type: previewAsset.match(/\.(mp3|wav|m4a|flac|aac)$/i)
+                  ? "audio"
+                  : "video",
+                volume: 1,
+              },
+            ],
+          },
+        ],
+        fps: projectFps,
+        volume: volume, // Pass global volume to HelloWorld
+      };
+    }
+
+    // 2. TIMELINE MODE: Standard conversion
+    const base = convertToRemotionManifest(tracks, projectFps);
+    return { ...base, volume };
+  }, [tracks, projectFps, previewAsset, totalDuration, volume]);
 
   const currentFrame = Math.round(currentTime * projectFps);
 
   // 1. App -> Player: Sync Play/Pause
   useEffect(() => {
-    if (!playerRef.current) return;
+    const p = playerRef.current;
+    if (!p) return;
+
     if (isPlaying) {
-      playerRef.current.play();
+      p.play();
     } else {
-      playerRef.current.pause();
+      p.pause();
     }
   }, [isPlaying]);
 
-  // 2. App -> Player: Sync Seeking (ONLY when paused)
+  // 2. App -> Player: Sync Seeking (ONLY when paused) — THROTTLED to avoid echo
   useEffect(() => {
-    // Safety: Don't seek if we are playing (avoids fighting the engine)
-    if (!playerRef.current || isPlaying) return;
+    const p = playerRef.current;
+    if (!p || isPlaying) return;
 
-    const engineFrame = playerRef.current.getCurrentFrame();
-    if (Math.abs(engineFrame - currentFrame) > 0.5) {
-      playerRef.current.seekTo(currentFrame);
+    // Cancel any pending seek
+    if (seekRafRef.current != null) {
+      cancelAnimationFrame(seekRafRef.current);
+      seekRafRef.current = null;
+    }
+
+    seekRafRef.current = requestAnimationFrame(() => {
+      seekRafRef.current = null;
+
+      // Don’t re-seek to same frame
+      if (lastSeekFrameRef.current === currentFrame) return;
+
+      // Hard-stop audio before/after seek to prevent overlap
+      p.pause();
+      p.seekTo(currentFrame);
+      p.pause();
+
+      lastSeekFrameRef.current = currentFrame;
+    });
+
+    return () => {
+      if (seekRafRef.current != null) {
+        cancelAnimationFrame(seekRafRef.current);
+        seekRafRef.current = null;
+      }
+    };
+  }, [currentFrame, isPlaying]);
+
+  // 2b. If user scrubs while playing: force a pause before seeking (prevents echo)
+
+  // 2c. Seek requests while playing: only intervene on BIG jumps (user scrub)
+  useEffect(() => {
+    const p = playerRef.current;
+    if (!p) return;
+    if (!isPlaying) {
+      // keep last frame in sync for the next time playback starts
+      lastAppFrameRef.current = currentFrame;
+      return;
+    }
+
+    const last = lastAppFrameRef.current;
+    lastAppFrameRef.current = currentFrame;
+
+    // During normal playback, currentFrame increments ~1 per render.
+    // If it jumps by more than 1, treat it as a user scrub/seek request.
+    if (last !== -1 && Math.abs(currentFrame - last) > 1) {
+      // Pause without letting the Player's pause event flip app state.
+      ignorePauseEventRef.current = true;
+      try {
+        p.pause();
+        p.seekTo(currentFrame);
+        p.play();
+      } finally {
+        // Clear on next tick
+        setTimeout(() => {
+          ignorePauseEventRef.current = false;
+        }, 0);
+      }
+
+      lastSeekFrameRef.current = currentFrame;
     }
   }, [currentFrame, isPlaying]);
 
@@ -60,8 +156,15 @@ const ViewerPanel = memo(function ViewerPanel({
     if (!current) return;
 
     const handleFrameUpdate = (e: CustomEvent<{ frame: number }>) => {
-      if (isPlaying) {
-        setCurrentTime(e.detail.frame / projectFps);
+      if (!isPlaying) return;
+
+      const frame = e.detail.frame;
+      setCurrentTime(frame / projectFps);
+
+      // Stop when we reach the end (prevents endless "playing" state)
+      const endFrame = Math.max(0, Math.floor(totalDuration * projectFps) - 1);
+      if (frame >= endFrame) {
+        setIsPlaying(false);
       }
     };
 
@@ -69,32 +172,19 @@ const ViewerPanel = memo(function ViewerPanel({
     return () => {
       current.removeEventListener("frameupdate", handleFrameUpdate as any);
     };
-  }, [isPlaying, setCurrentTime, projectFps]);
+  }, [isPlaying, setCurrentTime, setIsPlaying, projectFps, totalDuration]);
 
-  // 4. LOOP FIX: Safety Guard on Pause Event
-  useEffect(() => {
-    const { current } = playerRef;
-    if (!current) return;
-
-    const handlePause = () => {
-      // CRITICAL FIX: Only update state if it actually needs changing.
-      // This prevents the "Maximum update depth" infinite loop.
-      if (isPlaying) {
-        setIsPlaying(false);
-      }
-    };
-
-    current.addEventListener("pause", handlePause);
-
-    return () => {
-      current.removeEventListener("pause", handlePause);
-    };
-  }, [isPlaying, setIsPlaying]); // Add isPlaying to dependencies so we access the fresh value
+  // Force a reset when switching between Timeline and Preview modes
+  // This prevents the "ghost timeline" playback and clears audio buffers
+  const playerKey = previewAsset
+    ? `preview-${previewAsset}`
+    : "timeline-player";
 
   return (
     <div className="h-full bg-black flex flex-col items-center justify-center relative overflow-hidden">
       <div className="relative w-full h-full flex items-center justify-center bg-zinc-950">
         <Player
+          key={playerKey}
           ref={playerRef}
           component={HelloWorld}
           inputProps={manifest}

@@ -13,6 +13,7 @@ import (
 	"math"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -213,7 +214,7 @@ func (a *App) RenderTimelinePreview(projectId string, sceneId string, timeline T
 
 	os.WriteFile(listPath, []byte(concat.String()), 0644)
 
-	// 4. Render Preview (Fast Concat)
+	// 4. Render Preview
 	cmd := exec.Command("ffmpeg", 
 		"-y", 
 		"-f", "concat", 
@@ -222,9 +223,9 @@ func (a *App) RenderTimelinePreview(projectId string, sceneId string, timeline T
 		"-c:v", "libx264", 
 		"-preset", "ultrafast", 
 		"-crf", "28", 
-		"-vf", "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2",
+		// Force standard pixel format so Chrome doesn't throw Code 4
+		"-vf", "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,format=yuv420p",
 		"-r", "30",
-		"-pix_fmt", "yuv420p",
 		previewPath,
 	)
 
@@ -831,7 +832,7 @@ func (a *App) RenderShot(projectId string, sceneId string, shotId string, workfl
 			"-i", shot.AudioPath,
 			"-ss", fmt.Sprintf("%f", shot.AudioStart),
 			"-t", fmt.Sprintf("%f", shot.AudioDuration),
-			"-c", "copy",
+			"-c:a", "aac", // Re-encode for frame-accurate trimming
 			tempPath,
 		)
 
@@ -1144,6 +1145,11 @@ loop:
 		io.Copy(outFile, vidResp.Body)
 		outFile.Close()
 
+		// CRITICAL FIX: Transcode to ensure browser compatibility (yuv420p)
+		if err := a.sanitizeVideo(outPath); err != nil {
+			fmt.Printf("Warning: Failed to sanitize video: %v\n", err)
+		}
+
 		shot.OutputVideo = outPath
 		shot.Status = "DONE"
 		shot.Duration = a.getVideoDuration(outPath)
@@ -1153,6 +1159,31 @@ loop:
 	}
 
 	return *shot, nil
+}
+
+// sanitizeVideo re-encodes the video to a web-safe format (H.264, yuv420p)
+// This fixes the "Audio plays but no video" / "Format Error" in Chrome/WebView2
+func (a *App) sanitizeVideo(path string) error {
+	tempPath := path + ".temp.mp4"
+	
+	// ffmpeg -i input -c:v libx264 -pix_fmt yuv420p -profile:v main -level 3.1 -preset ultrafast -c:a copy output
+	cmd := exec.Command("ffmpeg", 
+		"-y", 
+		"-i", path, 
+		"-c:v", "libx264", 
+		"-pix_fmt", "yuv420p", // Forces standard pixel format
+		"-preset", "ultrafast", // Fast encoding
+		"-c:a", "aac",          // Force AAC audio (Web Standard)
+		"-shortest",            // Ensure audio doesn't overrun video duration
+		tempPath,
+	)
+
+	if err := cmd.Run(); err != nil {
+		return err
+	}
+
+	// Replace original with sanitized version
+	return os.Rename(tempPath, path)
 }
 
 func (a *App) getVideoDuration(path string) float64 {
@@ -1388,19 +1419,32 @@ func (a *App) ReadImageBase64(path string) string {
 	if path == "" {
 		return ""
 	}
-	bytes, err := os.ReadFile(path)
-	if err != nil {
-		return ""
-	}
 
-	mimeType := "image/jpeg"
+	// 1. Check if it's a video -> Extract Thumbnail first
 	ext := strings.ToLower(filepath.Ext(path))
-	if ext == ".png" {
+	readPath := path
+	mimeType := "image/jpeg"
+
+	if ext == ".mp4" || ext == ".mov" || ext == ".webm" || ext == ".mkv" {
+		// Extract a frame to a temp file
+		thumbPath := a.ExtractLastFrame(path)
+		if thumbPath != "" {
+			readPath = thumbPath
+			// Cleanup the temp thumbnail after reading (defer happens at end of function)
+			defer os.Remove(thumbPath)
+		} else {
+			// Fallback: return empty or error placeholder
+			return ""
+		}
+	} else if ext == ".png" {
 		mimeType = "image/png"
 	} else if ext == ".webp" {
 		mimeType = "image/webp"
-	} else if ext == ".mp4" {
-		mimeType = "video/mp4"
+	}
+
+	bytes, err := os.ReadFile(readPath)
+	if err != nil {
+		return ""
 	}
 
 	base64Str := base64.StdEncoding.EncodeToString(bytes)
@@ -1503,7 +1547,8 @@ func (a *App) ExtractLastFrame(inputPath string) string {
 	}
 
 	// 2. If input is video, run FFmpeg
-	cmd := exec.Command("ffmpeg", "-sseof", "-3", "-i", inputPath, "-map", "0:v:0", "-update", "1", "-q:v", "1", outputPath, "-y")
+	// Use -ss 0 to get the first frame. This is robust for short videos where -sseof -3 fails.
+	cmd := exec.Command("ffmpeg", "-y", "-i", inputPath, "-ss", "0", "-vframes", "1", outputPath)
 
 	err := cmd.Run()
 	if err != nil {
@@ -1738,6 +1783,7 @@ func (a *App) ExportVideo(projectId string, sceneId string, options ExportOption
 			// --- H.264 LOGIC (MP4 / MKV) ---
 			args = append(args,
 				"-c:v", "libx264",
+				"-pix_fmt", "yuv420p",
 				"-preset", "fast",
 				"-crf", crf, // Uses the dynamic CRF calculated above
 				"-an", videoOutput)
@@ -2173,10 +2219,8 @@ func StartStreamServer() {
 	server = NewStreamServer()
 	mux := http.NewServeMux()
 
-	// Legacy MJPEG stream (still available)
 	mux.HandleFunc("/stream", server.StartStreamHandler)
 
-	// Gapless MP4 preview output
 	mux.HandleFunc("/preview.mp4", func(w http.ResponseWriter, r *http.Request) {
 		path := filepath.Join(server.currentDir, "preview.mp4")
 		if _, err := os.Stat(path); err != nil {
@@ -2187,19 +2231,35 @@ func StartStreamServer() {
 		http.ServeFile(w, r, path)
 	})
 
-	// Serve local video files for pre-loading
+	// -------------------------------------------------------------
+	// FIX: UNIVERSAL PATH DECODER
+	// -------------------------------------------------------------
 	mux.HandleFunc("/video/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Cache-Control", "no-cache")
 
-		// 1. Get raw path
+		// 1. Get raw encoded path (e.g. "C:/Users/Mark%20Barela/video.mp4")
 		urlPath := r.URL.Path
-		path := strings.TrimPrefix(urlPath, "/video/")
+		encodedPath := strings.TrimPrefix(urlPath, "/video/")
 
-		// Debug Log: Check VS Code terminal to see if path is correct
-		fmt.Printf("📂 Serving Request: %s -> %s\n", urlPath, path)
+		// 2. Decode special characters dynamically
+		// This turns "%20" into " " automatically, regardless of the username.
+		path, err := url.PathUnescape(encodedPath)
+		if err != nil {
+			http.Error(w, "Invalid path encoding", http.StatusBadRequest)
+			return
+		}
 
-		// 2. Set Content-Type Explicitly
-		// Browsers (Chrome) often block audio if MIME type is missing
+		// 3. DEBUG: Check if file actually exists on disk
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			fmt.Printf("❌ 404 NOT FOUND: %s\n", path)
+			http.NotFound(w, r)
+			return
+		} else {
+			// fmt.Printf("✅ Serving: %s\n", path) // Optional: Uncomment to see successes
+		}
+
+		// 4. Set Content-Type Explicitly
 		ext := strings.ToLower(filepath.Ext(path))
 		switch ext {
 		case ".mp3":
@@ -2210,13 +2270,46 @@ func StartStreamServer() {
 			w.Header().Set("Content-Type", "audio/mp4")
 		case ".mp4":
 			w.Header().Set("Content-Type", "video/mp4")
-		case ".png":
-			w.Header().Set("Content-Type", "image/png")
-		case ".jpg", ".jpeg":
-			w.Header().Set("Content-Type", "image/jpeg")
+		case ".mov":
+			w.Header().Set("Content-Type", "video/quicktime")
+		case ".webm":
+			w.Header().Set("Content-Type", "video/webm")
+		case ".mkv":
+			w.Header().Set("Content-Type", "video/x-matroska")
 		}
 
 		http.ServeFile(w, r, path)
+	})
+
+	// -------------------------------------------------------------
+	// NEW: ROBUST QUERY-BASED FILE SERVER
+	// -------------------------------------------------------------
+	mux.HandleFunc("/api/media", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Cache-Control", "no-cache")
+
+		filePath := r.URL.Query().Get("file")
+		if filePath == "" {
+			http.NotFound(w, r)
+			return
+		}
+
+		// Set Content-Type Explicitly
+		ext := strings.ToLower(filepath.Ext(filePath))
+		switch ext {
+		case ".mp3":
+			w.Header().Set("Content-Type", "audio/mpeg")
+		case ".wav":
+			w.Header().Set("Content-Type", "audio/wav")
+		case ".m4a":
+			w.Header().Set("Content-Type", "audio/mp4")
+		case ".mp4":
+			w.Header().Set("Content-Type", "video/mp4")
+		case ".mov":
+			w.Header().Set("Content-Type", "video/quicktime")
+		}
+
+		http.ServeFile(w, r, filePath)
 	})
 
 	fmt.Println("🎥 Video Engine listening on http://localhost:3456/stream")
@@ -2297,6 +2390,11 @@ func (a *App) RenderRemoteShot(projectId string, sceneId string, shotId string, 
         return Shot{}, fmt.Errorf("failed to save video data: %w", err)
     }
 
+	// CRITICAL FIX: Transcode to ensure browser compatibility
+	if err := a.sanitizeVideo(outputPath); err != nil {
+		fmt.Printf("Warning: Failed to sanitize remote video: %v\n", err)
+	}
+
 	// 5. Update only the fields we need to change
 	// This preserves your Name, Prompt, and Seed exactly as they were 
 	shots[shotIndex].OutputVideo = outputPath
@@ -2321,7 +2419,9 @@ func (a *App) RenderTimeline(manifestJson string) (string, error) {
 	engineDir := filepath.Join(wd, "..", "motion-engine")
 	
 	// Define the files
-	manifestPath := filepath.Join(engineDir, "render-manifest.json")
+	// Use unique manifest name to prevent collisions
+	manifestName := fmt.Sprintf("render-manifest-%d.json", time.Now().UnixNano())
+	manifestPath := filepath.Join(engineDir, manifestName)
 	outputFilename := fmt.Sprintf("render-%d.mp4", time.Now().Unix())
 	outputVideoPath := filepath.Join(wd, outputFilename) // Save MP4 in the project root
 
@@ -2331,20 +2431,23 @@ func (a *App) RenderTimeline(manifestJson string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to write manifest file: %w", err)
 	}
+	defer os.Remove(manifestPath) // Cleanup
 
 	println("🚀 Starting Remotion Render...")
 	println("📂 Engine Directory:", engineDir)
 	println("📄 Manifest:", manifestPath)
-	println("asd Output:", outputVideoPath)
+	println("🎥 Output:", outputVideoPath)
 
 	// 3. Prepare the Command
 	// Command: npx remotion render HelloWorld [OutputPath] --props=[ManifestPath]
 	var cmd *exec.Cmd
 
+	propsArg := fmt.Sprintf("--props=%s", manifestName)
+
 	if stdRuntime.GOOS == "windows" {
-		cmd = exec.Command("cmd", "/C", "npx", "remotion", "render", "HelloWorld", outputVideoPath, "--props=render-manifest.json", "--overwrite")
+		cmd = exec.Command("cmd", "/C", "npx", "remotion", "render", "HelloWorld", outputVideoPath, propsArg, "--overwrite")
 	} else {
-		cmd = exec.Command("npx", "remotion", "render", "HelloWorld", outputVideoPath, "--props=render-manifest.json", "--overwrite")
+		cmd = exec.Command("npx", "remotion", "render", "HelloWorld", outputVideoPath, propsArg, "--overwrite")
 	}
 
 	// IMPORTANT: Set the working directory to the engine folder
@@ -2363,7 +2466,8 @@ func (a *App) RenderTimeline(manifestJson string) (string, error) {
 	}
 
 	println("✅ Render Complete:", outputVideoPath)
-	return outputVideoPath, nil
+	// Return a local URL so the frontend can display/download it
+	return fmt.Sprintf("http://localhost:3456/video/%s", url.PathEscape(filepath.ToSlash(outputVideoPath))), nil
 }
 
 // GetVideoFPS probes a video file using ffprobe and returns its frame rate as a float.

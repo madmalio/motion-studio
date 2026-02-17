@@ -8,8 +8,9 @@ import {
   AlertCircle,
   Play,
   Square,
+  X,
 } from "lucide-react";
-import { memo } from "react";
+import { memo, useState } from "react";
 
 // --- DRAGGABLE ITEM (Internal) ---
 const DraggableShotItem = memo(function DraggableShotItem({
@@ -109,6 +110,17 @@ const LibraryPanel = memo(function LibraryPanel({
   handlePlayShot,
   previewingShotId,
 }: any) {
+  // --- LOCAL PREVIEW STATE ---
+  const [previewShot, setPreviewShot] = useState<any>(null);
+
+  const togglePreview = (shot: any) => {
+    if (previewShot?.id === shot.id) {
+      setPreviewShot(null);
+    } else {
+      setPreviewShot(shot);
+    }
+  };
+
   return (
     <div className="h-full flex flex-col">
       <div className="h-8 border-b border-zinc-800 flex items-center justify-between px-4 bg-zinc-900/50 shrink-0">
@@ -135,8 +147,8 @@ const LibraryPanel = memo(function LibraryPanel({
                 handleExtendShot(shot);
               }}
               onDelete={(e: any) => handleDeleteShot(e, shot.id)}
-              onPlay={() => handlePlayShot && handlePlayShot(shot)}
-              isPlaying={previewingShotId === shot.id}
+              onPlay={() => togglePreview(shot)}
+              isPlaying={previewShot?.id === shot.id}
             />
           ))}
           <button
@@ -151,6 +163,37 @@ const LibraryPanel = memo(function LibraryPanel({
           </button>
         </div>
       </div>
+
+      {/* --- PREVIEW OVERLAY (Solves "Needs Video" & "Separate from Timeline") --- */}
+      {previewShot && previewShot.outputVideo && (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm animate-in fade-in duration-200"
+          onClick={() => setPreviewShot(null)}
+        >
+          <div
+            className="relative bg-zinc-900 border border-zinc-800 rounded-xl shadow-2xl overflow-hidden max-w-[80vw] max-h-[80vh] flex flex-col"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-4 py-2 border-b border-zinc-800 bg-zinc-900/50">
+              <span className="text-xs font-bold text-zinc-400">
+                {previewShot.name}
+              </span>
+              <button
+                onClick={() => setPreviewShot(null)}
+                className="text-zinc-500 hover:text-white"
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <video
+              src={`http://localhost:3456/video/${previewShot.outputVideo.replace(/\\/g, "/")}`}
+              autoPlay
+              controls
+              className="max-w-full max-h-[calc(80vh-40px)] outline-none bg-black"
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 });

@@ -1,6 +1,6 @@
 import { AbsoluteFill, Video, Audio, Sequence } from "remotion";
 import { RemotionManifest } from "@/lib/remotionBridge";
-import { useState } from "react";
+import { useState, Fragment } from "react";
 
 // Helper to safely encode Windows paths for URLs
 const getSafeUrl = (filePath: string) => {
@@ -8,14 +8,17 @@ const getSafeUrl = (filePath: string) => {
   if (filePath.startsWith("http") || filePath.startsWith("blob"))
     return filePath;
 
-  const normalized = filePath.replace(/\\/g, "/");
-  const encoded = encodeURI(normalized);
-
-  return `http://localhost:3456/video/${encoded}`;
+  // Use the new robust query-param endpoint
+  // This handles C:\, spaces, #, ?, etc. perfectly without manual splitting
+  return `http://localhost:3456/api/media?file=${encodeURIComponent(filePath)}`;
 };
 
 export const HelloWorld = (props: any) => {
-  const { tracks, fps } = props as RemotionManifest;
+  const {
+    tracks,
+    fps,
+    volume: globalVolume,
+  } = props as RemotionManifest & { volume: number };
   const [error, setError] = useState<string | null>(null);
 
   if (error) {
@@ -37,7 +40,7 @@ export const HelloWorld = (props: any) => {
   return (
     <AbsoluteFill style={{ backgroundColor: "black" }}>
       {tracks.map((track) => (
-        <div key={track.id}>
+        <Fragment key={track.id}>
           {track.clips.map((clip, index) => {
             const durationInFrames = clip.endFrame - clip.startFrame;
             const startFromFrames = Math.round(clip.trimStart * fps);
@@ -47,9 +50,15 @@ export const HelloWorld = (props: any) => {
             // Ensure volume is a valid number. Default to 1 (100%) if missing.
             const volume = typeof clip.volume === "number" ? clip.volume : 1;
 
+            // Calculate final volume (Clip Volume * Global Master Volume)
+            const finalVolume =
+              volume * (typeof globalVolume === "number" ? globalVolume : 1);
+
+            const isMuted = finalVolume === 0;
+
             return (
               <Sequence
-                key={index}
+                key={clip.id ?? index}
                 from={clip.startFrame}
                 durationInFrames={durationInFrames}
               >
@@ -58,37 +67,49 @@ export const HelloWorld = (props: any) => {
                   <Audio
                     src={src}
                     startFrom={startFromFrames}
-                    volume={volume}
+                    volume={finalVolume}
+                    muted={isMuted}
                     onError={(e) =>
                       console.error(`❌ Audio File Failed: ${src}`, e)
                     }
                   />
                 ) : (
                   /* 2. VIDEO CLIPS (With Embedded Audio) */
-                  <Video
-                    src={src}
-                    style={{
-                      width: "100%",
-                      height: "100%",
-                      objectFit: "contain",
-                    }}
-                    startFrom={startFromFrames}
-                    // CRITICAL: Ensure these props are set to allow sound
-                    volume={volume}
-                    muted={false}
-                    playbackRate={1}
-                    // DEBUG: Log the video URL so we can test it
-                    onError={(e) => console.error(`❌ Video Failed: ${src}`, e)}
-                    onVolumeChange={(e) => {
-                      // This fires when the video loads its audio track
-                      console.log(`🔊 Video Audio Loaded: ${src}`);
-                    }}
-                  />
+                  <>
+                    <Video
+                      src={src}
+                      crossOrigin="anonymous"
+                      style={{
+                        width: "100%",
+                        height: "100%",
+                        objectFit: "contain",
+                        backgroundColor: "black",
+                      }}
+                      startFrom={startFromFrames}
+                      muted // ✅ ALWAYS mute the video element to prevent double-audio
+                      playbackRate={1}
+                      onError={(e) =>
+                        console.error(`❌ Video Failed: ${src}`, e)
+                      }
+                    />
+
+                    {/* ✅ Explicit audio for video clips (single, controlled source) */}
+                    {!isMuted && (
+                      <Audio
+                        src={src}
+                        startFrom={startFromFrames}
+                        volume={finalVolume}
+                        onError={(e) =>
+                          console.error(`❌ Video-Audio Failed: ${src}`, e)
+                        }
+                      />
+                    )}
+                  </>
                 )}
               </Sequence>
             );
           })}
-        </div>
+        </Fragment>
       ))}
     </AbsoluteFill>
   );
