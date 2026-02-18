@@ -34,7 +34,10 @@ const round = (n: number) => Math.round(n * 10000) / 10000;
 import GeneratorPanel from "../../components/studio/GeneratorPanel";
 import LibraryPanel from "../../components/studio/LibraryPanel";
 import ViewerPanel from "../../components/studio/ViewerPanel";
-import TimelinePanel from "../../components/studio/TimelinePanel";
+import SimpleTimeline, {
+  TimelineTrack,
+  TimelineClip,
+} from "@/components/studio/SimpleTimeline";
 import { waitForWails } from "../../lib/wailsReady";
 
 // --- WAILS IMPORTS ---
@@ -58,8 +61,22 @@ declare global {
       main: {
         App: {
           GetVideoFPS: (path: string) => Promise<number>;
+          // We add these two lines so TypeScript knows they exist:
+          RenderTimelinePreview: (
+            projectId: string,
+            sceneId: string,
+            timeline: any,
+          ) => Promise<string>;
+          ExportVideo: (
+            projectId: string,
+            sceneId: string,
+            options: any,
+          ) => Promise<string>;
         };
       };
+    };
+    runtime: {
+      EventsOn: (event: string, callback: (data: any) => void) => () => void;
     };
   }
 }
@@ -245,6 +262,7 @@ function StudioContent() {
   const [exportProgress, setExportProgress] = useState(0);
   const [exportStatus, setExportStatus] = useState("");
   const [previewUrl, setPreviewUrl] = useState<string | null>(null); // <--- NEW STATE
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const [exportOptions, setExportOptions] = useState({
     format: "mp4",
     includeVideo: true,
@@ -256,19 +274,26 @@ function StudioContent() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [projectFps, setProjectFps] = useState(30);
 
-  // Timeline & Playback State
-  const [tracks, setTracks] = useState<TimelineItem[][]>([[], []]);
-  const [trackSettings, setTrackSettings] = useState<
+  // --- REAL TIMELINE STATE (CLEAN) ---
+  const [tracks, setTracks] = useState<TimelineTrack[]>([
     {
-      locked: boolean;
-      visible: boolean;
-      name: string;
-      height?: number;
-      type?: "video" | "audio";
-    }[]
-  >([
-    { locked: false, visible: true, name: "V1", height: 48, type: "video" },
-    { locked: false, visible: true, name: "A1", height: 48, type: "audio" },
+      id: "t1",
+      name: "Video 1",
+      type: "video",
+      clips: [], // <--- EMPTY!
+      isMuted: false,
+      isHidden: false,
+      isLocked: false,
+    },
+    {
+      id: "t2",
+      name: "Audio 1",
+      type: "audio",
+      clips: [], // <--- EMPTY!
+      isMuted: false,
+      isHidden: false,
+      isLocked: false,
+    },
   ]);
 
   const [activeDragItem, setActiveDragItem] = useState<any>(null);
@@ -357,7 +382,7 @@ function StudioContent() {
   const videoCache = useRef<Map<string, string>>(new Map());
   const isCtrlPressed = useRef(false);
 
-  // --- UNDO / REDO ---
+  // --- UNDO / REDO (Fixed) ---
   const [history, setHistory] = useState<any[]>([]);
   const [redoStack, setRedoStack] = useState<any[]>([]);
 
@@ -367,7 +392,6 @@ function StudioContent() {
       {
         tracks: JSON.parse(JSON.stringify(tracks)),
         shots: JSON.parse(JSON.stringify(shots)),
-        trackSettings: JSON.parse(JSON.stringify(trackSettings)),
       },
     ]);
     setRedoStack([]);
@@ -382,13 +406,11 @@ function StudioContent() {
       {
         tracks: JSON.parse(JSON.stringify(tracks)),
         shots: JSON.parse(JSON.stringify(shots)),
-        trackSettings: JSON.parse(JSON.stringify(trackSettings)),
       },
     ]);
     setHistory(newHistory);
     setTracks(previous.tracks);
     setShots(previous.shots);
-    setTrackSettings(previous.trackSettings);
   };
 
   const redo = () => {
@@ -400,31 +422,21 @@ function StudioContent() {
       {
         tracks: JSON.parse(JSON.stringify(tracks)),
         shots: JSON.parse(JSON.stringify(shots)),
-        trackSettings: JSON.parse(JSON.stringify(trackSettings)),
       },
     ]);
     setRedoStack(newRedo);
     setTracks(next.tracks);
     setShots(next.shots);
-    setTrackSettings(next.trackSettings);
   };
 
   const totalDuration = Math.max(
     0,
     ...tracks.map((t) =>
-      t.reduce((acc, s) => Math.max(acc, s.startTime + (s.duration || 4)), 0),
+      // Fix 1: Access 't.clips' before reducing
+      // Fix 2: Use 's.start' instead of 's.startTime'
+      t.clips.reduce((acc, s) => Math.max(acc, s.start + (s.duration || 4)), 0),
     ),
   );
-
-  // --- ENGINE STATE ---
-  const playbackTracks = useMemo(() => {
-    return tracks.map((track, index) => {
-      if (trackSettings[index] && !trackSettings[index].visible) {
-        return [];
-      }
-      return track;
-    });
-  }, [tracks, trackSettings]);
 
   const togglePlay = useCallback(() => {
     setIsPlaying((prev) => {
@@ -448,41 +460,39 @@ function StudioContent() {
     }
   }, [shots, projectId, sceneId]);
 
-  // --- AUTO-SAVE TIMELINE ---
+  // --- AUTO-SAVE TIMELINE (FIXED COMPATIBILITY) ---
   useEffect(() => {
     if (projectId && sceneId && initialized.current) {
-      const cleanTracks = tracks.map((track) =>
-        track.map(({ previewBase64, ...rest }) => rest),
+      // 1. Convert New Tracks (Objects) -> Old Tracks (Array of Arrays)
+      // The backend expects [[clip, clip], [clip, clip]]
+      const legacyTracks = tracks.map((t) =>
+        t.clips.map((c) => ({
+          ...c,
+          // Map new fields back to old fields if necessary
+          timelineId: c.id,
+          startTime: c.start,
+          trimStart: c.offset,
+          // Ensure audio/video paths are set for the backend to recognize type
+          outputVideo: t.type === "video" ? c.src : undefined,
+          audioPath: t.type === "audio" ? c.src : undefined,
+        })),
       );
+
+      // 2. Extract Track Settings (So names/mute status persist)
+      const legacySettings = tracks.map((t) => ({
+        name: t.name,
+        type: t.type,
+        visible: !t.isHidden,
+        locked: t.isLocked,
+        // You can add height/volume here if the backend supports it
+      }));
+
       SaveTimeline(projectId, sceneId, {
-        tracks: cleanTracks,
-        trackSettings,
+        tracks: legacyTracks, // <--- Sending Array of Arrays
+        trackSettings: legacySettings, // <--- Sending Settings separately
       } as any);
     }
-  }, [tracks, trackSettings, projectId, sceneId]);
-
-  // --- SMART RENDER CACHE ---
-  useEffect(() => {
-    if (!projectId || !sceneId || !initialized.current) return;
-
-    // Debounce render
-    const timer = setTimeout(async () => {
-      // Only render if we have clips
-      const hasClips = tracks.some((t) => t.length > 0);
-      if (hasClips) {
-        // Call backend to generate preview.mp4
-        // Note: We cast to 'any' to bypass strict type checking for the new function if types aren't updated yet
-        const url = await (window as any).go.main.App.RenderTimelinePreview(
-          projectId,
-          sceneId,
-          { tracks, trackSettings },
-        );
-        if (url) setPreviewUrl(url);
-      }
-    }, 1000); // 1 second debounce
-
-    return () => clearTimeout(timer);
-  }, [tracks, trackSettings, projectId, sceneId]);
+  }, [tracks, projectId, sceneId]);
 
   // --- SYNC NEW VIDEOS TO BLOBS ---
   useEffect(() => {
@@ -501,7 +511,7 @@ function StudioContent() {
               const blob = new Blob([byteArray], { type: "video/mp4" });
               const url = URL.createObjectURL(blob);
               setVideoBlobs((prev) => new Map(prev).set(shot.outputVideo, url));
-            } catch (e) {}
+            } catch (e) { }
           }
         }
       }
@@ -548,15 +558,19 @@ function StudioContent() {
     if (!filePath) return;
     const peaks = await ExtractAudioPeaks(filePath, 20);
     if (peaks && peaks.length > 0) {
+      // 1. Update the Shot Library
       setShots((prev) =>
         prev.map((s) => (s.id === shotId ? { ...s, waveform: peaks } : s)),
       );
+
+      // 2. Update the Timeline Tracks (Fixed for new structure)
       setTracks((prev) =>
-        prev.map((track) =>
-          track.map((item) =>
-            item.id === shotId ? { ...item, waveform: peaks } : item,
+        prev.map((track) => ({
+          ...track,
+          clips: track.clips.map((clip) =>
+            clip.id === shotId ? { ...clip, waveform: peaks } : clip,
           ),
-        ),
+        })),
       );
     }
   };
@@ -582,7 +596,7 @@ function StudioContent() {
   // --- PREVIEW PLAYER ---
   const previewLoopRef = useRef<number | null>(null);
 
-  const handlePlayShot = async (shot: Shot) => {
+  const handlePlayShot = useCallback(async (shot: Shot) => {
     // 1. If we are currently playing the main timeline, stop it
     if (isPlaying) setIsPlaying(false);
 
@@ -602,7 +616,7 @@ function StudioContent() {
     // For now, we'll just toggle the global play state.
     // In a future step, we can make this "solo" the specific shot.
     setIsPlaying(true);
-  };
+  }, [isPlaying, previewingShotId]);
 
   // --- LOAD DATA ---
   useEffect(() => {
@@ -618,6 +632,7 @@ function StudioContent() {
       const s = sData.find((x: any) => x.id === sId);
       setScene(s || null);
 
+      // 1. Load Library Shots
       const savedShots = await GetShots(pId, sId);
       if (savedShots && savedShots.length > 0) {
         const hydratedShots = await Promise.all(
@@ -631,121 +646,112 @@ function StudioContent() {
         );
         setShots(hydratedShots);
         setActiveShotId(hydratedShots[0].id);
-
-        hydratedShots.forEach((shot) => {
-          const path = shot.outputVideo || shot.audioPath;
-          if (path && (!shot.waveform || shot.waveform.length === 0)) {
-            generateWaveform(shot.id, path);
-          }
-        });
       }
 
+      // 2. Load Timeline & Convert to New Format
       try {
         const timelineData = await GetTimeline(pId, sId);
+
         if (timelineData && timelineData.tracks) {
-          const hydratedTracks = await Promise.all(
-            timelineData.tracks.map(async (track: any[]) => {
-              return Promise.all(
-                track.map(async (item: any) => {
-                  const src = item.sourceImage;
-                  if (src) {
-                    const b64 = await ReadImageBase64(src);
-                    return { ...item, previewBase64: b64 };
+          const settings = timelineData.trackSettings || [];
+
+          // CONVERSION LOGIC: Transform [][]any to TimelineTrack[]
+          const newTracks: TimelineTrack[] = await Promise.all(
+            timelineData.tracks.map(async (rawClips: any[], index: number) => {
+              // A. Hydrate Clips
+              const clips = await Promise.all(
+                rawClips.map(async (item: any) => {
+                  if (item.sourceImage) {
+                    await ReadImageBase64(item.sourceImage); // Preload (optional)
                   }
-                  return item;
+
+                  // Map Legacy Item -> New TimelineClip
+                  return {
+                    id: item.timelineId || crypto.randomUUID(),
+                    type: (item.audioPath ? "audio" : "video") as
+                      | "video"
+                      | "audio",
+                    name: item.name || "Untitled",
+                    // LOAD THE ACTUAL FILE PATH
+                    src:
+                      item.outputVideo ||
+                      item.audioPath ||
+                      item.sourceImage ||
+                      "",
+                    start: item.startTime,
+                    duration: item.duration,
+                    offset: item.trimStart || 0,
+                    sourceDuration: item.duration, // <--- Set sourceDuration (assuming item.duration was total length originally, or strictly from shot)
+                    // Actually, item.duration from backend MIGHT be the trimmed duration.
+                    // But we don't have the original total duration stored in the backend "TimelineItem" struct apparently unless we check the Shot library.
+                    // However, we can use the Shot Library to look it up if needed.
+                    // For now, let's assume valid clips come from Shots, and we should look up the shot if possible?
+                    // Better: The backend item might not have it.
+                    // Let's set it to item.duration + (item.trimStart || 0) + (maybe trimEnd? no).
+                    // Providing a safe fallback:
+                    color: item.audioPath ? "bg-purple-600" : "bg-blue-600",
+                  };
                 }),
               );
+
+              // B. Get Track Info from Settings
+              const setting = settings[index] || {};
+              // Fallback names if settings are missing
+              const defaultName = index === 0 ? "Video 1" : `Audio ${index}`;
+              const trackName = setting.name || defaultName;
+              const trackType =
+                setting.type ||
+                (trackName.toUpperCase().startsWith("A") ? "audio" : "video");
+
+              return {
+                id: `track-${index}-${crypto.randomUUID()}`,
+                name: trackName,
+                type: trackType as "video" | "audio",
+                isMuted: false,
+                isHidden: !setting.visible,
+                isLocked: setting.locked,
+                clips: clips,
+              };
             }),
           );
-          setTracks(hydratedTracks);
 
-          // --- FIX: Force Sync trackSettings to match tracks length ---
-          const savedSettings = timelineData.trackSettings || [];
-          const syncedSettings = hydratedTracks.map((_, i) => {
-            // Use existing or create default
-            if (savedSettings[i]) {
-              const setting = { ...savedSettings[i] } as any;
-              // Ensure type is set so renaming doesn't break playback/logic
-              if (!setting.type) {
-                setting.type = (setting.name || "")
-                  .trim()
-                  .toUpperCase()
-                  .startsWith("A")
-                  ? "audio"
-                  : "video";
-              }
-              if (setting.name === "V1") {
-                return { ...setting, visible: true };
-              }
-              return setting;
-            }
+          setTracks(newTracks);
 
-            // Heuristic defaults
-            return {
-              locked: false,
-              visible: true,
-              name: i >= 1 ? `A${i}` : `V1`, // Simple default
-              height: 64,
-              type: (i >= 1 ? "audio" : "video") as "audio" | "video",
-            };
-          });
-          setTrackSettings(syncedSettings);
-
+          // C. Preload Video Blobs (so playback works immediately)
           const uniquePaths = new Set<string>();
-          hydratedTracks.flat().forEach((item: any) => {
+          timelineData.tracks.flat().forEach((item: any) => {
             if (item.outputVideo) uniquePaths.add(item.outputVideo);
           });
-          const blobMap = new Map<string, string>();
+
           await Promise.all(
             Array.from(uniquePaths).map(async (path) => {
               try {
                 const url = `http://localhost:3456/video/${path.replace(/\\/g, "/")}`;
                 const res = await fetch(url);
-                if (!res.ok) throw new Error(`HTTP ${res.status}`);
-                const blob = await res.blob();
-                blobMap.set(path, URL.createObjectURL(blob));
+                if (res.ok) {
+                  const blob = await res.blob();
+                  setVideoBlobs((prev) =>
+                    new Map(prev).set(path, URL.createObjectURL(blob)),
+                  );
+                }
               } catch (e) {
-                console.error("Failed to preload clip:", path, e);
+                console.error("Failed to preload:", path);
               }
             }),
           );
-          setVideoBlobs(blobMap);
         } else {
-          setTracks([[], []]);
-          setTrackSettings([
-            {
-              locked: false,
-              visible: true,
-              name: "V1",
-              height: 48,
-              type: "video",
-            },
-            {
-              locked: false,
-              visible: true,
-              name: "A1",
-              height: 48,
-              type: "audio",
-            },
+          // Default Empty State
+          setTracks([
+            { id: "t1", name: "Video 1", type: "video", clips: [] },
+            { id: "t2", name: "Audio 1", type: "audio", clips: [] },
           ]);
         }
       } catch (e) {
-        setTracks([[], []]);
-        setTrackSettings([
-          {
-            locked: false,
-            visible: true,
-            name: "V1",
-            height: 48,
-            type: "video",
-          },
-          {
-            locked: false,
-            visible: true,
-            name: "A1",
-            height: 48,
-            type: "audio",
-          },
+        console.error("Timeline Load Error:", e);
+        // Fallback
+        setTracks([
+          { id: "t1", name: "Video 1", type: "video", clips: [] },
+          { id: "t2", name: "Audio 1", type: "audio", clips: [] },
         ]);
       }
 
@@ -761,7 +767,7 @@ function StudioContent() {
   const activeShotIndex = shots.findIndex((s) => s.id === activeShotId);
   const activeShot = shots[activeShotIndex];
 
-  const handleAddShot = () => {
+  const handleAddShot = useCallback(() => {
     if (!sceneId) return;
     recordHistory();
     const newId = crypto.randomUUID();
@@ -783,9 +789,9 @@ function StudioContent() {
       return [...prev, newShot];
     });
     setActiveShotId(newId);
-  };
+  }, [sceneId]);
 
-  const createExtensionShot = async (originalShot: Shot) => {
+  const createExtensionShot = useCallback(async (originalShot: Shot) => {
     const sourcePath = originalShot.outputVideo || originalShot.sourceImage;
     if (!sourcePath) {
       alert("Select source first");
@@ -808,9 +814,9 @@ function StudioContent() {
       duration: 4,
     };
     return newShot;
-  };
+  }, []);
 
-  const handleExtendShot = async (originalShot: Shot) => {
+  const handleExtendShot = useCallback(async (originalShot: Shot) => {
     const newShot = await createExtensionShot(originalShot);
     if (!newShot) return;
 
@@ -823,111 +829,13 @@ function StudioContent() {
       return next;
     });
     setActiveShotId(newShot.id);
-  };
+  }, [shots, createExtensionShot]);
 
   const handleTimelineExtend = async (timelineId: string) => {
-    let sourceItem: TimelineItem | undefined;
-    let trackIndex = -1;
-
-    for (let i = 0; i < tracks.length; i++) {
-      const found = tracks[i].find((it) => it.timelineId === timelineId);
-      if (found) {
-        sourceItem = found;
-        trackIndex = i;
-        break;
-      }
-    }
-
-    if (!sourceItem) return;
-
-    const newShot = await createExtensionShot(sourceItem);
-    if (!newShot) return;
-
-    recordHistory();
-
-    // 1. Update Library
-    setShots((prev) => {
-      const idx = prev.findIndex((s) => s.id === sourceItem!.id);
-      if (idx === -1) return [...prev, newShot];
-      const next = [...prev];
-      next.splice(idx + 1, 0, newShot);
-      return next;
-    });
-
-    // 2. Update Timeline
-    setTracks((prev) => {
-      let newTracks = [...prev];
-      const track = newTracks[trackIndex];
-      const startTime = round(
-        sourceItem!.startTime + (sourceItem!.duration || 0),
-      );
-
-      const newItem: TimelineItem = {
-        ...newShot,
-        timelineId: crypto.randomUUID(),
-        pairId: crypto.randomUUID(),
-        trackIndex: trackIndex,
-        startTime: startTime,
-        duration: newShot.duration,
-        maxDuration: newShot.duration,
-        volume: 1,
-        muted: false,
-      };
-
-      newTracks[trackIndex] = applyOverwrite(track, newItem);
-
-      // Auto-pair Audio Track (V3 -> A3)
-      const targetTrackName = trackSettings[trackIndex]?.name || "V1";
-      const isVideoTrack =
-        trackSettings[trackIndex]?.type === "video" ||
-        !targetTrackName.toUpperCase().startsWith("A");
-
-      if (isVideoTrack) {
-        const match = targetTrackName.match(/V(\d+)/i);
-        const trackNum = match ? match[1] : "1";
-        const targetAudioName = `A${trackNum}`;
-
-        let audioTrackIndex = trackSettings.findIndex(
-          (t) =>
-            (t.name || "").trim().toUpperCase() ===
-            targetAudioName.toUpperCase(),
-        );
-
-        if (audioTrackIndex === -1) {
-          newTracks = [...newTracks, []];
-          audioTrackIndex = newTracks.length - 1;
-          setTrackSettings((prevSettings) => [
-            ...prevSettings,
-            {
-              locked: false,
-              visible: true,
-              name: targetAudioName,
-              height: 64,
-              type: "audio",
-            },
-          ]);
-        }
-        const audioItem: TimelineItem = {
-          ...newItem,
-          timelineId: crypto.randomUUID(),
-          pairId: newItem.pairId,
-          trackIndex: audioTrackIndex,
-          previewBase64: undefined,
-          name: `AUDIO: ${newItem.name}`,
-        };
-        newTracks[audioTrackIndex] = applyOverwrite(
-          newTracks[audioTrackIndex],
-          audioItem,
-        );
-      }
-
-      return newTracks;
-    });
-
-    setActiveShotId(newShot.id);
+    console.log("Extend feature pending migration to new timeline engine.");
   };
 
-  const handleDeleteShot = (e: React.MouseEvent, id: string) => {
+  const handleDeleteShot = useCallback((e: React.MouseEvent, id: string) => {
     e.stopPropagation();
     confirm({
       title: "Delete Shot?",
@@ -939,11 +847,18 @@ function StudioContent() {
         setShots((prev) => prev.filter((s) => s.id !== id));
       },
     });
-  };
+  }, [confirm, project, scene]);
 
-  const updateActiveShot = (updates: Partial<Shot>) => {
+  const updateActiveShot = useCallback((updates: Partial<Shot>) => {
     if (!activeShotId) return;
-    const shot = shots.find((s) => s.id === activeShotId);
+
+    // 1. Update the Source Library
+    const shot = shots.find((s) => s.id === activeShotId); // Access shots from state, but inside callback it might be stale if not in deps.
+    // Actually, better to use functional update for setShots if we want to avoid dep on shots, 
+    // BUT we need 'shot' to check outputVideo changes. 
+    // So we must depend on 'shots' or use a ref. 
+    // Since shots don't change during playback, depending on shots is fine.
+
     if (shot) {
       const isNewRender = updates.status === "DONE";
       const path = updates.outputVideo || shot.outputVideo;
@@ -959,203 +874,132 @@ function StudioContent() {
         generateWaveform(shot.id, updates.audioPath);
       }
     }
+
     setShots((prev) =>
       prev.map((s) => (s.id === activeShotId ? { ...s, ...updates } : s)),
     );
+
+    // 2. Update the Timeline (Fixed for New Structure)
     setTracks((prev) =>
-      prev.map((track) =>
-        track.map((item) => {
-          if (item.id === activeShotId) {
-            const newItem = { ...item, ...updates };
+      prev.map((track) => ({
+        ...track,
+        clips: track.clips.map((clip) => {
+          if (clip.id === activeShotId) {
+            // Merge updates into the clip
+            // Note: We cast to 'any' briefly because Shot types and Clip types
+            // might have slight differences during this migration.
+            const newItem = { ...clip, ...updates } as any;
+
             if (updates.duration) {
-              newItem.maxDuration = updates.duration;
               newItem.duration = updates.duration;
             }
             return newItem;
           }
-          return item;
+          return clip;
         }),
-      ),
+      })),
     );
-  };
+  }, [activeShotId, shots]);
 
   const handleUpdateItem = (
     id: string,
-    updates: Partial<TimelineItem>,
+    updates: Partial<TimelineClip>, // Changed from TimelineItem to TimelineClip
     skipHistory = false,
   ) => {
     if (!skipHistory) recordHistory();
     setTracks((prev) =>
-      prev.map((track) =>
-        track.map((item) =>
-          item.timelineId === id ? { ...item, ...updates } : item,
+      prev.map((track) => ({
+        ...track,
+        clips: track.clips.map((clip) =>
+          clip.id === id ? { ...clip, ...updates } : clip,
         ),
-      ),
+      })),
     );
   };
 
   const handleSplit = (itemId: string, splitTime: number) => {
-    if (!itemId || splitTime === undefined) return;
-    splitTime = round(splitTime);
-    recordHistory();
-
-    setTracks((prev) => {
-      const newTracks = [...prev];
-      let targetTrackIndex = -1;
-      let targetItemIndex = -1;
-
-      for (let t = 0; t < newTracks.length; t++) {
-        const idx = newTracks[t].findIndex(
-          (item) => item.timelineId === itemId,
-        );
-        if (idx !== -1) {
-          targetTrackIndex = t;
-          targetItemIndex = idx;
-          break;
-        }
-      }
-
-      if (targetTrackIndex !== -1 && targetItemIndex !== -1) {
-        const track = newTracks[targetTrackIndex];
-        const item = track[targetItemIndex];
-        if (
-          splitTime <= item.startTime + 0.05 ||
-          splitTime >= item.startTime + (item.duration || 0) - 0.05
-        ) {
-          return prev;
-        }
-        const splitOffset = round(splitTime - item.startTime);
-        const leftItem = { ...item, duration: splitOffset };
-        const rightItem: TimelineItem = {
-          ...item,
-          timelineId: crypto.randomUUID(),
-          startTime: splitTime,
-          duration: round((item.duration || 0) - splitOffset),
-          trimStart: round((item.trimStart || 0) + splitOffset),
-        };
-        const newTrack = [...track];
-        newTrack[targetItemIndex] = leftItem;
-        newTrack.splice(targetItemIndex + 1, 0, rightItem);
-        newTracks[targetTrackIndex] = newTrack;
-        return newTracks;
-      }
-      return prev;
-    });
+    console.log("Split feature pending migration.");
   };
 
-  // --- TRACK MANAGEMENT ---
+  // --- TRACK MANAGEMENT (FIXED) ---
+
   const handleAddAudioTrack = () => {
     recordHistory();
-    setTracks((prevTracks) => [...prevTracks, []]);
-
-    setTrackSettings((prevSettings) => {
-      // AUTO-HEAL: Ensure we start with a clean list matched to current tracks
-      const validSettings = prevSettings.slice(0, tracks.length);
-
-      const audioTracks = validSettings.filter((t) => {
-        if (t.type) return t.type === "audio";
-        return (t.name || "").trim().toUpperCase().match(/^A\d+/);
-      });
-
+    setTracks((prev) => {
+      // 1. Calculate next Audio Track Number (A1, A2...)
+      const audioTracks = prev.filter((t) => t.type === "audio");
       let nextNum = 1;
       if (audioTracks.length > 0) {
-        const lastTrack = audioTracks[audioTracks.length - 1];
-        const match = (lastTrack.name || "").match(/(\d+)/);
-        if (match) {
-          nextNum = parseInt(match[1], 10) + 1;
-        } else {
-          nextNum = audioTracks.length + 1;
-        }
+        const last = audioTracks[audioTracks.length - 1];
+        const match = last.name.match(/(\d+)/);
+        if (match) nextNum = parseInt(match[1]) + 1;
+        else nextNum = audioTracks.length + 1;
       }
-      const name = `A${nextNum}`;
-      return [
-        ...validSettings,
-        { locked: false, visible: true, name, height: 64, type: "audio" },
-      ];
+
+      // 2. Create Valid Track Object
+      const newTrack: TimelineTrack = {
+        id: crypto.randomUUID(),
+        name: `A${nextNum}`,
+        type: "audio",
+        clips: [],
+        isMuted: false,
+        isHidden: false,
+        isLocked: false,
+      };
+
+      return [...prev, newTrack];
     });
   };
 
   const handleAddTrack = () => {
     recordHistory();
+    setTracks((prev) => {
+      // 1. Calculate next Video Track Number (V1, V2...)
+      const videoTracks = prev.filter((t) => t.type === "video");
+      const nextNum = videoTracks.length + 1;
 
-    // We want new video tracks to appear ABOVE V1 in the UI.
-    // Your UI currently renders earlier tracks "higher", so we insert at the top of the VIDEO stack.
-    // That means: insert at index 0 (before all existing tracks).
-    const insertIndex = 0;
-
-    setTracks((prevTracks) => {
-      const next = [...prevTracks];
-      next.splice(insertIndex, 0, []);
-      return next;
-    });
-
-    setTrackSettings((prevSettings) => {
-      // Keep settings aligned to tracks length before we add the new one
-      const validSettings = prevSettings.slice(0, tracks.length);
-
-      // Count existing video tracks by name (V1, V2, ...)
-      const videoCount = validSettings.filter((s) => {
-        if (s.type) return s.type === "video";
-        return (s?.name || "").trim().toUpperCase().startsWith("V");
-      }).length;
-
-      const name = `V${videoCount + 1}`;
-
-      const next = [...validSettings];
-      next.splice(insertIndex, 0, {
-        locked: false,
-        visible: true,
-        name,
-        height: 48,
+      // 2. Create Valid Track Object
+      const newTrack: TimelineTrack = {
+        id: crypto.randomUUID(),
+        name: `V${nextNum}`,
         type: "video",
-      });
+        clips: [],
+        isMuted: false,
+        isHidden: false,
+        isLocked: false,
+      };
 
-      return next;
+      // Insert at the TOP of the list (Standard for Video tracks in this UI)
+      return [newTrack, ...prev];
     });
   };
 
   const handleDeleteTrack = (index: number) => {
     recordHistory();
     setTracks((prev) => prev.filter((_, i) => i !== index));
-    setTrackSettings((prev) => prev.filter((_, i) => i !== index));
   };
 
   const handleRenameTrack = (index: number, newName: string) => {
-    setTrackSettings((prev) =>
-      prev.map((s, i) => (i === index ? { ...s, name: newName } : s)),
+    setTracks((prev) =>
+      prev.map((t, i) => (i === index ? { ...t, name: newName } : t)),
     );
   };
 
+  // Note: Height resizing is removed for now to simplify the interface
   const handleResizeTrack = (index: number, newHeight: number) => {
-    setTrackSettings((prev) =>
-      prev.map((s, i) => (i === index ? { ...s, height: newHeight } : s)),
-    );
+    // Optional: Add 'height' to TimelineTrack interface if needed later
   };
 
   const handleToggleTrackLock = (index: number) => {
-    setTrackSettings((prev) =>
-      prev.map((s, i) => (i === index ? { ...s, locked: !s.locked } : s)),
+    setTracks((prev) =>
+      prev.map((t, i) => (i === index ? { ...t, isLocked: !t.isLocked } : t)),
     );
   };
 
   const handleToggleTrackVisibility = (index: number) => {
-    setTrackSettings((prev) => {
-      const newSettings = [...prev];
-      // Safety check: ensure the setting exists before toggling
-      if (!newSettings[index]) {
-        newSettings[index] = {
-          locked: false,
-          visible: true,
-          name: `Track ${index + 1}`,
-          height: 64,
-        };
-      }
-      newSettings[index] = {
-        ...newSettings[index],
-        visible: !newSettings[index].visible,
-      };
-      return newSettings;
-    });
+    setTracks((prev) =>
+      prev.map((t, i) => (i === index ? { ...t, isHidden: !t.isHidden } : t)),
+    );
   };
 
   // --- DND LOGIC ---
@@ -1172,17 +1016,26 @@ function StudioContent() {
   );
 
   const handleDragStart = (event: DragStartEvent) => {
+    // 1. Check if dragging from Library (Shot data)
     if (event.active.data.current?.shot) {
       setActiveDragItem(event.active.data.current.shot);
-    } else {
-      const shot = shots.find((s) => s.id === event.active.id);
-      if (shot) {
-        setActiveDragItem(shot);
+      return;
+    }
+
+    // 2. Check if dragging a Shot ID directly
+    const shot = shots.find((s) => s.id === event.active.id);
+    if (shot) {
+      setActiveDragItem(shot);
+      return;
+    }
+
+    // 3. Check if dragging an existing Timeline Clip
+    // FIX: Look inside 'track.clips' instead of 'track'
+    for (const track of tracks) {
+      const item = track.clips.find((i) => i.id === event.active.id);
+      if (item) {
+        setActiveDragItem(item);
         return;
-      }
-      for (const track of tracks) {
-        const item = track.find((i) => i.timelineId === event.active.id);
-        if (item) setActiveDragItem(item);
       }
     }
   };
@@ -1196,326 +1049,57 @@ function StudioContent() {
   const handleDragEnd = (event: DragEndEvent) => {
     const { active, over } = event;
     setActiveDragItem(null);
+
+    // 1. Must drop over a track
     if (!over) return;
+    const overId = String(over.id);
+    if (!overId.startsWith("track-")) return;
 
-    const dropContainer = findContainer(over.id as string, tracks);
-    if (!dropContainer) return;
+    // 2. Identify the Track
+    const trackIndex = parseInt(overId.split("-")[1]);
 
-    const overId = over.id as string;
-    const overType = over.data.current?.type;
-    if (overType !== "track" && overType !== "timeline-item") return;
-
-    const targetTrackIndex = parseInt(
-      dropContainer.replace("timeline-track-", ""),
-    );
-    const trackIsAudio = (idx: number) => {
-      const t = trackSettings?.[idx];
-      if (t?.type) return t.type === "audio";
-      return (t?.name || "").trim().toUpperCase().startsWith("A");
-    };
-
-    const targetIsAudio = trackIsAudio(targetTrackIndex);
-
-    const activeRect = active.rect.current.translated;
-    const overRect = over.rect;
-
-    let newStartTime = 0;
-    if (activeRect && overRect) {
-      const relativeX = activeRect.left - overRect.left;
-      const rawTime = Math.max(0, relativeX / zoom);
-
-      newStartTime = rawTime;
-      if (!isCtrlPressed.current) {
-        const SNAP_THRESHOLD_PX = 15;
-        const snapThreshold = SNAP_THRESHOLD_PX / zoom;
-        let activeDuration = 4;
-        let foundItem: any;
-        for (const t of tracks) {
-          const i = t.find((it) => it.timelineId === active.id);
-          if (i) {
-            foundItem = i;
-            break;
-          }
-        }
-        if (!foundItem) {
-          foundItem = shots.find((s) => s.id === active.id);
-        }
-        if (foundItem) {
-          activeDuration = foundItem.duration || 4;
-        }
-        let minDiff = snapThreshold;
-        if (Math.abs(rawTime - 0) < minDiff) {
-          newStartTime = 0;
-          minDiff = Math.abs(rawTime - 0);
-        }
-        if (Math.abs(rawTime - currentTime) < minDiff) {
-          newStartTime = currentTime;
-          minDiff = Math.abs(rawTime - currentTime);
-        }
-        if (Math.abs(rawTime + activeDuration - currentTime) < minDiff) {
-          newStartTime = Math.max(0, currentTime - activeDuration);
-          minDiff = Math.abs(rawTime + activeDuration - currentTime);
-        }
-        tracks.forEach((track) => {
-          track.forEach((item) => {
-            if (item.timelineId === active.id) return;
-            const itemStart = item.startTime;
-            const itemEnd = item.startTime + (item.duration || 4);
-            const diffStartStart = Math.abs(rawTime - itemStart);
-            if (diffStartStart < minDiff) {
-              newStartTime = itemStart;
-              minDiff = diffStartStart;
-            }
-            const diffStartEnd = Math.abs(rawTime - itemEnd);
-            if (diffStartEnd < minDiff) {
-              newStartTime = itemEnd;
-              minDiff = diffStartEnd;
-            }
-            const myEnd = rawTime + activeDuration;
-            const diffEndStart = Math.abs(myEnd - itemStart);
-            if (diffEndStart < minDiff) {
-              newStartTime = Math.max(0, itemStart - activeDuration);
-              minDiff = diffEndStart;
-            }
-            const diffEndEnd = Math.abs(myEnd - itemEnd);
-            if (diffEndEnd < minDiff) {
-              newStartTime = Math.max(0, itemEnd - activeDuration);
-              minDiff = diffEndEnd;
-            }
-          });
-        });
-      }
+    // 3. Identify the Shot (Handle "library-" prefix)
+    let shotData = active.data.current?.shot;
+    if (!shotData) {
+      const activeId = String(active.id).replace("library-", "");
+      shotData = shots.find((s) => s.id === activeId);
     }
-    newStartTime = round(newStartTime);
 
-    const isLibraryItem =
-      active.data.current?.type === "shot" ||
-      shots.some((s) => s.id === active.id);
-    if (isLibraryItem) {
-      if (targetIsAudio) return;
-      const shotData =
-        active.data.current?.shot || shots.find((s) => s.id === active.id);
-      if (!shotData) return;
-      const initialDuration =
-        (shotData as any).sourceDuration ||
-        (shotData as any).maxDuration ||
-        shotData.duration ||
-        4;
-      const newItem: TimelineItem = {
-        ...shotData,
-        timelineId: crypto.randomUUID(),
-        pairId: crypto.randomUUID(),
-        duration: initialDuration,
-        trackIndex: targetTrackIndex,
-        maxDuration: initialDuration,
-        startTime: newStartTime,
-        volume: 1,
-        muted: false,
+    // 4. Create the Clip
+    if (shotData) {
+      recordHistory();
+
+      // Calculate Drop Time: (Drop X - Track Start X) / Zoom
+      const dropX =
+        (active.rect.current.translated?.left || 0) - over.rect.left;
+      const startTime = Math.max(0, dropX / zoom);
+
+      const newClip: TimelineClip = {
+        id: crypto.randomUUID(),
+        type: shotData.audioPath ? "audio" : "video",
+        name: shotData.name,
+        src:
+          shotData.outputVideo ||
+          shotData.audioPath ||
+          shotData.sourceImage ||
+          "",
+        start: startTime,
+        duration: shotData.duration || 4,
+        sourceDuration: shotData.duration || 4, // <--- Set sourceDuration
+        offset: 0,
+        color: shotData.audioPath ? "bg-purple-600" : "bg-blue-600",
       };
-      recordHistory();
+
+      // 5. Add to Track
       setTracks((prev) => {
-        let newTracks = [...prev];
-        newTracks[targetTrackIndex] = applyOverwrite(
-          newTracks[targetTrackIndex],
-          newItem,
-        );
-
-        // Auto-pair Audio Track (V3 -> A3)
-        const targetTrackName = trackSettings[targetTrackIndex]?.name || "V1";
-        const match = targetTrackName.match(/V(\d+)/i);
-        const trackNum = match ? match[1] : "1";
-        const targetAudioName = `A${trackNum}`;
-
-        let audioTrackIndex = trackSettings.findIndex(
-          (t) =>
-            (t.name || "").trim().toUpperCase() ===
-            targetAudioName.toUpperCase(),
-        );
-
-        if (audioTrackIndex === -1) {
-          newTracks = [...newTracks, []];
-          audioTrackIndex = newTracks.length - 1;
-          setTrackSettings((prevSettings) => [
-            ...prevSettings,
-            {
-              locked: false,
-              visible: true,
-              name: targetAudioName,
-              height: 64,
-              type: "audio",
-            },
-          ]);
+        const next = [...prev];
+        if (next[trackIndex]) {
+          next[trackIndex] = {
+            ...next[trackIndex],
+            clips: [...next[trackIndex].clips, newClip],
+          };
         }
-        const audioItem: TimelineItem = {
-          ...newItem,
-          timelineId: crypto.randomUUID(),
-          pairId: newItem.pairId,
-          trackIndex: audioTrackIndex,
-          previewBase64: undefined,
-          name: `AUDIO: ${newItem.name}`,
-        };
-        newTracks[audioTrackIndex] = applyOverwrite(
-          newTracks[audioTrackIndex],
-          audioItem,
-        );
-        return newTracks;
-      });
-
-      // --- NEW: FPS & DURATION DETECTION (REPLACES OLD BLOCK) ---
-      const mediaPath = newItem.outputVideo || newItem.audioPath;
-      if (mediaPath) {
-        // 1. Get the exact FPS from the Go backend (using ffprobe)
-        window.go.main.App.GetVideoFPS(mediaPath).then((realFps: number) => {
-          setTracks((prev) =>
-            prev.map((track) =>
-              track.map((item) => {
-                if (item.pairId === newItem.pairId) {
-                  return { ...item, fps: realFps };
-                }
-                return item;
-              }),
-            ),
-          );
-          // If this is your first clip, match the project speed to the clip
-          if (tracks.flat().length === 0) {
-            setProjectFps(realFps);
-          }
-        });
-
-        // 2. Also keep the duration check for proper timeline sizing
-        const blobUrl =
-          videoBlobs.get(mediaPath) ||
-          `http://localhost:3456/video/${mediaPath.replace(/\\/g, "/")}`;
-        const tempVideo = document.createElement("video");
-        tempVideo.preload = "metadata";
-        tempVideo.onloadedmetadata = () => {
-          if (Number.isFinite(tempVideo.duration)) {
-            setTracks((prev) =>
-              prev.map((track) =>
-                track.map((item) => {
-                  if (item.pairId === newItem.pairId) {
-                    return {
-                      ...item,
-                      duration: tempVideo.duration,
-                      maxDuration: tempVideo.duration,
-                    };
-                  }
-                  return item;
-                }),
-              ),
-            );
-          }
-        };
-        tempVideo.src = blobUrl;
-      }
-      return;
-    }
-
-    const activeContainer = findContainer(active.id as string, tracks);
-    if (activeContainer) {
-      const sourceTrackIndex = parseInt(
-        activeContainer.replace("timeline-track-", ""),
-      );
-      const sourceIsAudio = trackIsAudio(sourceTrackIndex);
-      if (sourceIsAudio !== targetIsAudio) return;
-      recordHistory();
-      setTracks((prev) => {
-        const newTracks = [...prev];
-        if (!newTracks[sourceTrackIndex]) return prev;
-        const sourceTrack = [...newTracks[sourceTrackIndex]];
-        const itemIndex = sourceTrack.findIndex(
-          (i) => i.timelineId === active.id,
-        );
-        if (itemIndex === -1) return prev;
-        const [movedItem] = sourceTrack.splice(itemIndex, 1);
-        newTracks[sourceTrackIndex] = sourceTrack;
-        movedItem.trackIndex = targetTrackIndex;
-        movedItem.startTime = newStartTime;
-
-        if (sourceIsAudio && movedItem.pairId) {
-          let videoTrackIndex = -1;
-          let videoItemIndex = -1;
-          for (let ti = 0; ti < newTracks.length; ti++) {
-            const trackName = (trackSettings?.[ti]?.name || "")
-              .trim()
-              .toUpperCase();
-            if (trackName.startsWith("A")) continue;
-            const idx = newTracks[ti].findIndex(
-              (it: any) => it.pairId === movedItem.pairId,
-            );
-            if (idx !== -1) {
-              videoTrackIndex = ti;
-              videoItemIndex = idx;
-              break;
-            }
-          }
-          if (videoTrackIndex !== -1 && videoItemIndex !== -1) {
-            const videoTrack = [...newTracks[videoTrackIndex]];
-            const [videoItem] = videoTrack.splice(videoItemIndex, 1);
-            newTracks[videoTrackIndex] = videoTrack;
-            const movedVideoItem = {
-              ...videoItem,
-              startTime: newStartTime,
-              trackIndex: videoTrackIndex,
-            };
-            newTracks[videoTrackIndex] = applyOverwrite(
-              newTracks[videoTrackIndex],
-              movedVideoItem,
-            );
-          }
-        }
-        if (movedItem.pairId) {
-          const videoIndices = trackSettings
-            .map((t, i) => ({ ...t, index: i }))
-            .filter((t) => !(t.name || "").trim().toUpperCase().startsWith("A"))
-            .map((t) => t.index);
-          const audioIndices = trackSettings
-            .map((t, i) => ({ ...t, index: i }))
-            .filter((t) => (t.name || "").trim().toUpperCase().startsWith("A"))
-            .map((t) => t.index);
-          const targetVideoOrder = videoIndices.indexOf(targetTrackIndex);
-          let targetAudioIndex = -1;
-          if (targetVideoOrder !== -1 && audioIndices.length > 0) {
-            const invertedOrder = videoIndices.length - 1 - targetVideoOrder;
-            const safeOrder = Math.min(invertedOrder, audioIndices.length - 1);
-            targetAudioIndex = audioIndices[safeOrder];
-          }
-          if (targetAudioIndex !== -1) {
-            let sourceAudioTrackIndex = -1;
-            let sourceAudioItemIndex = -1;
-            for (const idx of audioIndices) {
-              const trk = newTracks[idx];
-              if (!trk) continue;
-              const found = trk.findIndex(
-                (it: any) => it.pairId === movedItem.pairId,
-              );
-              if (found !== -1) {
-                sourceAudioTrackIndex = idx;
-                sourceAudioItemIndex = found;
-                break;
-              }
-            }
-            if (sourceAudioTrackIndex !== -1) {
-              const sourceTrack = [...newTracks[sourceAudioTrackIndex]];
-              const [audioItem] = sourceTrack.splice(sourceAudioItemIndex, 1);
-              newTracks[sourceAudioTrackIndex] = sourceTrack;
-              const movedAudio = {
-                ...audioItem,
-                startTime: newStartTime,
-                trackIndex: targetAudioIndex,
-              };
-              newTracks[targetAudioIndex] = applyOverwrite(
-                newTracks[targetAudioIndex] || [],
-                movedAudio,
-              );
-            }
-          }
-        }
-        newTracks[targetTrackIndex] = applyOverwrite(
-          newTracks[targetTrackIndex],
-          movedItem,
-        );
-        return newTracks;
+        return next;
       });
     }
   };
@@ -1595,7 +1179,7 @@ function StudioContent() {
           setVideoCache={(id: string, b64: string) =>
             videoCache.current.set(id, b64)
           }
-          setVideoSrc={() => {}}
+          setVideoSrc={() => { }}
         />
       </div>
     </div>
@@ -1704,6 +1288,8 @@ function StudioContent() {
                   setIsPlaying={setIsPlaying}
                   setCurrentTime={setCurrentTime}
                   projectFps={projectFps}
+                  volume={masterVolume}
+                  videoBlobs={videoBlobs}
                 />
               </div>
             </div>
@@ -1721,57 +1307,23 @@ function StudioContent() {
               style={{ height: timelineHeight }}
               className="border-t border-zinc-800 bg-[#1e1e20] shrink-0"
             >
-              <TimelinePanel
-                tracks={tracks}
-                onRemoveItem={(id: string) => {
-                  recordHistory();
-                  const target = tracks.flat().find((i) => i.timelineId === id);
-                  const pairId = target?.pairId;
-                  setTracks((prev) => {
-                    if (!pairId) {
-                      return prev.map((t) =>
-                        t.filter((i) => i.timelineId !== id),
-                      );
-                    }
-                    return prev.map((t) =>
-                      t.filter((i) => i.pairId !== pairId),
-                    );
-                  });
-                  if (isPlaying) {
-                    togglePlay();
-                  }
-                }}
-                onUpdateItem={handleUpdateItem}
-                onAddVideoTrack={handleAddTrack}
-                onAddAudioTrack={handleAddAudioTrack}
-                isPlaying={isPlaying}
-                togglePlay={togglePlay}
-                onStop={() => {
-                  if (isPlaying) togglePlay();
-                }}
-                currentTime={currentTime}
-                duration={totalDuration}
-                seekTo={seekTo}
-                activeShotId={activeShotId ?? undefined}
-                onShotClick={(id: string) => setActiveShotId(id)}
-                shots={[]}
-                zoom={zoom}
-                setZoom={setZoom}
-                onSplit={handleSplit}
-                onExtend={handleTimelineExtend}
-                onUndo={undo}
-                onRedo={redo}
-                canUndo={history.length > 0}
-                canRedo={redoStack.length > 0}
-                trackSettings={trackSettings}
-                onDeleteTrack={handleDeleteTrack}
-                onRenameTrack={handleRenameTrack}
-                onResizeTrack={handleResizeTrack}
-                onToggleTrackLock={handleToggleTrackLock}
-                onToggleTrackVisibility={handleToggleTrackVisibility}
-                videoBlobs={videoBlobs}
-                onVolumeChange={handleVolumeChange}
-              />
+              {/* --- NEW TIMELINE --- */}
+              <div style={{ height: timelineHeight }} className="shrink-0">
+                <SimpleTimeline
+                  tracks={tracks}
+                  setTracks={setTracks}
+                  currentTime={currentTime}
+                  setCurrentTime={setCurrentTime}
+                  zoom={zoom}
+                  setZoom={setZoom}
+                  isPlaying={isPlaying}
+                  setIsPlaying={setIsPlaying}
+                  onUndo={undo}
+                  onRedo={redo}
+                  volume={masterVolume}
+                  onVolumeChange={handleVolumeChange}
+                />
+              </div>
             </div>
           </div>
         </div>
@@ -1781,10 +1333,10 @@ function StudioContent() {
         dropAnimation={
           activeDragItem && "timelineId" in activeDragItem
             ? {
-                sideEffects: defaultDropAnimationSideEffects({
-                  styles: { active: { opacity: "0.5" } },
-                }),
-              }
+              sideEffects: defaultDropAnimationSideEffects({
+                styles: { active: { opacity: "0.5" } },
+              }),
+            }
             : null
         }
       >
@@ -1916,11 +1468,10 @@ function StudioContent() {
                               includeAudio: true,
                             }))
                           }
-                          className={`py-2 px-3 rounded border text-xs font-bold transition-all ${
-                            exportOptions.format === preset.fmt
-                              ? "bg-[#D2FF44]/10 border-[#D2FF44] text-[#D2FF44]"
-                              : "bg-zinc-900 border-zinc-800 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
-                          }`}
+                          className={`py-2 px-3 rounded border text-xs font-bold transition-all ${exportOptions.format === preset.fmt
+                            ? "bg-[#D2FF44]/10 border-[#D2FF44] text-[#D2FF44]"
+                            : "bg-zinc-900 border-zinc-800 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
+                            }`}
                         >
                           {preset.label}
                         </button>

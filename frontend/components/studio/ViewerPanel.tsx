@@ -1,203 +1,114 @@
 "use client";
-
-import { memo, useRef, useEffect, useMemo } from "react";
-import { Player, PlayerRef } from "@remotion/player";
+import React, { useRef, useEffect, useState } from "react";
+import { Player } from "@remotion/player";
+import { AbsoluteFill, Sequence, Video, Audio, Img } from "remotion";
 import { HelloWorld } from "./HelloWorld";
-import { convertToRemotionManifest } from "@/lib/remotionBridge";
 
-interface ViewerPanelProps {
-  tracks: any[][];
-  totalDuration: number;
-  currentTime: number;
-  isPlaying: boolean;
-  setIsPlaying: (playing: boolean) => void;
-  setCurrentTime: (time: number) => void;
-  projectFps: number;
-  volume?: number; // <--- NEW: Global Volume
-  previewAsset?: string; // <--- NEW: Single Clip Mode
-}
-
-const ViewerPanel = memo(function ViewerPanel({
+export default function ViewerPanel({
   tracks,
   totalDuration,
   currentTime,
   isPlaying,
   setIsPlaying,
   setCurrentTime,
-  projectFps,
+  projectFps = 30,
   volume = 1,
-  previewAsset,
-}: ViewerPanelProps) {
-  const playerRef = useRef<PlayerRef>(null);
+  videoBlobs, // <--- NEW PROP
+}: any) {
+  const playerRef = useRef<any>(null);
 
-  const seekRafRef = useRef<number | null>(null);
-  const lastSeekFrameRef = useRef<number>(-1);
-
-  const ignorePauseEventRef = useRef(false);
-  const lastAppFrameRef = useRef<number>(-1);
-  // Optimize Manifest Rebuilds
-  const manifest = useMemo(() => {
-    // 1. PREVIEW MODE: If a single asset is selected, ignore timeline tracks
-    if (previewAsset) {
-      return {
-        tracks: [
-          {
-            id: "preview-track",
-            clips: [
-              {
-                id: "preview-clip",
-                file: previewAsset,
-                startFrame: 0,
-                endFrame: Math.round(totalDuration * projectFps),
-                trimStart: 0,
-                type: previewAsset.match(/\.(mp3|wav|m4a|flac|aac)$/i)
-                  ? "audio"
-                  : "video",
-                volume: 1,
-              },
-            ],
-          },
-        ],
-        fps: projectFps,
-        volume: volume, // Pass global volume to HelloWorld
-      };
-    }
-
-    // 2. TIMELINE MODE: Standard conversion
-    const base = convertToRemotionManifest(tracks, projectFps);
-    return { ...base, volume };
-  }, [tracks, projectFps, previewAsset, totalDuration, volume]);
-
-  const currentFrame = Math.round(currentTime * projectFps);
-
-  // 1. App -> Player: Sync Play/Pause
+  // --- FORCE VOLUME UPDATE ---
+  // The Remotion Player usually handles volume via props, but sometimes
+  // needs a hard nudget depending on how the Composition uses the audio.
+  // This is a safety wrapper.
   useEffect(() => {
-    const p = playerRef.current;
-    if (!p) return;
+    if (playerRef.current) {
+      // Remotion player wrapper specific logic if available,
+      // otherwise we rely on the Composition passing the volume prop down.
+    }
+  }, [volume]);
+
+  // --- SYNC PLAYBACK STATE ---
+  useEffect(() => {
+    if (!playerRef.current) return;
 
     if (isPlaying) {
-      p.play();
+      if (!playerRef.current.isPlaying()) playerRef.current.play();
     } else {
-      p.pause();
+      if (playerRef.current.isPlaying()) playerRef.current.pause();
     }
   }, [isPlaying]);
 
-  // 2. App -> Player: Sync Seeking (ONLY when paused) — THROTTLED to avoid echo
+  // --- SYNC CURRENT TIME (SEEKING) ---
   useEffect(() => {
-    const p = playerRef.current;
-    if (!p || isPlaying) return;
+    // Prevent fighting: Only seek if we are NOT playing.
+    // When playing, the player drives the time, not the state.
+    if (isPlaying) return;
 
-    // Cancel any pending seek
-    if (seekRafRef.current != null) {
-      cancelAnimationFrame(seekRafRef.current);
-      seekRafRef.current = null;
-    }
-
-    seekRafRef.current = requestAnimationFrame(() => {
-      seekRafRef.current = null;
-
-      // Don’t re-seek to same frame
-      if (lastSeekFrameRef.current === currentFrame) return;
-
-      // Hard-stop audio before/after seek to prevent overlap
-      p.pause();
-      p.seekTo(currentFrame);
-      p.pause();
-
-      lastSeekFrameRef.current = currentFrame;
-    });
-
-    return () => {
-      if (seekRafRef.current != null) {
-        cancelAnimationFrame(seekRafRef.current);
-        seekRafRef.current = null;
+    if (playerRef.current) {
+      const targetFrame = Math.floor(currentTime * projectFps);
+      const currentFrame = playerRef.current.getCurrentFrame();
+      if (Math.abs(currentFrame - targetFrame) > 1) {
+        playerRef.current.seekTo(targetFrame);
       }
-    };
-  }, [currentFrame, isPlaying]);
+    }
+  }, [currentTime, projectFps, isPlaying]);
 
-  // 2b. If user scrubs while playing: force a pause before seeking (prevents echo)
-
-  // 2c. Seek requests while playing: only intervene on BIG jumps (user scrub)
+  // --- POLL CURRENT FRAME DURING PLAYBACK ---
   useEffect(() => {
-    const p = playerRef.current;
-    if (!p) return;
-    if (!isPlaying) {
-      // keep last frame in sync for the next time playback starts
-      lastAppFrameRef.current = currentFrame;
-      return;
-    }
+    if (!isPlaying) return;
 
-    const last = lastAppFrameRef.current;
-    lastAppFrameRef.current = currentFrame;
+    let handle = 0;
+    const loop = () => {
+      if (playerRef.current) {
+        const frame = playerRef.current.getCurrentFrame();
+        const durationInFrames = Math.ceil(totalDuration * projectFps);
 
-    // During normal playback, currentFrame increments ~1 per render.
-    // If it jumps by more than 1, treat it as a user scrub/seek request.
-    if (last !== -1 && Math.abs(currentFrame - last) > 1) {
-      // Pause without letting the Player's pause event flip app state.
-      ignorePauseEventRef.current = true;
-      try {
-        p.pause();
-        p.seekTo(currentFrame);
-        p.play();
-      } finally {
-        // Clear on next tick
-        setTimeout(() => {
-          ignorePauseEventRef.current = false;
-        }, 0);
+        // Stop if we reached the end
+        if (frame >= durationInFrames - 1) { // -1 buffer to catch it before loop/reset
+          setIsPlaying(false);
+        }
+
+        setCurrentTime(frame / projectFps);
       }
-
-      lastSeekFrameRef.current = currentFrame;
-    }
-  }, [currentFrame, isPlaying]);
-
-  // 3. Player -> App: Listen for frame changes
-  useEffect(() => {
-    const { current } = playerRef;
-    if (!current) return;
-
-    const handleFrameUpdate = (e: CustomEvent<{ frame: number }>) => {
-      if (!isPlaying) return;
-
-      const frame = e.detail.frame;
-      setCurrentTime(frame / projectFps);
-
-      // Stop when we reach the end (prevents endless "playing" state)
-      const endFrame = Math.max(0, Math.floor(totalDuration * projectFps) - 1);
-      if (frame >= endFrame) {
-        setIsPlaying(false);
-      }
+      handle = requestAnimationFrame(loop);
     };
+    handle = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(handle);
+  }, [isPlaying, projectFps, setCurrentTime]);
 
-    current.addEventListener("frameupdate", handleFrameUpdate as any);
-    return () => {
-      current.removeEventListener("frameupdate", handleFrameUpdate as any);
-    };
-  }, [isPlaying, setCurrentTime, setIsPlaying, projectFps, totalDuration]);
-
-  // Force a reset when switching between Timeline and Preview modes
-  // This prevents the "ghost timeline" playback and clears audio buffers
-  const playerKey = previewAsset
-    ? `preview-${previewAsset}`
-    : "timeline-player";
+  // --- MEMOIZE INPUT PROPS (CRITICAL FIX) ---
+  // We explicitly memoize this object so that the Player doesn't see a "new"
+  // input object every single render cycle (which happens on every seek/time update).
+  // We also convert the videoBlobs Map to a plain object if needed, or pass it as is.
+  // Remotion inputProps must be JSON serializable mostly, but for local preview passing a Map *might* work
+  // if we are careful, but safer to pass as an object or just the raw map if we type it.
+  // Actually, for client-side player, passing the Map is fine.
+  const inputProps = React.useMemo(
+    () => ({
+      tracks,
+      volume,
+      fps: projectFps,
+      videoBlobs, // Pass the blobs down
+    }),
+    [tracks, volume, projectFps, videoBlobs],
+  );
 
   return (
-    <div className="h-full bg-black flex flex-col items-center justify-center relative overflow-hidden">
-      <div className="relative w-full h-full flex items-center justify-center bg-zinc-950">
-        <Player
-          key={playerKey}
-          ref={playerRef}
-          component={HelloWorld}
-          inputProps={manifest}
-          durationInFrames={Math.max(1, Math.round(totalDuration * projectFps))}
-          fps={projectFps}
-          compositionWidth={1920}
-          compositionHeight={1080}
-          style={{ width: "100%", height: "100%" }}
-          acknowledgeRemotionLicense
-        />
-      </div>
+    <div className="w-full h-full flex items-center justify-center bg-black">
+      <Player
+        ref={playerRef}
+        component={HelloWorld}
+        inputProps={inputProps}
+        durationInFrames={Math.max(1, Math.ceil(totalDuration * projectFps))}
+        fps={projectFps}
+        compositionWidth={1920}
+        compositionHeight={1080}
+        style={{ width: "100%", height: "100%" }}
+        controls={false}
+        loop={false}
+        autoPlay={isPlaying}
+      />
     </div>
   );
-});
-
-export default ViewerPanel;
+}

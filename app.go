@@ -101,140 +101,9 @@ func (a *App) UpdateTimeline(clips []string) string {
 
 // RenderTimelinePreview generates a flattened preview video for the timeline
 func (a *App) RenderTimelinePreview(projectId string, sceneId string, timeline TimelineData) string {
-	// 1. Setup Paths
-	tempDir := os.TempDir()
-	previewPath := filepath.Join(tempDir, fmt.Sprintf("preview_%s_%s.mp4", projectId, sceneId))
-	listPath := filepath.Join(tempDir, fmt.Sprintf("preview_list_%s_%s.txt", projectId, sceneId))
-	
-	// 2. Prepare Black Frame (for gaps)
-	blackPath := filepath.Join(tempDir, "black.png")
-	if _, err := os.Stat(blackPath); os.IsNotExist(err) {
-		data, _ := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
-		os.WriteFile(blackPath, data, 0644)
-	}
-
-	type Item struct {
-		StartTime   float64
-		Duration    float64
-		TrimStart   float64
-		OutputVideo string
-		SourceImage string
-		PairID      string
-	}
-
-	// Collect all time points
-	timePoints := []float64{0.0}
-	var tracks [][]Item
-	
-	// Parse TimelineData to local struct
-	for _, rawTrack := range timeline.Tracks {
-		var track []Item
-		for _, rawItem := range rawTrack {
-			item := Item{}
-			if v, ok := rawItem["startTime"].(float64); ok { item.StartTime = v }
-			if v, ok := rawItem["duration"].(float64); ok { item.Duration = v }
-			if v, ok := rawItem["trimStart"].(float64); ok { item.TrimStart = v }
-			if v, ok := rawItem["outputVideo"].(string); ok { item.OutputVideo = v }
-			if v, ok := rawItem["sourceImage"].(string); ok { item.SourceImage = v }
-			if v, ok := rawItem["pairId"].(string); ok { item.PairID = v }
-			track = append(track, item)
-			timePoints = append(timePoints, item.StartTime)
-			timePoints = append(timePoints, item.StartTime+item.Duration)
-		}
-		tracks = append(tracks, track)
-	}
-
-	sort.Float64s(timePoints)
-	uniquePoints := []float64{}
-	if len(timePoints) > 0 {
-		uniquePoints = append(uniquePoints, timePoints[0])
-		for i := 1; i < len(timePoints); i++ {
-			if timePoints[i] > timePoints[i-1]+0.01 {
-				uniquePoints = append(uniquePoints, timePoints[i])
-			}
-		}
-	}
-
-	var concat strings.Builder
-	concat.WriteString("ffconcat version 1.0\n")
-
-	// Generate Segments
-	for i := 0; i < len(uniquePoints)-1; i++ {
-		start := uniquePoints[i]
-		end := uniquePoints[i+1]
-		mid := (start + end) / 2
-		dur := end - start
-
-		var activeItem *Item
-
-		// Find Top-Most Visible Video
-		for tIdx, track := range tracks {
-			// Check visibility from settings
-			if tIdx < len(timeline.TrackSettings) {
-				ts := timeline.TrackSettings[tIdx]
-				if !ts.Visible { continue }
-				isAudio := ts.Type == "audio" || strings.HasPrefix(ts.Name, "A")
-				if isAudio { continue }
-			}
-
-			foundClip := false
-			for _, item := range track {
-				if mid >= item.StartTime && mid < item.StartTime+item.Duration {
-					itemCopy := item
-					activeItem = &itemCopy
-					foundClip = true
-					break
-				}
-			}
-			if foundClip { break }
-		}
-
-		if activeItem != nil {
-			offset := start - activeItem.StartTime + activeItem.TrimStart
-			source := activeItem.OutputVideo
-			if source == "" { source = activeItem.SourceImage }
-			
-			safePath := strings.ReplaceAll(filepath.ToSlash(source), "'", "'\\''")
-			concat.WriteString(fmt.Sprintf("file '%s'\n", safePath))
-			
-			isImage := strings.HasSuffix(source, ".png") || strings.HasSuffix(source, ".jpg")
-			if !isImage {
-				concat.WriteString(fmt.Sprintf("inpoint %f\n", offset))
-				concat.WriteString(fmt.Sprintf("outpoint %f\n", offset+dur))
-			} else {
-				concat.WriteString(fmt.Sprintf("duration %f\n", dur))
-			}
-		} else {
-			// Gap -> Black Frame
-			safePath := strings.ReplaceAll(filepath.ToSlash(blackPath), "'", "'\\''")
-			concat.WriteString(fmt.Sprintf("file '%s'\n", safePath))
-			concat.WriteString(fmt.Sprintf("duration %f\n", dur))
-		}
-	}
-
-	os.WriteFile(listPath, []byte(concat.String()), 0644)
-
-	// 4. Render Preview
-	cmd := exec.Command("ffmpeg", 
-		"-y", 
-		"-f", "concat", 
-		"-safe", "0", 
-		"-i", listPath, 
-		"-c:v", "libx264", 
-		"-preset", "ultrafast", 
-		"-crf", "28", 
-		// Force standard pixel format so Chrome doesn't throw Code 4
-		"-vf", "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,format=yuv420p",
-		"-r", "30",
-		previewPath,
-	)
-
-	if err := cmd.Run(); err != nil {
-		fmt.Println("Preview Render Error:", err)
-		return ""
-	}
-
-	return fmt.Sprintf("http://localhost:3456/video/%s?t=%d", filepath.ToSlash(previewPath), time.Now().UnixMilli())
+	// DEPRECATED: We now use Remotion for live preview.
+	// This function is kept as a stub to prevent errors if the frontend calls it.
+	return ""
 }
 
 // --- MODELS ---
@@ -2219,7 +2088,7 @@ func StartStreamServer() {
 	server = NewStreamServer()
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("/stream", server.StartStreamHandler)
+	// mux.HandleFunc("/stream", server.StartStreamHandler)
 
 	mux.HandleFunc("/preview.mp4", func(w http.ResponseWriter, r *http.Request) {
 		path := filepath.Join(server.currentDir, "preview.mp4")
@@ -2236,7 +2105,7 @@ func StartStreamServer() {
 	// -------------------------------------------------------------
 	mux.HandleFunc("/video/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Cache-Control", "public, max-age=3600")
 
 		// 1. Get raw encoded path (e.g. "C:/Users/Mark%20Barela/video.mp4")
 		urlPath := r.URL.Path
@@ -2312,7 +2181,7 @@ func StartStreamServer() {
 		http.ServeFile(w, r, filePath)
 	})
 
-	fmt.Println("🎥 Video Engine listening on http://localhost:3456/stream")
+	fmt.Println("🎥 File Server listening on http://localhost:3456")
 	http.ListenAndServe(":3456", mux)
 }
 

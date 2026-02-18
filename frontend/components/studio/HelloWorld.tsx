@@ -1,4 +1,4 @@
-import { AbsoluteFill, Video, Audio, Sequence } from "remotion";
+import { AbsoluteFill, Video, Audio, Sequence, Img } from "remotion";
 import { RemotionManifest } from "@/lib/remotionBridge";
 import { useState, Fragment } from "react";
 
@@ -8,9 +8,8 @@ const getSafeUrl = (filePath: string) => {
   if (filePath.startsWith("http") || filePath.startsWith("blob"))
     return filePath;
 
-  // Use the new robust query-param endpoint
-  // This handles C:\, spaces, #, ?, etc. perfectly without manual splitting
-  return `http://localhost:3456/api/media?file=${encodeURIComponent(filePath)}`;
+  // Use the static video endpoint for better performance/caching during playback
+  return `http://localhost:3456/video/${encodeURIComponent(filePath.replace(/\\/g, "/"))}`;
 };
 
 export const HelloWorld = (props: any) => {
@@ -18,7 +17,8 @@ export const HelloWorld = (props: any) => {
     tracks,
     fps,
     volume: globalVolume,
-  } = props as RemotionManifest & { volume: number };
+    videoBlobs, // <--- Receive blobs
+  } = props as RemotionManifest & { volume: number; videoBlobs?: Map<string, string> };
   const [error, setError] = useState<string | null>(null);
 
   if (error) {
@@ -39,16 +39,39 @@ export const HelloWorld = (props: any) => {
 
   return (
     <AbsoluteFill style={{ backgroundColor: "black" }}>
-      {tracks.map((track) => (
+      {[...tracks].reverse().map((track) => ( // <--- Reversed tracks for z-index
         <Fragment key={track.id}>
           {track.clips.map((clip, index) => {
-            const durationInFrames = clip.endFrame - clip.startFrame;
-            const startFromFrames = Math.round(clip.trimStart * fps);
+            // Handle both "Render Manifest" (frames) and "Timeline State" (seconds)
+            let durationInFrames = 0;
+            let startFrame = 0;
 
-            const src = getSafeUrl(clip.file);
+            const c = clip as any;
+
+            if (typeof c.start === "number" && typeof c.duration === "number") {
+              startFrame = Math.round(c.start * fps);
+              durationInFrames = Math.round(c.duration * fps);
+            } else {
+              durationInFrames = clip.endFrame - clip.startFrame;
+              startFrame = clip.startFrame;
+            }
+
+            const startFromFrames = Math.round(
+              (c.trimStart || c.offset || 0) * fps,
+            );
+
+            // RESOLVE SOURCE: Check Blobs first, then URL
+            let src = c.src || c.file || "";
+            if (videoBlobs && videoBlobs instanceof Map && videoBlobs.has(src)) {
+              src = videoBlobs.get(src)!;
+            } else {
+              src = getSafeUrl(src);
+            }
+
+            if (!src) return null;
 
             // Ensure volume is a valid number. Default to 1 (100%) if missing.
-            const volume = typeof clip.volume === "number" ? clip.volume : 1;
+            const volume = typeof c.volume === "number" ? c.volume : 1;
 
             // Calculate final volume (Clip Volume * Global Master Volume)
             const finalVolume =
@@ -56,14 +79,16 @@ export const HelloWorld = (props: any) => {
 
             const isMuted = finalVolume === 0;
 
+            const isImage = /\.(jpg|jpeg|png|webp|gif)$/i.test(src);
+
             return (
               <Sequence
-                key={clip.id ?? index}
-                from={clip.startFrame}
+                key={c.id ?? index}
+                from={startFrame}
                 durationInFrames={durationInFrames}
               >
                 {/* 1. AUDIO CLIPS (Separate Files) */}
-                {clip.type === "audio" ? (
+                {c.type === "audio" ? (
                   <Audio
                     src={src}
                     startFrom={startFromFrames}
@@ -73,38 +98,35 @@ export const HelloWorld = (props: any) => {
                       console.error(`❌ Audio File Failed: ${src}`, e)
                     }
                   />
+                ) : isImage ? (
+                  /* 2. IMAGE CLIPS */
+                  <Img
+                    src={src}
+                    style={{
+                      width: "100%",
+                      height: "100%",
+                      objectFit: "contain",
+                    }}
+                  />
                 ) : (
                   /* 2. VIDEO CLIPS (With Embedded Audio) */
-                  <>
-                    <Video
-                      src={src}
-                      crossOrigin="anonymous"
-                      style={{
-                        width: "100%",
-                        height: "100%",
-                        objectFit: "contain",
-                        backgroundColor: "black",
-                      }}
-                      startFrom={startFromFrames}
-                      muted // ✅ ALWAYS mute the video element to prevent double-audio
-                      playbackRate={1}
-                      onError={(e) =>
-                        console.error(`❌ Video Failed: ${src}`, e)
-                      }
-                    />
-
-                    {/* ✅ Explicit audio for video clips (single, controlled source) */}
-                    {!isMuted && (
-                      <Audio
-                        src={src}
-                        startFrom={startFromFrames}
-                        volume={finalVolume}
-                        onError={(e) =>
-                          console.error(`❌ Video-Audio Failed: ${src}`, e)
-                        }
-                      />
-                    )}
-                  </>
+                  <Video
+                    src={src}
+                    crossOrigin="anonymous"
+                    style={{
+                      width: "100%",
+                      height: "100%",
+                      objectFit: "contain",
+                      backgroundColor: "black",
+                    }}
+                    startFrom={startFromFrames}
+                    muted={isMuted}
+                    volume={finalVolume}
+                    // @ts-ignore
+                    preload="auto"
+                    playbackRate={1}
+                    onError={(e) => console.error(`❌ Video Failed: ${src}`, e)}
+                  />
                 )}
               </Sequence>
             );
