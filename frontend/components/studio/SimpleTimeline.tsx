@@ -19,6 +19,8 @@ import {
   Volume2,
   VolumeX,
   Magnet,
+  MoreVertical,
+  Maximize2, // New Icon
 } from "lucide-react";
 import { useDroppable } from "@dnd-kit/core";
 
@@ -42,6 +44,8 @@ export interface TimelineClip {
   offset: number;
   color: string;
   sourceDuration?: number;
+  thumbnail?: string;
+  isMuted?: boolean; // <--- NEW PROP
 }
 
 export interface TimelineTrack {
@@ -67,13 +71,16 @@ interface SimpleTimelineProps {
   onRedo?: () => void;
   volume?: number;
   onVolumeChange?: (vol: number) => void;
+  selectedClipId?: string | null;
+  onSelectClip?: (clipId: string | null) => void;
+  onDeleteClip?: (clipId: string) => void;
 }
 
 // --- 1. THE RULER (Fixed: Optional Labels) ---
 const TimelineRuler = memo(function TimelineRuler({
   zoom,
   scrollLeft,
-  showLabels = true, // <--- NEW PROP
+  showLabels = true,
   showTicks = true,
 }: any) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -105,19 +112,24 @@ const TimelineRuler = memo(function TimelineRuler({
 
       // Major Tick (30s)
       if (i % 30 === 0) {
-        ctx.fillRect(x, 0, 1, rect.height);
+        ctx.fillRect(x, 0, 1, 14); // Even shorter major tick
         if (showLabels) {
-          const timeStr = new Date(i * 1000).toISOString().substr(14, 5);
-          ctx.fillText(timeStr, x + 4, 12);
+          // NLE Format with 01:00:00 offset
+          const adjusted = i + 3600;
+          const h = Math.floor(adjusted / 3600);
+          const m = Math.floor((adjusted % 3600) / 60);
+          const s = Math.floor(adjusted % 60);
+          const timeStr = `${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
+          ctx.fillText(timeStr, x + 4, rect.height - 4); // Labels at bottom
         }
       }
       // Medium Tick (15s)
       else if (showTicks && i % 15 === 0) {
-        ctx.fillRect(x, 0, 1, 12);
+        ctx.fillRect(x, 0, 1, 8); // Shorter medium tick
       }
       // Minor Tick (1s)
       else if (showTicks) {
-        ctx.fillRect(x, 0, 1, 6);
+        ctx.fillRect(x, 0, 1, 4); // Shorter minor tick
       }
     }
   }, [zoom, scrollLeft, showLabels, showTicks]);
@@ -162,129 +174,314 @@ const Playhead = memo(function Playhead({
 });
 
 // --- 3. TRACK ROW ---
-const TrackRow = memo(function TrackRow({
-  track,
-  trackIdx,
-  zoom,
-  onDragStart,
-  toggleTrackProperty,
-  deleteTrack,
-  dragState,
-  activeTool,
-}: any) {
-  const { setNodeRef, isOver } = useDroppable({
-    id: `track-${trackIdx}`,
-    data: { trackIndex: trackIdx },
-  });
+const TrackRow = memo(
+  function TrackRow({
+    track,
+    trackIdx,
+    zoom,
+    onDragStart,
+    toggleTrackProperty,
+    deleteTrack,
+    dragState,
+    activeTool,
+    selectedClipId,
+    onSelectClip,
+    onDeleteClip,
+    onTrackContextMenu, // Renamed from onContextMenu
+    onClipContextMenu, // New
+    onToggleClipMute,
+    onSplitClip, // <--- NEW PROP
+    splitHover, // <--- NEW PROP
+    onSplitHover, // <--- NEW PROP
+    zIndex, // <--- NEW PROP
+  }: any) {
+    const { setNodeRef, isOver } = useDroppable({
+      id: `track-${trackIdx}`,
+      data: { trackIndex: trackIdx },
+    });
 
-  return (
-    <div
-      className="flex relative shrink-0 group"
-      style={{ height: TRACK_HEIGHT }}
-    >
-      {/* HEADER */}
+    return (
       <div
-        className={`shrink-0 flex flex-col px-2 justify-center sticky left-0 ${LEFT_PANEL_BG} ${LEFT_PANEL_BORDER} z-20`}
-        style={{ width: LEFT_PANEL_W }}
+        className="flex relative shrink-0 group"
+        style={{ height: TRACK_HEIGHT, zIndex }}
       >
-        <div className="flex justify-between items-center text-zinc-400">
-          <span
-            className="text-xs font-bold text-zinc-300 truncate flex-1 min-w-0 mr-2"
-            title={track.name}
-          >
-            {track.name}
-          </span>
-          <div className="flex items-center gap-1 shrink-0">
-            <button
-              onClick={() => toggleTrackProperty(trackIdx, "isMuted")}
-              className={`p-1 hover:text-white ${track.isMuted ? "text-red-400" : "text-zinc-500"}`}
+        {/* HEADER */}
+        <div
+          className={`shrink-0 flex flex-col px-2 justify-center sticky left-0 ${LEFT_PANEL_BG} ${LEFT_PANEL_BORDER} border-b border-zinc-800 z-20 hover:bg-zinc-700/50 transition-colors cursor-context-menu`}
+          style={{ width: LEFT_PANEL_W }}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            if (onTrackContextMenu) onTrackContextMenu(e, trackIdx);
+          }}
+          onMouseMove={(e) => {
+            if (activeTool === "split" && onSplitHover) {
+              const rect = e.currentTarget.getBoundingClientRect();
+              const x = e.clientX - rect.left;
+              onSplitHover(trackIdx, x);
+            }
+          }}
+          onMouseLeave={() => {
+            if (activeTool === "split" && onSplitHover) {
+              onSplitHover(null);
+            }
+          }}
+        >
+          <div className="flex justify-between items-center text-zinc-400">
+            <span
+              className="text-xs font-bold text-zinc-300 truncate flex-1 min-w-0 mr-2"
+              title={track.name}
             >
-              {track.isMuted ? <VolumeX size={12} /> : <Volume2 size={12} />}
-            </button>
-            <button
-              onClick={() => toggleTrackProperty(trackIdx, "isHidden")}
-              className={`p-1 hover:text-white ${track.isHidden ? "text-zinc-600" : "text-zinc-400"}`}
-            >
-              {track.isHidden ? <EyeOff size={12} /> : <Eye size={12} />}
-            </button>
-            <button className="p-1 text-zinc-500 hover:text-white">
-              {track.isLocked ? <Lock size={12} /> : <Unlock size={12} />}
-            </button>
-            <button
-              onClick={() => deleteTrack(trackIdx)}
-              className="p-1 text-zinc-600 hover:text-red-500 transition-colors"
-              title="Delete Track"
-            >
-              <Trash2 size={12} />
-            </button>
+              {track.name}
+            </span>
+
+            <div className="flex items-center gap-1 shrink-0">
+              {/* Status Icons (Tiny) */}
+              <div className="flex gap-0.5 mr-1">
+                {track.isMuted && (
+                  <VolumeX size={10} className="text-red-400" />
+                )}
+                {track.isHidden && (
+                  <EyeOff size={10} className="text-zinc-500" />
+                )}
+                {track.isLocked && <Lock size={10} className="text-zinc-500" />}
+              </div>
+
+              {/* KEBAB MENU */}
+              <button
+                className="p-1 hover:text-white hover:bg-zinc-700/80 rounded"
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  e.preventDefault();
+                  e.stopPropagation();
+                  if (onTrackContextMenu) onTrackContextMenu(e, trackIdx);
+                }}
+              >
+                <MoreVertical size={12} />
+              </button>
+            </div>
           </div>
         </div>
-      </div>
 
-      {/* TIMELINE CONTENT */}
-      <div
-        ref={setNodeRef}
-        className={`flex-1 relative min-w-[2000px] transition-colors ${isOver ? "bg-zinc-800/30" : ""}`}
-      >
-        {track.clips.map((clip: any) => (
-          <div
-            key={clip.id}
-            className={`absolute top-0 bottom-0 border flex flex-col overflow-hidden cursor-pointer select-none
-              ${track.type === "audio"
-                ? "bg-[#1a1a1c] border-white/10"
-                : "bg-[#375a6c] border-[#213845]"
-              }
-              ${track.isLocked ? "opacity-50 cursor-not-allowed" : "hover:brightness-110"}
-              ${dragState?.clipId === clip.id ? "ring-2 ring-[#D2FF44] z-30 opacity-80" : "z-10"}
-              ${activeTool === "split" ? "cursor-crosshair" : ""}
-            `}
-            style={{
-              left: clip.start * zoom,
-              width: Math.max(2, clip.duration * zoom),
-              transition:
-                dragState?.clipId === clip.id
-                  ? "none"
-                  : "left 0.1s, width 0.1s",
-            }}
-            onMouseDown={(e) => onDragStart(e, clip, trackIdx, "move")}
-          >
-            {track.type !== "audio" && (
-              <div className="flex-1 relative overflow-hidden flex bg-zinc-800">
-                <div className="absolute bottom-0 w-full bg-gradient-to-t from-black/90 to-transparent px-2 py-0.5 text-[9px] text-zinc-300 truncate font-mono pointer-events-none z-10">
-                  {clip.name}
-                </div>
-              </div>
-            )}
-            {track.type === "audio" && (
-              <div className="relative overflow-hidden shrink-0 flex items-center flex-1 bg-[#101012]">
-                <div className="w-full h-px bg-[#D2FF44]/30" />
-                <div className="absolute top-1 left-2 text-[9px] text-zinc-400 font-mono pointer-events-none">
-                  {clip.name}
-                </div>
-              </div>
-            )}
-            {!track.isLocked && activeTool === "select" && (
-              <>
-                <div
-                  className="absolute left-0 top-0 bottom-0 w-2 hover:bg-white/50 cursor-w-resize z-20"
-                  onMouseDown={(e) =>
-                    onDragStart(e, clip, trackIdx, "resize-left")
+        {/* TIMELINE CONTENT */}
+        <div
+          ref={setNodeRef}
+          className={`flex-1 relative min-w-[2000px] transition-colors ${isOver ? "bg-zinc-800/30" : ""} ${activeTool === "split" ? "cursor-crosshair" : ""}`}
+          onClick={(e) => {
+            if (activeTool === "split" && onSplitClip) {
+              const rect = e.currentTarget.getBoundingClientRect();
+              const x = e.clientX - rect.left;
+              onSplitClip(trackIdx, x, zoom);
+            } else if (onSelectClip) {
+              onSelectClip(null);
+            }
+          }}
+          onMouseMove={(e) => {
+            if (activeTool === "split" && onSplitHover) {
+              const rect = e.currentTarget.getBoundingClientRect();
+              const x = e.clientX - rect.left;
+              onSplitHover(trackIdx, x);
+            }
+          }}
+          onMouseLeave={() => {
+            if (activeTool === "split" && onSplitHover) onSplitHover(null);
+          }}
+        >
+          {/* SPLIT LINE INDICATOR */}
+          {activeTool === "split" && splitHover?.trackIndex === trackIdx && (
+            <div
+              className="absolute top-0 bottom-0 w-px bg-red-500 z-50 pointer-events-none"
+              style={{ left: splitHover.x }}
+            />
+          )}
+
+          {track.clips.map((clip: any) => {
+            const isSelected = selectedClipId === clip.id;
+            return (
+              <div
+                key={clip.id}
+                className={`absolute top-0 bottom-0 border flex flex-col overflow-hidden cursor-pointer select-none group/clip rounded-sm
+                ${
+                  track.type === "audio"
+                    ? "bg-[#1a1a1c] border-white/10"
+                    : "bg-[#375a6c] border-[#213845]"
+                }
+                ${track.isLocked ? "opacity-50 cursor-not-allowed" : "hover:brightness-110"}
+                ${dragState?.clipId === clip.id ? "ring-2 ring-[#D2FF44] z-30 opacity-80" : "z-10"}
+                ${isSelected ? "ring-2 ring-white z-20" : ""} 
+                ${activeTool === "split" ? "cursor-crosshair" : ""}
+                ${clip.isMuted ? "grayscale opacity-75" : ""}
+              `}
+                style={{
+                  left: clip.start * zoom,
+                  width: Math.max(2, clip.duration * zoom),
+                  transition:
+                    dragState?.clipId === clip.id
+                      ? "none"
+                      : "left 0.1s, width 0.1s",
+                }}
+                onMouseDown={(e) => {
+                  e.stopPropagation(); // Prevent deselect
+                  if (activeTool === "split") {
+                    if (onSplitClip) {
+                      // Click calculation needs to happen relative to track container, handled by parent onClick.
+                      // But since we stopPropagation here, we need to manually trigger split.
+                      // However, finding the X relative to track container is tricky here.
+                      // Better approach: Let the click bubbling handle it?
+                      // No, because onMouseDown stops prop.
+                      // Let's manually call split here.
+                      const rect =
+                        e.currentTarget.parentElement?.getBoundingClientRect();
+                      if (rect) {
+                        const x = e.clientX - rect.left;
+                        onSplitClip(trackIdx, x, zoom);
+                      }
+                    }
+                    return;
                   }
-                />
-                <div
-                  className="absolute right-0 top-0 bottom-0 w-2 hover:bg-white/50 cursor-e-resize z-20"
-                  onMouseDown={(e) =>
-                    onDragStart(e, clip, trackIdx, "resize-right")
-                  }
-                />
-              </>
-            )}
-          </div>
-        ))}
+                  if (onSelectClip) onSelectClip(clip.id);
+                  onDragStart(e, clip, trackIdx, "move");
+                }}
+              >
+                {track.type !== "audio" && (
+                  <div className="flex-1 relative overflow-hidden flex bg-zinc-800">
+                    {/* THUMBNAIL */}
+                    {clip.thumbnail && (
+                      <img
+                        src={clip.thumbnail}
+                        className="w-full h-full object-cover opacity-70 pointer-events-none"
+                        draggable={false}
+                      />
+                    )}
+                    <div className="absolute bottom-0 w-full bg-gradient-to-t from-black/90 to-transparent px-2 py-0.5 text-[9px] text-zinc-300 truncate font-mono pointer-events-none z-10">
+                      {clip.name}
+                    </div>
+                    <div className="absolute bottom-0 w-full bg-gradient-to-t from-black/90 to-transparent px-2 py-0.5 text-[9px] text-zinc-300 truncate font-mono pointer-events-none z-10">
+                      {clip.name}
+                    </div>
+
+                    {/* KEBAB MENU (Top Right - visible on hover or if muted) */}
+                    <div className="absolute top-1 right-1 z-40 opacity-0 group-hover/clip:opacity-100 transition-opacity">
+                      <button
+                        className={`p-1 hover:bg-zinc-600/80 rounded text-white ${clip.isMuted ? "bg-red-500/20 text-red-400 opacity-100" : "bg-black/50"}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (onClipContextMenu)
+                            onClipContextMenu(e, trackIdx, clip.id);
+                        }}
+                      >
+                        <MoreVertical size={10} />
+                      </button>
+                    </div>
+                  </div>
+                )}
+                {track.type === "audio" && (
+                  <div className="relative overflow-hidden shrink-0 flex items-center flex-1 bg-[#101012]">
+                    <div className="w-full h-px bg-[#D2FF44]/30" />
+                    <div className="absolute top-1 left-2 text-[9px] text-zinc-400 font-mono pointer-events-none">
+                      {clip.name}
+                    </div>
+                    {/* KEBAB MENU (Audio - Right side) */}
+                    <div className="absolute top-1 right-1 z-40 opacity-0 group-hover/clip:opacity-100 transition-opacity">
+                      <button
+                        className={`p-1 hover:bg-zinc-600/80 rounded text-white ${clip.isMuted ? "bg-red-500/20 text-red-400 opacity-100" : "bg-black/50"}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (onClipContextMenu)
+                            onClipContextMenu(e, trackIdx, clip.id);
+                        }}
+                      >
+                        <MoreVertical size={10} />
+                      </button>
+                    </div>
+                  </div>
+                )}
+                {!track.isLocked && activeTool === "select" && (
+                  <>
+                    <div
+                      className="absolute left-0 top-0 bottom-0 w-2 hover:bg-white/50 cursor-w-resize z-20"
+                      onMouseDown={(e) =>
+                        onDragStart(e, clip, trackIdx, "resize-left")
+                      }
+                    />
+                    <div
+                      className="absolute right-0 top-0 bottom-0 w-2 hover:bg-white/50 cursor-e-resize z-20"
+                      onMouseDown={(e) =>
+                        onDragStart(e, clip, trackIdx, "resize-right")
+                      }
+                    />
+                  </>
+                )}
+              </div>
+            );
+          })}
+        </div>
       </div>
-    </div>
-  );
-});
+    );
+  },
+  (prevProps, nextProps) => {
+    // --- OPTIMIZATION: Only re-render if necessary ---
+    // 1. Zoom changed?
+    if (prevProps.zoom !== nextProps.zoom) return false;
+
+    // 1.5 Z-Index changed?
+    if (prevProps.zIndex !== nextProps.zIndex) return false;
+
+    // 2. Track Data changed? (Deep compare simple track props, simple clips array length check first for speed)
+    if (prevProps.track !== nextProps.track) return false;
+
+    // 3. Selection Changed?
+    if (prevProps.selectedClipId !== nextProps.selectedClipId) {
+      // Only re-render if the selection change affects THIS track's clips
+      const prevSelectedInTrack = prevProps.track.clips.some(
+        (c: any) => c.id === prevProps.selectedClipId,
+      );
+      const nextSelectedInTrack = nextProps.track.clips.some(
+        (c: any) => c.id === nextProps.selectedClipId,
+      );
+      if (prevSelectedInTrack || nextSelectedInTrack) return false;
+    }
+
+    // 4. Drag State
+    const prevDrag = prevProps.dragState;
+    const nextDrag = nextProps.dragState;
+
+    if (prevDrag !== nextDrag) {
+      // Drag started, ended, or changed
+      if (!prevDrag && nextDrag) {
+        // Drag Started. Only re-render if Drag is ON THIS TRACK
+        if (nextDrag.trackIndex === nextProps.trackIdx) return false;
+      }
+      if (prevDrag && !nextDrag) {
+        // Drag Ended. Only re-render if Drag WAS ON THIS TRACK
+        if (prevDrag.trackIndex === prevProps.trackIdx) return false;
+      }
+      if (prevDrag && nextDrag) {
+        // Dragging updates.
+        // Re-render if drag is ON this track or WAS on this track (moving between tracks)
+        if (
+          prevDrag.trackIndex === prevProps.trackIdx ||
+          nextDrag.trackIndex === nextProps.trackIdx
+        )
+          return false;
+      }
+    }
+
+    // 5. Split Tool Hover
+    if (prevProps.activeTool === "split" || nextProps.activeTool === "split") {
+      if (prevProps.splitHover !== nextProps.splitHover) {
+        // Only re-render if hover affects THIS track
+        if (
+          prevProps.splitHover?.trackIndex === prevProps.trackIdx ||
+          nextProps.splitHover?.trackIndex === nextProps.trackIdx
+        )
+          return false;
+      }
+    }
+
+    return true; // Else, skip re-render
+  },
+);
 
 // --- MAIN COMPONENT ---
 export default function SimpleTimeline({
@@ -300,14 +497,87 @@ export default function SimpleTimeline({
   onRedo,
   volume = 1,
   onVolumeChange,
+  selectedClipId,
+  onSelectClip,
+  onDeleteClip, // <--- NEW PROP
 }: SimpleTimelineProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const horizontalScrollRef = useRef<HTMLDivElement>(null);
+  const rafRef = useRef<number | null>(null);
+  const dragMouseX = useRef<number>(0);
+  const dragMouseY = useRef<number>(0);
+
+  // Helper: Format Time (HH:MM:SS:FF) matching TimelinePanel
+  const formatTime = (seconds: number) => {
+    // Standard NLE offset: 01:00:00:00
+    const adjusted = seconds + 3600;
+
+    const h = Math.floor(adjusted / 3600);
+    const m = Math.floor((adjusted % 3600) / 60);
+    const s = Math.floor(adjusted % 60);
+    const f = Math.floor((adjusted % 1) * 30);
+    return `${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}:${f.toString().padStart(2, "0")}`;
+  };
+
   const [activeTool, setActiveTool] = useState<"select" | "split">("select");
   const [isSnappingEnabled, setIsSnappingEnabled] = useState(true);
+
   const [isDraggingPlayhead, setIsDraggingPlayhead] = useState(false);
   const [scrollLeft, setScrollLeft] = useState(0);
+
+  // Split Hover State
+  const [splitHover, setSplitHover] = useState<{
+    trackIndex: number;
+    x: number;
+  } | null>(null);
+
+  // --- STABILIZATION: Use ref for tracks to prevent handleMouseMove recreation ---
+  const tracksRef = useRef(tracks);
+  useEffect(() => {
+    tracksRef.current = tracks;
+  }, [tracks]);
+
+  const handleSplitHover = useCallback(
+    (trackIndex: number | null, x?: number) => {
+      if (trackIndex === null || x === undefined) {
+        setSplitHover(null);
+      } else {
+        setSplitHover({ trackIndex, x });
+      }
+    },
+    [],
+  );
+
+  // --- KEYBOARD SHORTCUTS ---
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Ignore if typing in an input or textarea
+      const target = e.target as HTMLElement;
+      if (
+        target.tagName === "INPUT" ||
+        target.tagName === "TEXTAREA" ||
+        target.isContentEditable
+      ) {
+        return;
+      }
+
+      switch (e.key.toLowerCase()) {
+        case "a":
+          setActiveTool("select");
+          break;
+        case "b":
+          setActiveTool("split");
+          break;
+        case "n":
+          setIsSnappingEnabled((prev) => !prev);
+          break;
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
 
   // Keep track if we were playing before dragging the playhead
   const wasPlayingRef = useRef(false);
@@ -321,12 +591,13 @@ export default function SimpleTimeline({
     originalStart: number;
     originalDuration: number;
     originalOffset: number;
+    snapPoints: number[]; // Optimization: Cache snap points
   } | null>(null);
 
   // --- ACTIONS ---
   const handleZoom = useCallback(
     (delta: number) => {
-      setZoom((prev) => Math.max(1, Math.min(200, prev + delta)));
+      setZoom((prev: number) => Math.max(11, Math.min(200, prev + delta)));
     },
     [setZoom],
   );
@@ -355,13 +626,121 @@ export default function SimpleTimeline({
   );
 
   const toggleTrackProperty = useCallback(
-    (index: number, prop: "isMuted" | "isHidden") => {
+    (index: number, prop: "isMuted" | "isHidden" | "isLocked") => {
       setTracks((prev) =>
         prev.map((t, i) => (i === index ? { ...t, [prop]: !t[prop] } : t)),
       );
     },
     [setTracks],
   );
+
+  const toggleClipMute = useCallback(
+    (clipId: string, trackIndex: number) => {
+      setTracks((prev) => {
+        const newTracks = [...prev];
+        const track = { ...newTracks[trackIndex] };
+        const clipIdx = track.clips.findIndex((c) => c.id === clipId);
+        if (clipIdx !== -1) {
+          const clip = { ...track.clips[clipIdx] };
+          clip.isMuted = !clip.isMuted;
+          track.clips = [...track.clips];
+          track.clips[clipIdx] = clip;
+          newTracks[trackIndex] = track;
+        }
+        return newTracks;
+      });
+    },
+    [setTracks],
+  );
+
+  const handleSplitClip = useCallback(
+    (trackIndex: number, x: number, zoom: number) => {
+      const splitTime = x / zoom;
+
+      setTracks((prev) => {
+        const newTracks = [...prev];
+        const track = { ...newTracks[trackIndex] };
+
+        // Find clip at splitTime
+        const clipIdx = track.clips.findIndex(
+          (c) => splitTime >= c.start && splitTime < c.start + c.duration,
+        );
+
+        if (clipIdx === -1) return prev;
+
+        const originalClip = track.clips[clipIdx];
+
+        // Don't split if too close to edges (e.g. < 0.1s)
+        const offsetInClip = splitTime - originalClip.start;
+        if (offsetInClip < 0.1 || originalClip.duration - offsetInClip < 0.1) {
+          return prev;
+        }
+
+        // LEFT CLIP
+        const leftClip = {
+          ...originalClip,
+          duration: offsetInClip,
+        };
+
+        // RIGHT CLIP
+        const rightClip: TimelineClip = {
+          ...originalClip,
+          id: crypto.randomUUID(),
+          start: splitTime,
+          duration: originalClip.duration - offsetInClip,
+          offset: originalClip.offset + offsetInClip,
+        };
+
+        // Insert new clips
+        const newClips = [...track.clips];
+        newClips.splice(clipIdx, 1, leftClip, rightClip);
+
+        track.clips = newClips;
+        newTracks[trackIndex] = track;
+        return newTracks;
+      });
+    },
+    [setTracks],
+  );
+
+  // --- MENU STATE ---
+  const [contextMenu, setContextMenu] = useState<{
+    x: number;
+    y: number;
+    type: "track" | "clip";
+    trackIndex: number;
+    clipId?: string;
+  } | null>(null);
+
+  const handleTrackContextMenu = useCallback(
+    (e: React.MouseEvent, trackIndex: number) => {
+      e.preventDefault();
+      setContextMenu({ x: e.clientX, y: e.clientY, type: "track", trackIndex });
+    },
+    [],
+  );
+
+  const handleClipContextMenu = useCallback(
+    (e: React.MouseEvent, trackIndex: number, clipId: string) => {
+      e.preventDefault();
+      e.stopPropagation();
+      setContextMenu({
+        x: e.clientX,
+        y: e.clientY,
+        type: "clip",
+        trackIndex,
+        clipId,
+      });
+    },
+    [],
+  );
+
+  // Close context menu on global click
+  useEffect(() => {
+    const handleClick = () => setContextMenu(null);
+    window.addEventListener("click", handleClick);
+    return () => window.removeEventListener("click", handleClick);
+  }, []);
 
   const togglePlay = useCallback(() => setIsPlaying((p) => !p), [setIsPlaying]);
 
@@ -390,6 +769,17 @@ export default function SimpleTimeline({
     ) => {
       e.stopPropagation();
       if (activeTool === "split") return;
+      if (tracks[trackIndex].isLocked) return;
+
+      // Pre-calculate snap points (Optimization)
+      const snapPoints = [0]; // Always snap to 0
+      tracks.forEach((t) => {
+        t.clips.forEach((c) => {
+          if (c.id === clip.id) return; // Skip self
+          snapPoints.push(c.start);
+          snapPoints.push(c.start + c.duration);
+        });
+      });
 
       setDragState({
         type,
@@ -399,18 +789,23 @@ export default function SimpleTimeline({
         originalStart: clip.start,
         originalDuration: clip.duration,
         originalOffset: clip.offset,
+        snapPoints,
       });
     },
-    [activeTool],
+    [activeTool, tracks],
   );
 
   const handleMouseMove = useCallback(
     (e: MouseEvent) => {
+      dragMouseX.current = e.clientX;
+      dragMouseY.current = e.clientY;
+
       if (isDraggingPlayhead) {
         if (!scrollContainerRef.current) return;
         const rect = scrollContainerRef.current.getBoundingClientRect();
         const x =
           e.clientX -
+          // Use e.clientX directly for playhead as it's synchronous/fast
           rect.left -
           LEFT_PANEL_W +
           scrollContainerRef.current.scrollLeft;
@@ -421,168 +816,199 @@ export default function SimpleTimeline({
 
       if (!dragState) return;
 
-      if (!scrollContainerRef.current) return;
+      if (rafRef.current) return;
 
-      const deltaX = e.clientX - dragState.startX;
-      const deltaSeconds = deltaX / zoom;
+      rafRef.current = requestAnimationFrame(() => {
+        rafRef.current = null;
+        if (!scrollContainerRef.current) return;
 
-      const newTracks = [...tracks];
-      let hasTrackChange = false;
-      let nextDragState = { ...dragState };
-      let hasDragStateChange = false;
+        const deltaX = dragMouseX.current - dragState.startX;
+        const deltaSeconds = deltaX / zoom;
 
-      // --- 1. HANDLE VERTICAL TRACK CHANGE (MOVE ONLY) ---
-      if (dragState.type === "move") {
-        const rect = scrollContainerRef.current!.getBoundingClientRect();
-        const relativeY = e.clientY - rect.top + scrollContainerRef.current!.scrollTop;
-        const targetTrackIndex = Math.floor(relativeY / TRACK_HEIGHT);
+        // STABILIZATION: Read from ref
+        const currentTracks = tracksRef.current;
+        const newTracks = [...currentTracks];
 
-        if (
-          targetTrackIndex >= 0 &&
-          targetTrackIndex < newTracks.length &&
-          targetTrackIndex !== dragState.trackIndex
-        ) {
-          // SWAP TRACKS
-          const originalTrack = newTracks[dragState.trackIndex];
-          const targetTrack = newTracks[targetTrackIndex];
+        let hasTrackChange = false;
+        let nextDragState = { ...dragState };
+        let hasDragStateChange = false;
 
-          const clipIndex = originalTrack.clips.findIndex(
-            (c) => c.id === dragState.clipId
-          );
+        // --- 1. HANDLE VERTICAL TRACK CHANGE (MOVE ONLY) ---
+        if (dragState.type === "move") {
+          const rect = scrollContainerRef.current!.getBoundingClientRect();
+          const relativeY =
+            dragMouseY.current -
+            rect.top +
+            scrollContainerRef.current!.scrollTop;
+          const targetTrackIndex = Math.floor(relativeY / TRACK_HEIGHT);
 
-          if (clipIndex !== -1) {
-            const clip = { ...originalTrack.clips[clipIndex] };
+          if (
+            targetTrackIndex >= 0 &&
+            targetTrackIndex < newTracks.length &&
+            targetTrackIndex !== dragState.trackIndex
+          ) {
+            // SWAP TRACKS
+            const originalTrack = newTracks[dragState.trackIndex];
+            const targetTrack = newTracks[targetTrackIndex];
 
-            // 1. Remove from old
-            newTracks[dragState.trackIndex] = {
-              ...originalTrack,
-              clips: originalTrack.clips.filter((c) => c.id !== dragState.clipId),
-            };
+            const clipIndex = originalTrack.clips.findIndex(
+              (c) => c.id === dragState.clipId,
+            );
 
-            // 2. Add to new
-            newTracks[targetTrackIndex] = {
-              ...targetTrack,
-              clips: [...targetTrack.clips, clip],
-            };
+            if (clipIndex !== -1) {
+              const clip = { ...originalTrack.clips[clipIndex] };
 
-            // 3. Update Drag State
-            nextDragState.trackIndex = targetTrackIndex;
-            hasDragStateChange = true;
-            hasTrackChange = true;
+              // 1. Remove from old
+              newTracks[dragState.trackIndex] = {
+                ...originalTrack,
+                clips: originalTrack.clips.filter(
+                  (c) => c.id !== dragState.clipId,
+                ),
+              };
+
+              // 2. Add to new
+              newTracks[targetTrackIndex] = {
+                ...targetTrack,
+                clips: [...targetTrack.clips, clip],
+              };
+
+              // 3. Update Drag State
+              nextDragState.trackIndex = targetTrackIndex;
+              hasDragStateChange = true;
+              hasTrackChange = true;
+            }
           }
         }
-      }
 
-      // --- 2. HANDLE HORIZONTAL MOVE / RESIZE ---
-      const currentTrackIdx = nextDragState.trackIndex;
-      const track = newTracks[currentTrackIdx];
-      const clipIndex = track.clips.findIndex((c) => c.id === dragState.clipId);
+        // --- 2. HANDLE HORIZONTAL MOVE / RESIZE ---
+        const currentTrackIdx = nextDragState.trackIndex;
+        const track = newTracks[currentTrackIdx];
+        const clipIndex = track.clips.findIndex(
+          (c) => c.id === dragState.clipId,
+        );
 
-      if (clipIndex !== -1) {
-        const clip = { ...track.clips[clipIndex] };
+        if (clipIndex !== -1) {
+          const clip = { ...track.clips[clipIndex] };
 
-        // --- SNAPPING LOGIC ---
-        let snapDelta = 0;
-        if (isSnappingEnabled) {
-          const threshold = SNAP_THRESHOLD_PX / zoom;
-          // Collect snap points (Clip Starts, Clip Ends, 0, Playhead)
-          const snapPoints = [0, currentTime];
-          tracks.forEach((t) => {
-            t.clips.forEach((c) => {
-              if (c.id === dragState.clipId) return; // Skip self
-              snapPoints.push(c.start);
-              snapPoints.push(c.start + c.duration);
-            });
-          });
+          // --- SNAPPING LOGIC ---
+          let snapDelta = 0;
+          if (isSnappingEnabled) {
+            const threshold = SNAP_THRESHOLD_PX / zoom;
+            // Use cached snap points
+            const snapPoints = [currentTime, ...dragState.snapPoints];
 
-          const checkSnap = (current: number) => {
-            let closestDist = threshold;
-            let val = 0;
-            let found = false;
-            for (const p of snapPoints) {
-              const dist = Math.abs(p - current);
-              if (dist < closestDist) {
-                closestDist = dist;
-                val = p - current;
-                found = true;
+            const checkSnap = (current: number) => {
+              let closestDist = threshold;
+              let val = 0;
+              let found = false;
+              for (const p of snapPoints) {
+                const dist = Math.abs(p - current);
+                if (dist < closestDist) {
+                  closestDist = dist;
+                  val = p - current;
+                  found = true;
+                }
               }
+              return found ? val : null;
+            };
+
+            if (dragState.type === "move") {
+              // Check Start
+              const sDelta = checkSnap(dragState.originalStart + deltaSeconds);
+              if (sDelta !== null) snapDelta = sDelta;
+
+              // Check End (prioritize if closer)
+              const currentEnd =
+                dragState.originalStart + deltaSeconds + clip.duration;
+              const eDelta = checkSnap(currentEnd);
+              if (eDelta !== null) {
+                // If we already have a start snap, only override if end snap is closer
+                if (sDelta === null || Math.abs(eDelta) < Math.abs(sDelta)) {
+                  snapDelta = eDelta;
+                }
+              }
+            } else if (dragState.type === "resize-left") {
+              // Check Start
+              const match = checkSnap(dragState.originalStart + deltaSeconds);
+              if (match !== null) snapDelta = match;
+            } else if (dragState.type === "resize-right") {
+              // Check End
+              const currentEnd =
+                dragState.originalStart +
+                dragState.originalDuration +
+                deltaSeconds;
+              const match = checkSnap(currentEnd);
+              if (match !== null) snapDelta = match;
             }
-            return found ? val : null;
-          };
+          }
 
           if (dragState.type === "move") {
-            // Check Start
-            const sDelta = checkSnap(dragState.originalStart + deltaSeconds);
-            if (sDelta !== null) snapDelta = sDelta;
+            let newStart = Math.max(
+              0,
+              dragState.originalStart + deltaSeconds + snapDelta,
+            );
 
-            // Check End (prioritize if closer)
-            const currentEnd = dragState.originalStart + deltaSeconds + clip.duration;
-            const eDelta = checkSnap(currentEnd);
-            if (eDelta !== null) {
-              // If we already have a start snap, only override if end snap is closer
-              if (sDelta === null || Math.abs(eDelta) < Math.abs(sDelta)) {
-                snapDelta = eDelta;
-              }
+            if (clip.start !== newStart) {
+              clip.start = newStart;
+              newTracks[currentTrackIdx].clips[clipIndex] = clip;
+              hasTrackChange = true;
+            }
+          } else if (dragState.type === "resize-right") {
+            const currentOffset = clip.offset || 0;
+            const maxDuration = (clip.sourceDuration || 86400) - currentOffset;
+
+            let newDuration =
+              dragState.originalDuration + deltaSeconds + snapDelta;
+
+            // Cap at min duration (0.1s)
+            newDuration = Math.max(0.1, newDuration);
+
+            // Cap at max duration (source length)
+            newDuration = Math.min(newDuration, maxDuration);
+
+            if (clip.duration !== newDuration) {
+              clip.duration = newDuration;
+              newTracks[currentTrackIdx].clips[clipIndex] = clip;
+              hasTrackChange = true;
             }
           } else if (dragState.type === "resize-left") {
-            // Check Start
-            const match = checkSnap(dragState.originalStart + deltaSeconds);
-            if (match !== null) snapDelta = match;
-          } else if (dragState.type === "resize-right") {
-            // Check End
-            const currentEnd = dragState.originalStart + dragState.originalDuration + deltaSeconds;
-            const match = checkSnap(currentEnd);
-            if (match !== null) snapDelta = match;
+            let shift = deltaSeconds + snapDelta;
+
+            // Calculate strict bounds
+            const currentDuration = dragState.originalDuration;
+            const currentOffset = dragState.originalOffset || 0;
+
+            // 1. Min Duration Bound: (currentDuration - shift) >= 0.1  => shift <= currentDuration - 0.1
+            const maxShiftForMinDuration = currentDuration - 0.1;
+
+            // 2. Source Start Bound: (currentOffset + shift) >= 0 => shift >= -currentOffset
+            const minShiftForSourceStart = -currentOffset;
+
+            // Apply Bounds
+            shift = Math.min(shift, maxShiftForMinDuration);
+            shift = Math.max(shift, minShiftForSourceStart);
+
+            const newStart = Math.max(0, dragState.originalStart + shift);
+            const newDuration = dragState.originalDuration - shift;
+            const newOffset = dragState.originalOffset + shift;
+
+            if (clip.start !== newStart || clip.duration !== newDuration) {
+              clip.start = newStart;
+              clip.duration = newDuration;
+              clip.offset = newOffset;
+              newTracks[currentTrackIdx].clips[clipIndex] = clip;
+              hasTrackChange = true;
+            }
           }
         }
 
-        if (dragState.type === "move") {
-          let newStart = Math.max(0, dragState.originalStart + deltaSeconds + snapDelta);
-
-          if (clip.start !== newStart) {
-            clip.start = newStart;
-            newTracks[currentTrackIdx].clips[clipIndex] = clip;
-            hasTrackChange = true;
-          }
-        } else if (dragState.type === "resize-right") {
-          const maxDuration = (clip.sourceDuration || 86400) - clip.offset;
-          const newDuration = Math.min(
-            maxDuration,
-            Math.max(0.1, dragState.originalDuration + deltaSeconds + snapDelta)
-          );
-
-          if (clip.duration !== newDuration) {
-            clip.duration = newDuration;
-            newTracks[currentTrackIdx].clips[clipIndex] = clip;
-            hasTrackChange = true;
-          }
-        } else if (dragState.type === "resize-left") {
-          let shift = deltaSeconds + snapDelta;
-          if (dragState.originalOffset + shift < 0)
-            shift = -dragState.originalOffset;
-          if (dragState.originalDuration - shift < 0.1)
-            shift = dragState.originalDuration - 0.1;
-
-          const newStart = Math.max(0, dragState.originalStart + shift);
-          const newDuration = dragState.originalDuration - shift;
-          const newOffset = dragState.originalOffset + shift;
-
-          if (clip.start !== newStart || clip.duration !== newDuration) {
-            clip.start = newStart;
-            clip.duration = newDuration;
-            clip.offset = newOffset;
-            newTracks[currentTrackIdx].clips[clipIndex] = clip;
-            hasTrackChange = true;
-          }
+        if (hasTrackChange) {
+          setTracks(newTracks);
         }
-      }
-
-      if (hasTrackChange) {
-        setTracks(newTracks);
-      }
-      if (hasDragStateChange) {
-        setDragState(nextDragState);
-      }
+        if (hasDragStateChange) {
+          setDragState(nextDragState);
+        }
+      });
     },
     [
       dragState,
@@ -591,11 +1017,139 @@ export default function SimpleTimeline({
       currentTime,
       setTracks,
       setCurrentTime,
-      tracks,
+      isSnappingEnabled,
+      // tracks, <-- REMOVED: Stabilizes handler
     ],
   );
 
   const handleMouseUp = useCallback(() => {
+    if (rafRef.current) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
+
+    if (dragState) {
+      setTracks((prevTracks) => {
+        const newTracks = [...prevTracks];
+        const trackIdx = dragState.trackIndex;
+        const track = { ...newTracks[trackIdx] };
+
+        // Find dragged clip
+        const draggedClipIdx = track.clips.findIndex(
+          (c) => c.id === dragState.clipId,
+        );
+        if (draggedClipIdx === -1) return prevTracks;
+
+        const draggedClip = track.clips[draggedClipIdx];
+        const draggedStart = draggedClip.start;
+        const draggedEnd = draggedClip.start + draggedClip.duration;
+
+        const resolvedClips: TimelineClip[] = [];
+        let hasChanges = false;
+
+        // Check against all OTHER clips
+        track.clips.forEach((clip) => {
+          if (clip.id === dragState.clipId) return; // Skip self
+
+          const clipStart = clip.start;
+          const clipEnd = clip.start + clip.duration;
+
+          // Check overlap
+          if (draggedStart < clipEnd && draggedEnd > clipStart) {
+            hasChanges = true;
+
+            // 1. ENVELOPED: Dragged fully covers Victim
+            // Drag: [       ]
+            // Clip:   [   ]
+            if (draggedStart <= clipStart && draggedEnd >= clipEnd) {
+              // Delete victim
+              return;
+            }
+
+            // 2. OVERLAP START: Dragged covers end of Victim
+            // Drag:      [      ]
+            // Clip: [       ]
+            // Result:[  ]
+            if (
+              draggedStart > clipStart &&
+              draggedStart < clipEnd &&
+              draggedEnd >= clipEnd
+            ) {
+              const newDuration = draggedStart - clipStart;
+              if (newDuration > 0.05) {
+                // Min duration check
+                resolvedClips.push({ ...clip, duration: newDuration });
+              }
+              return;
+            }
+
+            // 3. OVERLAP END: Dragged covers start of Victim
+            // Drag: [      ]
+            // Clip:      [      ]
+            // Result:      [    ]
+            if (
+              draggedEnd > clipStart &&
+              draggedEnd < clipEnd &&
+              draggedStart <= clipStart
+            ) {
+              const cutAmount = draggedEnd - clipStart;
+              const newDuration = clip.duration - cutAmount;
+              if (newDuration > 0.05) {
+                resolvedClips.push({
+                  ...clip,
+                  start: draggedEnd,
+                  duration: newDuration,
+                  offset: clip.offset + cutAmount,
+                });
+              }
+              return;
+            }
+
+            // 4. SPLIT: Dragged inside Victim
+            // Drag:     [   ]
+            // Clip: [           ]
+            // Result:[ ][   ][  ]
+            if (draggedStart > clipStart && draggedEnd < clipEnd) {
+              // Left piece
+              const leftDuration = draggedStart - clipStart;
+              if (leftDuration > 0.05) {
+                resolvedClips.push({
+                  ...clip,
+                  id: crypto.randomUUID(),
+                  duration: leftDuration,
+                });
+              }
+
+              // Right piece
+              const rightDuration = clipEnd - draggedEnd;
+              if (rightDuration > 0.05) {
+                const offsetIncrease = draggedEnd - clipStart;
+                resolvedClips.push({
+                  ...clip,
+                  id: crypto.randomUUID(),
+                  start: draggedEnd,
+                  duration: rightDuration,
+                  offset: clip.offset + offsetIncrease,
+                });
+              }
+              return;
+            }
+          }
+
+          // No overlap
+          resolvedClips.push(clip);
+        });
+
+        if (hasChanges) {
+          track.clips = [...resolvedClips, draggedClip];
+          newTracks[trackIdx] = track;
+          return newTracks;
+        }
+
+        return prevTracks;
+      });
+    }
+
     setDragState(null);
     setIsDraggingPlayhead((prev) => {
       if (prev && wasPlayingRef.current) {
@@ -604,7 +1158,7 @@ export default function SimpleTimeline({
       return false;
     });
     wasPlayingRef.current = false;
-  }, [setIsPlaying]);
+  }, [dragState, setTracks, setIsPlaying]);
 
   useEffect(() => {
     if (dragState || isDraggingPlayhead) {
@@ -770,7 +1324,7 @@ export default function SimpleTimeline({
             style={{ width: LEFT_PANEL_W }}
           >
             <span className="font-mono text-xs text-[#D2FF44]">
-              {new Date(currentTime * 1000).toISOString().substr(14, 5)}
+              {formatTime(currentTime)}
             </span>
           </div>
           <div className="flex-1 relative overflow-hidden bg-[#1a1a1c]">
@@ -808,10 +1362,6 @@ export default function SimpleTimeline({
           style={{
             background: `linear-gradient(to right, #2c2f33 ${LEFT_PANEL_W - 1}px, #3f3f46 ${LEFT_PANEL_W - 1}px, #3f3f46 ${LEFT_PANEL_W}px, #121214 ${LEFT_PANEL_W}px)`,
           }}
-          onMouseDown={(e) => {
-            if (e.target === scrollContainerRef.current)
-              handleRulerMouseDown(e);
-          }}
         >
           <div className="relative z-10 min-w-full">
             {tracks.map((track, i) => (
@@ -825,9 +1375,20 @@ export default function SimpleTimeline({
                 deleteTrack={deleteTrack}
                 dragState={dragState}
                 activeTool={activeTool}
+                selectedClipId={selectedClipId}
+                onSelectClip={onSelectClip}
+                onDeleteClip={onDeleteClip}
+                onContextMenu={undefined} // Deprecated
+                onTrackContextMenu={handleTrackContextMenu}
+                onClipContextMenu={handleClipContextMenu}
+                onToggleClipMute={toggleClipMute}
+                onSplitClip={handleSplitClip}
+                splitHover={activeTool === "split" ? splitHover : null}
+                onSplitHover={handleSplitHover}
+                zIndex={tracks.length - i}
               />
             ))}
-            <div className="h-32 w-full" onClick={handleRulerMouseDown}></div>
+            <div className="h-32 w-full"></div>
           </div>
         </div>
 
@@ -867,6 +1428,148 @@ export default function SimpleTimeline({
           </div>
         </div>
       </div>
+
+      {/* CONTEXT MENU */}
+      {contextMenu && (
+        <div
+          className="fixed z-[100] bg-[#2c2f33] border border-zinc-700 rounded-lg shadow-xl py-1 min-w-[140px]"
+          style={{ top: contextMenu.y, left: contextMenu.x }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="px-3 py-1.5 text-xs font-semibold text-zinc-400 border-b border-zinc-700 mb-1">
+            {contextMenu.type === "track"
+              ? `${tracks[contextMenu.trackIndex]?.name} Options`
+              : "Clip Options"}
+          </div>
+
+          {contextMenu.type === "track" && (
+            <>
+              <button
+                className="w-full text-left px-3 py-1.5 hover:bg-zinc-700 text-zinc-300 flex items-center gap-2 text-xs"
+                onClick={() => {
+                  toggleTrackProperty(contextMenu.trackIndex, "isMuted");
+                  setContextMenu(null);
+                }}
+              >
+                {tracks[contextMenu.trackIndex]?.isMuted ? (
+                  <>
+                    <Volume2 size={12} /> Unmute Track
+                  </>
+                ) : (
+                  <>
+                    <VolumeX size={12} /> Mute Track
+                  </>
+                )}
+              </button>
+
+              <button
+                className="w-full text-left px-3 py-1.5 hover:bg-zinc-700 text-zinc-300 flex items-center gap-2 text-xs"
+                onClick={() => {
+                  toggleTrackProperty(contextMenu.trackIndex, "isHidden");
+                  setContextMenu(null);
+                }}
+              >
+                {tracks[contextMenu.trackIndex]?.isHidden ? (
+                  <>
+                    <Eye size={12} /> Show Track
+                  </>
+                ) : (
+                  <>
+                    <EyeOff size={12} /> Hide Track
+                  </>
+                )}
+              </button>
+
+              <button
+                className="w-full text-left px-3 py-1.5 hover:bg-zinc-700 text-zinc-300 flex items-center gap-2 text-xs"
+                onClick={() => {
+                  toggleTrackProperty(contextMenu.trackIndex, "isLocked");
+                  setContextMenu(null);
+                }}
+              >
+                {tracks[contextMenu.trackIndex]?.isLocked ? (
+                  <>
+                    <Lock size={12} /> Unlock Track
+                  </>
+                ) : (
+                  <>
+                    <Lock size={12} /> Lock Track
+                  </>
+                )}
+              </button>
+
+              <div className="h-px bg-zinc-700 my-1" />
+
+              <button
+                className="w-full text-left px-3 py-1.5 hover:bg-red-900/50 text-red-300 flex items-center gap-2 text-xs"
+                onClick={() => {
+                  deleteTrack(contextMenu.trackIndex);
+                  setContextMenu(null);
+                }}
+              >
+                <Trash2 size={12} /> Delete Track
+              </button>
+            </>
+          )}
+          {contextMenu.type === "clip" && contextMenu.clipId && (
+            <>
+              <button
+                className="w-full text-left px-3 py-1.5 hover:bg-zinc-700 text-zinc-300 flex items-center gap-2 text-xs"
+                onClick={() => {
+                  toggleClipMute(contextMenu.clipId!, contextMenu.trackIndex);
+                  setContextMenu(null);
+                }}
+              >
+                {tracks[contextMenu.trackIndex].clips.find(
+                  (c) => c.id === contextMenu.clipId,
+                )?.isMuted ? (
+                  <>
+                    <Volume2 size={12} /> Unmute Clip
+                  </>
+                ) : (
+                  <>
+                    <VolumeX size={12} /> Mute Clip
+                  </>
+                )}
+              </button>
+
+              <button
+                className="w-full text-left px-3 py-1.5 hover:bg-zinc-700 text-zinc-300 flex items-center gap-2 text-xs"
+                onClick={() => {
+                  // Split at Playhead
+                  // We need to calculate the X position for the split based on currentTime
+                  // x = currentTime * zoom
+                  const x = currentTime * zoom;
+                  handleSplitClip(contextMenu.trackIndex, x, zoom);
+                  setContextMenu(null);
+                }}
+              >
+                <Scissors size={12} /> Split at Playhead
+              </button>
+
+              <button
+                className="w-full text-left px-3 py-1.5 hover:bg-zinc-700 text-zinc-300 flex items-center gap-2 text-xs opacity-50 cursor-not-allowed"
+                title="Coming Later"
+                disabled
+              >
+                <Maximize2 size={12} /> Extend Clip
+              </button>
+
+              <div className="h-px bg-zinc-700 my-1" />
+
+              <button
+                className="w-full text-left px-3 py-1.5 hover:bg-red-900/50 text-red-300 flex items-center gap-2 text-xs"
+                onClick={() => {
+                  if (onDeleteClip) onDeleteClip(contextMenu.clipId!);
+                  setContextMenu(null);
+                }}
+              >
+                <Trash2 size={12} /> Delete Clip
+              </button>
+            </>
+          )}
+        </div>
+      )}
     </div>
   );
 }

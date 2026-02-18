@@ -297,8 +297,10 @@ function StudioContent() {
   ]);
 
   const [activeDragItem, setActiveDragItem] = useState<any>(null);
-  const [zoom, setZoom] = useState(10); // px/second
+  const [zoom, setZoom] = useState(11); // px/second
   const [masterVolume, setMasterVolume] = useState(1);
+  const [selectedClipId, setSelectedClipId] = useState<string | null>(null); // <--- NEW STATE
+
   const handleVolumeChange = useCallback((val: number) => {
     setMasterVolume(val);
   }, []);
@@ -536,6 +538,19 @@ function StudioContent() {
         }
       }
 
+      // --- CLIP DELETION ---
+      if (e.key === "Delete" || e.key === "Backspace") {
+        if (selectedClipId) {
+          e.preventDefault();
+          recordHistory();
+          setTracks(prev => prev.map(t => ({
+            ...t,
+            clips: t.clips.filter(c => c.id !== selectedClipId)
+          })));
+          setSelectedClipId(null);
+        }
+      }
+
       if (e.code === "Space") {
         if (libraryRef.current?.contains(e.target as Node)) return;
         e.preventDefault();
@@ -551,7 +566,21 @@ function StudioContent() {
       window.removeEventListener("keydown", handleKeyDown);
       window.removeEventListener("keyup", handleKeyUp);
     };
-  }, [history, redoStack, tracks, shots, togglePlay]);
+  }, [history, redoStack, tracks, shots, togglePlay, selectedClipId]); // Added selectedClipId dependency
+
+  // --- HANDLE DELETE CLIP (From UI) ---
+  const handleDeleteClip = useCallback((clipId: string) => {
+    recordHistory();
+    setTracks((prev) =>
+      prev.map((t) => ({
+        ...t,
+        clips: t.clips.filter((c) => c.id !== clipId),
+      })),
+    );
+    if (selectedClipId === clipId) {
+      setSelectedClipId(null);
+    }
+  }, [selectedClipId]);
 
   // --- HELPER: GENERATE WAVEFORM ---
   const generateWaveform = async (shotId: string, filePath: string) => {
@@ -634,8 +663,9 @@ function StudioContent() {
 
       // 1. Load Library Shots
       const savedShots = await GetShots(pId, sId);
+      let loadedShots: any[] = [];
       if (savedShots && savedShots.length > 0) {
-        const hydratedShots = await Promise.all(
+        loadedShots = await Promise.all(
           savedShots.map(async (shot: any) => {
             if (shot.sourceImage) {
               const b64 = await ReadImageBase64(shot.sourceImage);
@@ -644,8 +674,8 @@ function StudioContent() {
             return shot;
           }),
         );
-        setShots(hydratedShots);
-        setActiveShotId(hydratedShots[0].id);
+        setShots(loadedShots);
+        setActiveShotId(loadedShots[0].id);
       }
 
       // 2. Load Timeline & Convert to New Format
@@ -703,6 +733,22 @@ function StudioContent() {
                 setting.type ||
                 (trackName.toUpperCase().startsWith("A") ? "audio" : "video");
 
+              // Post-process clips to add thumbnails from shots if available
+              const clipsWithThumbnails = clips.map(clip => {
+                // Try to find matching shot to get thumbnail
+                // We match by src mainly. Or we can match by "outputVideo" / "audioPath" if those were IDs.
+                // But here 'src' is the file path.
+                const matchingShot = loadedShots.find(s =>
+                  s.outputVideo === clip.src ||
+                  s.audioPath === clip.src ||
+                  s.sourceImage === clip.src
+                );
+                if (matchingShot && matchingShot.previewBase64) {
+                  return { ...clip, thumbnail: matchingShot.previewBase64 };
+                }
+                return clip;
+              });
+
               return {
                 id: `track-${index}-${crypto.randomUUID()}`,
                 name: trackName,
@@ -710,7 +756,7 @@ function StudioContent() {
                 isMuted: false,
                 isHidden: !setting.visible,
                 isLocked: setting.locked,
-                clips: clips,
+                clips: clipsWithThumbnails,
               };
             }),
           );
@@ -1085,9 +1131,9 @@ function StudioContent() {
           "",
         start: startTime,
         duration: shotData.duration || 4,
-        sourceDuration: shotData.duration || 4, // <--- Set sourceDuration
         offset: 0,
         color: shotData.audioPath ? "bg-purple-600" : "bg-blue-600",
+        thumbnail: shotData.previewBase64, // <--- NEW: Set thumbnail
       };
 
       // 5. Add to Track
@@ -1322,6 +1368,9 @@ function StudioContent() {
                   onRedo={redo}
                   volume={masterVolume}
                   onVolumeChange={handleVolumeChange}
+                  selectedClipId={selectedClipId} // <--- NEW PROP
+                  onSelectClip={setSelectedClipId} // <--- NEW PROP
+                  onDeleteClip={handleDeleteClip} // <--- NEW PROP
                 />
               </div>
             </div>
