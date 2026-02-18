@@ -110,26 +110,82 @@ export const HelloWorld = (props: any) => {
                   />
                 ) : (
                   /* 2. VIDEO CLIPS (With Embedded Audio) */
-                  <Video
-                    src={src}
-                    crossOrigin="anonymous"
-                    style={{
-                      width: "100%",
-                      height: "100%",
-                      objectFit: "contain",
-                      backgroundColor: "black",
-                    }}
-                    startFrom={startFromFrames}
-                    muted={isMuted}
-                    volume={finalVolume}
-                    // @ts-ignore
-                    preload="auto"
-                    playbackRate={1}
-                    onError={(e) => console.error(`❌ Video Failed: ${src}`, e)}
-                  />
+                  /* 2. VIDEO CLIPS (With Embedded Audio) */
+                  <>
+                    <Video
+                      src={src}
+                      crossOrigin="anonymous"
+                      style={{
+                        width: "100%",
+                        height: "100%",
+                        objectFit: "contain",
+                        // REMOVED backgroundColor: "black" to prevent black flashes during transitions
+                      }}
+                      startFrom={startFromFrames}
+                      muted={isMuted}
+                      volume={finalVolume}
+                      // @ts-ignore
+                      preload="auto"
+                      playbackRate={1}
+                      onError={(e) => console.error(`❌ Video Failed: ${src}`, e)}
+                    />
+                    {/* PRELOAD HACK: If there is a next clip using the same source, keep it alive or preload? 
+                        Actually, Remotion handles mounting. But we can force a hidden mount of UPCOMING clips? 
+                        No, that's complex inside map. 
+                        Better: Just removing the black background allows the previous frame 
+                        (if persisted by browser compositor) to show instead of black. 
+                    */}
+                  </>
                 )}
               </Sequence>
             );
+          })}
+        </Fragment>
+      ))}
+
+      {/* 
+        3. GAPLESS HACK: PRELOADE LAYER
+        We render upcoming videos (that start within 1s) with opacity 0 to force buffering.
+      */}
+      {[...tracks].map((track) => (
+        <Fragment key={`preload-${track.id}`}>
+          {track.clips.map((clip, index) => {
+            const c = clip as any;
+            let src = c.src || c.file || "";
+            if (videoBlobs && videoBlobs instanceof Map && videoBlobs.has(src)) {
+              src = videoBlobs.get(src)!;
+            } else {
+              src = getSafeUrl(src);
+            }
+            if (!src || c.type === "audio" || /\.(jpg|jpeg|png|webp|gif)$/i.test(src)) return null;
+
+            let startFrame = 0;
+            if (typeof c.start === "number") {
+              startFrame = Math.round(c.start * fps);
+            } else {
+              startFrame = clip.startFrame;
+            }
+
+            // Preload window: 30 frames before start
+            const preloadStart = startFrame - 30;
+
+            return (
+              <Sequence
+                key={`preload-${c.id ?? index}`}
+                from={preloadStart}
+                durationInFrames={30} // Duration of preload window
+                style={{ opacity: 0, pointerEvents: 'none' }}
+              >
+                <Video
+                  src={src}
+                  startFrom={0} // Just load beginning to buffer headers
+                  volume={0}
+                  muted={true}
+                  preload="auto"
+                  style={{ width: 1, height: 1 }}
+                />
+              </Sequence>
+            )
           })}
         </Fragment>
       ))}

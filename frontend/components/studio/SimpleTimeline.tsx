@@ -18,6 +18,7 @@ import {
   Redo2,
   Volume2,
   VolumeX,
+  Magnet,
 } from "lucide-react";
 import { useDroppable } from "@dnd-kit/core";
 
@@ -145,7 +146,16 @@ const Playhead = memo(function Playhead({
       style={{ left: time * zoom }}
     >
       {showHandle && (
-        <div className="absolute -top-0 -left-1.5 w-3 h-3 bg-red-500 transform rotate-45" />
+        <div className="absolute top-0 -left-1.5">
+          <svg
+            width="12"
+            height="12"
+            viewBox="0 0 12 12"
+            className="fill-red-500"
+          >
+            <path d="M0 0 H12 V6 L6 12 L0 6 Z" />
+          </svg>
+        </div>
       )}
     </div>
   );
@@ -295,8 +305,12 @@ export default function SimpleTimeline({
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const horizontalScrollRef = useRef<HTMLDivElement>(null);
   const [activeTool, setActiveTool] = useState<"select" | "split">("select");
+  const [isSnappingEnabled, setIsSnappingEnabled] = useState(true);
   const [isDraggingPlayhead, setIsDraggingPlayhead] = useState(false);
   const [scrollLeft, setScrollLeft] = useState(0);
+
+  // Keep track if we were playing before dragging the playhead
+  const wasPlayingRef = useRef(false);
 
   // Drag State
   const [dragState, setDragState] = useState<{
@@ -467,11 +481,63 @@ export default function SimpleTimeline({
       if (clipIndex !== -1) {
         const clip = { ...track.clips[clipIndex] };
 
-        if (dragState.type === "move") {
-          let newStart = Math.max(0, dragState.originalStart + deltaSeconds);
-          if (Math.abs(newStart - currentTime) < SNAP_THRESHOLD_PX / zoom) {
-            newStart = currentTime;
+        // --- SNAPPING LOGIC ---
+        let snapDelta = 0;
+        if (isSnappingEnabled) {
+          const threshold = SNAP_THRESHOLD_PX / zoom;
+          // Collect snap points (Clip Starts, Clip Ends, 0, Playhead)
+          const snapPoints = [0, currentTime];
+          tracks.forEach((t) => {
+            t.clips.forEach((c) => {
+              if (c.id === dragState.clipId) return; // Skip self
+              snapPoints.push(c.start);
+              snapPoints.push(c.start + c.duration);
+            });
+          });
+
+          const checkSnap = (current: number) => {
+            let closestDist = threshold;
+            let val = 0;
+            let found = false;
+            for (const p of snapPoints) {
+              const dist = Math.abs(p - current);
+              if (dist < closestDist) {
+                closestDist = dist;
+                val = p - current;
+                found = true;
+              }
+            }
+            return found ? val : null;
+          };
+
+          if (dragState.type === "move") {
+            // Check Start
+            const sDelta = checkSnap(dragState.originalStart + deltaSeconds);
+            if (sDelta !== null) snapDelta = sDelta;
+
+            // Check End (prioritize if closer)
+            const currentEnd = dragState.originalStart + deltaSeconds + clip.duration;
+            const eDelta = checkSnap(currentEnd);
+            if (eDelta !== null) {
+              // If we already have a start snap, only override if end snap is closer
+              if (sDelta === null || Math.abs(eDelta) < Math.abs(sDelta)) {
+                snapDelta = eDelta;
+              }
+            }
+          } else if (dragState.type === "resize-left") {
+            // Check Start
+            const match = checkSnap(dragState.originalStart + deltaSeconds);
+            if (match !== null) snapDelta = match;
+          } else if (dragState.type === "resize-right") {
+            // Check End
+            const currentEnd = dragState.originalStart + dragState.originalDuration + deltaSeconds;
+            const match = checkSnap(currentEnd);
+            if (match !== null) snapDelta = match;
           }
+        }
+
+        if (dragState.type === "move") {
+          let newStart = Math.max(0, dragState.originalStart + deltaSeconds + snapDelta);
 
           if (clip.start !== newStart) {
             clip.start = newStart;
@@ -482,7 +548,7 @@ export default function SimpleTimeline({
           const maxDuration = (clip.sourceDuration || 86400) - clip.offset;
           const newDuration = Math.min(
             maxDuration,
-            Math.max(0.1, dragState.originalDuration + deltaSeconds)
+            Math.max(0.1, dragState.originalDuration + deltaSeconds + snapDelta)
           );
 
           if (clip.duration !== newDuration) {
@@ -491,7 +557,7 @@ export default function SimpleTimeline({
             hasTrackChange = true;
           }
         } else if (dragState.type === "resize-left") {
-          let shift = deltaSeconds;
+          let shift = deltaSeconds + snapDelta;
           if (dragState.originalOffset + shift < 0)
             shift = -dragState.originalOffset;
           if (dragState.originalDuration - shift < 0.1)
@@ -531,8 +597,14 @@ export default function SimpleTimeline({
 
   const handleMouseUp = useCallback(() => {
     setDragState(null);
-    setIsDraggingPlayhead(false);
-  }, []);
+    setIsDraggingPlayhead((prev) => {
+      if (prev && wasPlayingRef.current) {
+        setIsPlaying(true);
+      }
+      return false;
+    });
+    wasPlayingRef.current = false;
+  }, [setIsPlaying]);
 
   useEffect(() => {
     if (dragState || isDraggingPlayhead) {
@@ -547,7 +619,11 @@ export default function SimpleTimeline({
 
   const handleRulerMouseDown = (e: React.MouseEvent) => {
     if (!scrollContainerRef.current) return;
+
+    // Remember if we were playing, then pause
+    wasPlayingRef.current = isPlaying;
     setIsPlaying(false);
+
     const rect = scrollContainerRef.current.getBoundingClientRect();
     const x =
       e.clientX -
@@ -642,6 +718,13 @@ export default function SimpleTimeline({
             className={`flex items-center gap-1 text-[10px] px-2 py-1 rounded transition-colors ${activeTool === "split" ? "bg-[#D2FF44] text-black font-bold" : "bg-zinc-800 text-zinc-300"}`}
           >
             <Scissors size={10} /> Split
+          </button>
+          <button
+            onClick={() => setIsSnappingEnabled((p) => !p)}
+            className={`flex items-center gap-1 text-[10px] px-2 py-1 rounded transition-colors ${isSnappingEnabled ? "bg-[#D2FF44] text-black font-bold" : "bg-zinc-800 text-zinc-300"}`}
+            title="Toggle Snapping"
+          >
+            <Magnet size={10} /> Snap
           </button>
           <div className="w-px h-4 bg-zinc-700 mx-1" />
           <button

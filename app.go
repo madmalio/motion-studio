@@ -2151,11 +2151,12 @@ func StartStreamServer() {
 	})
 
 	// -------------------------------------------------------------
-	// NEW: ROBUST QUERY-BASED FILE SERVER
+	// NEW: ROBUST QUERY-BASED FILE SERVER (Optimized for Video)
 	// -------------------------------------------------------------
 	mux.HandleFunc("/api/media", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Cache-Control", "no-cache")
+		// Allow caching to support seeking and range requests better
+		w.Header().Set("Cache-Control", "public, max-age=3600")
 
 		filePath := r.URL.Query().Get("file")
 		if filePath == "" {
@@ -2176,6 +2177,10 @@ func StartStreamServer() {
 			w.Header().Set("Content-Type", "video/mp4")
 		case ".mov":
 			w.Header().Set("Content-Type", "video/quicktime")
+		case ".webm":
+			w.Header().Set("Content-Type", "video/webm")
+		case ".mkv":
+			w.Header().Set("Content-Type", "video/x-matroska")
 		}
 
 		http.ServeFile(w, r, filePath)
