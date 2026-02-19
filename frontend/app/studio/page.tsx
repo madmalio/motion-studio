@@ -423,21 +423,14 @@ function StudioContent() {
   }, [tracks, projectId, sceneId]);
 
   // --- SYNC NEW VIDEOS TO BLOBS ---
+  const fetchedBlobs = useRef<Set<string>>(new Set());
+
   useEffect(() => {
     shots.forEach((shot) => {
-      if (shot.outputVideo && !videoBlobs.has(shot.outputVideo)) {
-        if (videoCache.current.has(shot.id)) {
-          const b64 = videoCache.current.get(shot.id);
-          if (b64) {
-            fetch(b64)
-              .then(res => res.blob())
-              .then(blob => {
-                const url = URL.createObjectURL(blob);
-                setVideoBlobs((prev) => new Map(prev).set(shot.outputVideo, url));
-              })
-              .catch(err => console.error("Blob decode error", err));
-          }
-        }
+      // If we have a video, and it's not in the Blobs map, and we haven't already tried to fetch it...
+      if (shot.outputVideo && !videoBlobs.has(shot.outputVideo) && !fetchedBlobs.current.has(shot.outputVideo)) {
+        fetchedBlobs.current.add(shot.outputVideo);
+        refreshVideoBlob(shot.outputVideo);
       }
     });
   }, [shots, videoBlobs]);
@@ -671,11 +664,13 @@ function StudioContent() {
 
     const shot = shots.find((s) => s.id === activeShotId);
     if (shot) {
-      const isNewRender = updates.status === "DONE";
-      const path = updates.outputVideo || shot.outputVideo;
-      if ((isNewRender || (updates.outputVideo && updates.outputVideo !== shot.outputVideo)) && path) {
-        refreshVideoBlob(path);
-        generateWaveform(shot.id, path);
+      const isNewRender = updates.status?.toUpperCase() === "DONE";
+      const newPath = updates.outputVideo;
+
+      // Force a fresh blob fetch if a new video just finished rendering
+      if (newPath && (isNewRender || newPath !== shot.outputVideo)) {
+        refreshVideoBlob(newPath);
+        generateWaveform(shot.id, newPath);
       }
       if (updates.audioPath && updates.audioPath !== shot.audioPath) {
         generateWaveform(shot.id, updates.audioPath);
@@ -687,6 +682,8 @@ function StudioContent() {
       ...track, clips: track.clips.map((clip) => {
         if (clip.id === activeShotId) {
           const newItem = { ...clip, ...updates } as any;
+          // CRITICAL FIX: The timeline reads 'src', not 'outputVideo'. 
+          if (updates.outputVideo) newItem.src = updates.outputVideo;
           if (updates.duration) newItem.duration = updates.duration;
           return newItem;
         }

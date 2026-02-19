@@ -194,12 +194,12 @@ const GeneratorPanel = memo(function GeneratorPanel({
         );
       }
 
-      if (updatedShot.outputVideo) {
-        const b64 = await ReadImageBase64(updatedShot.outputVideo);
-        setVideoCache(updatedShot.id, b64);
-        setVideoSrc(b64);
-        (updatedShot as any).previewBase64 = b64;
+      // Fix: Never Base64 a video file! We let the localhost static server handle it.
+      if (updatedShot.outputVideo && !updatedShot.previewBase64 && updatedShot.sourceImage) {
+        // Keep the source image as the thumbnail so it doesn't go blank
+        updatedShot.previewBase64 = await ReadImageBase64(updatedShot.sourceImage);
       }
+
       updateActiveShot(updatedShot);
     } catch (err) {
       console.error("Render failed:", err);
