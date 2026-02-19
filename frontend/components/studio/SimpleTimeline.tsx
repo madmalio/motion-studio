@@ -74,6 +74,7 @@ interface SimpleTimelineProps {
   selectedClipId?: string | null;
   onSelectClip?: (clipId: string | null) => void;
   onDeleteClip?: (clipId: string) => void;
+  onRegisterHistory?: () => void;
 }
 
 // --- 1. THE RULER (Fixed: Optional Labels) ---
@@ -500,6 +501,7 @@ export default function SimpleTimeline({
   selectedClipId,
   onSelectClip,
   onDeleteClip, // <--- NEW PROP
+  onRegisterHistory,
 }: SimpleTimelineProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -562,6 +564,16 @@ export default function SimpleTimeline({
         return;
       }
 
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
+        e.preventDefault();
+        if (e.shiftKey) {
+          if (onRedo) onRedo();
+        } else {
+          if (onUndo) onUndo();
+        }
+        return;
+      }
+
       switch (e.key.toLowerCase()) {
         case "a":
           setActiveTool("select");
@@ -577,7 +589,7 @@ export default function SimpleTimeline({
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, []);
+  }, [onUndo, onRedo]);
 
   // Keep track if we were playing before dragging the playhead
   const wasPlayingRef = useRef(false);
@@ -603,6 +615,7 @@ export default function SimpleTimeline({
   );
 
   const addTrack = useCallback(() => {
+    if (onRegisterHistory) onRegisterHistory();
     setTracks((prev) => {
       const nextNum = prev.length + 1;
       const newTrack: TimelineTrack = {
@@ -616,26 +629,29 @@ export default function SimpleTimeline({
       };
       return [newTrack, ...prev];
     });
-  }, [setTracks]);
+  }, [setTracks, onRegisterHistory]);
 
   const deleteTrack = useCallback(
     (index: number) => {
+      if (onRegisterHistory) onRegisterHistory();
       setTracks((prev) => prev.filter((_, i) => i !== index));
     },
-    [setTracks],
+    [setTracks, onRegisterHistory],
   );
 
   const toggleTrackProperty = useCallback(
     (index: number, prop: "isMuted" | "isHidden" | "isLocked") => {
+      if (onRegisterHistory) onRegisterHistory();
       setTracks((prev) =>
         prev.map((t, i) => (i === index ? { ...t, [prop]: !t[prop] } : t)),
       );
     },
-    [setTracks],
+    [setTracks, onRegisterHistory],
   );
 
   const toggleClipMute = useCallback(
     (clipId: string, trackIndex: number) => {
+      if (onRegisterHistory) onRegisterHistory();
       setTracks((prev) => {
         const newTracks = [...prev];
         const track = { ...newTracks[trackIndex] };
@@ -650,11 +666,12 @@ export default function SimpleTimeline({
         return newTracks;
       });
     },
-    [setTracks],
+    [setTracks, onRegisterHistory],
   );
 
   const handleSplitClip = useCallback(
     (trackIndex: number, x: number, zoom: number) => {
+      if (onRegisterHistory) onRegisterHistory();
       const splitTime = x / zoom;
 
       setTracks((prev) => {
@@ -700,7 +717,7 @@ export default function SimpleTimeline({
         return newTracks;
       });
     },
-    [setTracks],
+    [setTracks, onRegisterHistory],
   );
 
   // --- MENU STATE ---
@@ -771,6 +788,8 @@ export default function SimpleTimeline({
       if (activeTool === "split") return;
       if (tracks[trackIndex].isLocked) return;
 
+      if (onRegisterHistory) onRegisterHistory();
+
       // Pre-calculate snap points (Optimization)
       const snapPoints = [0]; // Always snap to 0
       tracks.forEach((t) => {
@@ -792,7 +811,7 @@ export default function SimpleTimeline({
         snapPoints,
       });
     },
-    [activeTool, tracks],
+    [activeTool, tracks, onRegisterHistory],
   );
 
   const handleMouseMove = useCallback(

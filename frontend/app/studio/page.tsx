@@ -88,6 +88,8 @@ interface Shot {
   name: string;
   sourceImage: string;
   audioPath: string;
+  audioStart?: number;
+  audioDuration?: number;
   waveform?: number[];
   previewBase64?: string;
   prompt: string;
@@ -543,10 +545,12 @@ function StudioContent() {
         if (selectedClipId) {
           e.preventDefault();
           recordHistory();
-          setTracks(prev => prev.map(t => ({
-            ...t,
-            clips: t.clips.filter(c => c.id !== selectedClipId)
-          })));
+          setTracks((prev) =>
+            prev.map((t) => ({
+              ...t,
+              clips: t.clips.filter((c) => c.id !== selectedClipId),
+            })),
+          );
           setSelectedClipId(null);
         }
       }
@@ -569,18 +573,21 @@ function StudioContent() {
   }, [history, redoStack, tracks, shots, togglePlay, selectedClipId]); // Added selectedClipId dependency
 
   // --- HANDLE DELETE CLIP (From UI) ---
-  const handleDeleteClip = useCallback((clipId: string) => {
-    recordHistory();
-    setTracks((prev) =>
-      prev.map((t) => ({
-        ...t,
-        clips: t.clips.filter((c) => c.id !== clipId),
-      })),
-    );
-    if (selectedClipId === clipId) {
-      setSelectedClipId(null);
-    }
-  }, [selectedClipId]);
+  const handleDeleteClip = useCallback(
+    (clipId: string) => {
+      recordHistory();
+      setTracks((prev) =>
+        prev.map((t) => ({
+          ...t,
+          clips: t.clips.filter((c) => c.id !== clipId),
+        })),
+      );
+      if (selectedClipId === clipId) {
+        setSelectedClipId(null);
+      }
+    },
+    [selectedClipId],
+  );
 
   // --- HELPER: GENERATE WAVEFORM ---
   const generateWaveform = async (shotId: string, filePath: string) => {
@@ -625,27 +632,30 @@ function StudioContent() {
   // --- PREVIEW PLAYER ---
   const previewLoopRef = useRef<number | null>(null);
 
-  const handlePlayShot = useCallback(async (shot: Shot) => {
-    // 1. If we are currently playing the main timeline, stop it
-    if (isPlaying) setIsPlaying(false);
+  const handlePlayShot = useCallback(
+    async (shot: Shot) => {
+      // 1. If we are currently playing the main timeline, stop it
+      if (isPlaying) setIsPlaying(false);
 
-    // 2. TOGGLE OFF: If already previewing this shot, just stop and reset
-    if (previewingShotId === shot.id) {
-      setPreviewingShotId(null);
-      setCurrentTime(0);
-      return;
-    }
+      // 2. TOGGLE OFF: If already previewing this shot, just stop and reset
+      if (previewingShotId === shot.id) {
+        setPreviewingShotId(null);
+        setCurrentTime(0);
+        return;
+      }
 
-    // 3. START PREVIEW:
-    // We find where this shot would be on a "temp" timeline,
-    // but for a simple preview, we'll just seek to its start
-    // if it's on the timeline, or simply set our state to its data.
-    setPreviewingShotId(shot.id);
+      // 3. START PREVIEW:
+      // We find where this shot would be on a "temp" timeline,
+      // but for a simple preview, we'll just seek to its start
+      // if it's on the timeline, or simply set our state to its data.
+      setPreviewingShotId(shot.id);
 
-    // For now, we'll just toggle the global play state.
-    // In a future step, we can make this "solo" the specific shot.
-    setIsPlaying(true);
-  }, [isPlaying, previewingShotId]);
+      // For now, we'll just toggle the global play state.
+      // In a future step, we can make this "solo" the specific shot.
+      setIsPlaying(true);
+    },
+    [isPlaying, previewingShotId],
+  );
 
   // --- LOAD DATA ---
   useEffect(() => {
@@ -734,14 +744,15 @@ function StudioContent() {
                 (trackName.toUpperCase().startsWith("A") ? "audio" : "video");
 
               // Post-process clips to add thumbnails from shots if available
-              const clipsWithThumbnails = clips.map(clip => {
+              const clipsWithThumbnails = clips.map((clip) => {
                 // Try to find matching shot to get thumbnail
                 // We match by src mainly. Or we can match by "outputVideo" / "audioPath" if those were IDs.
                 // But here 'src' is the file path.
-                const matchingShot = loadedShots.find(s =>
-                  s.outputVideo === clip.src ||
-                  s.audioPath === clip.src ||
-                  s.sourceImage === clip.src
+                const matchingShot = loadedShots.find(
+                  (s) =>
+                    s.outputVideo === clip.src ||
+                    s.audioPath === clip.src ||
+                    s.sourceImage === clip.src,
                 );
                 if (matchingShot && matchingShot.previewBase64) {
                   return { ...clip, thumbnail: matchingShot.previewBase64 };
@@ -821,7 +832,11 @@ function StudioContent() {
       const newShot: Shot = {
         id: newId,
         sceneId: sceneId,
-        name: `Shot ${prev.length + 1}`,
+        name: `Shot ${prev.reduce((max, s) => {
+          const match = s.name.match(/^Shot (\d+)$/);
+          return match ? Math.max(max, parseInt(match[1])) : max;
+        }, 0) + 1
+          }`,
         sourceImage: "",
         audioPath: "",
         waveform: [],
@@ -862,90 +877,100 @@ function StudioContent() {
     return newShot;
   }, []);
 
-  const handleExtendShot = useCallback(async (originalShot: Shot) => {
-    const newShot = await createExtensionShot(originalShot);
-    if (!newShot) return;
+  const handleExtendShot = useCallback(
+    async (originalShot: Shot) => {
+      const newShot = await createExtensionShot(originalShot);
+      if (!newShot) return;
 
-    recordHistory();
-    setShots((prev) => {
-      const idx = prev.findIndex((s) => s.id === originalShot.id);
-      if (idx === -1) return [...prev, newShot];
-      const next = [...prev];
-      next.splice(idx + 1, 0, newShot);
-      return next;
-    });
-    setActiveShotId(newShot.id);
-  }, [shots, createExtensionShot]);
+      recordHistory();
+      setShots((prev) => {
+        const idx = prev.findIndex((s) => s.id === originalShot.id);
+        if (idx === -1) return [...prev, newShot];
+        const next = [...prev];
+        next.splice(idx + 1, 0, newShot);
+        return next;
+      });
+      setActiveShotId(newShot.id);
+    },
+    [shots, createExtensionShot],
+  );
 
   const handleTimelineExtend = async (timelineId: string) => {
     console.log("Extend feature pending migration to new timeline engine.");
   };
 
-  const handleDeleteShot = useCallback((e: React.MouseEvent, id: string) => {
-    e.stopPropagation();
-    confirm({
-      title: "Delete Shot?",
-      message: "This will permanently remove the shot.",
-      variant: "danger",
-      onConfirm: async () => {
-        recordHistory();
-        if (project && scene) await DeleteShot(project.id, scene.id, id);
-        setShots((prev) => prev.filter((s) => s.id !== id));
-      },
-    });
-  }, [confirm, project, scene]);
+  const handleDeleteShot = useCallback(
+    (e: React.MouseEvent, id: string) => {
+      e.stopPropagation();
+      confirm({
+        title: "Delete Shot?",
+        message: "This will permanently remove the shot.",
+        variant: "danger",
+        onConfirm: async () => {
+          recordHistory();
+          if (project && scene) await DeleteShot(project.id, scene.id, id);
+          setShots((prev) => prev.filter((s) => s.id !== id));
+        },
+      });
+    },
+    [confirm, project, scene],
+  );
 
-  const updateActiveShot = useCallback((updates: Partial<Shot>) => {
-    if (!activeShotId) return;
+  const updateActiveShot = useCallback(
+    (updates: Partial<Shot>) => {
+      if (!activeShotId) return;
 
-    // 1. Update the Source Library
-    const shot = shots.find((s) => s.id === activeShotId); // Access shots from state, but inside callback it might be stale if not in deps.
-    // Actually, better to use functional update for setShots if we want to avoid dep on shots, 
-    // BUT we need 'shot' to check outputVideo changes. 
-    // So we must depend on 'shots' or use a ref. 
-    // Since shots don't change during playback, depending on shots is fine.
+      // 1. Update the Source Library
+      const shot = shots.find((s) => s.id === activeShotId); // Access shots from state, but inside callback it might be stale if not in deps.
+      // Actually, better to use functional update for setShots if we want to avoid dep on shots,
+      // BUT we need 'shot' to check outputVideo changes.
+      // So we must depend on 'shots' or use a ref.
+      // Since shots don't change during playback, depending on shots is fine.
 
-    if (shot) {
-      const isNewRender = updates.status === "DONE";
-      const path = updates.outputVideo || shot.outputVideo;
-      if (
-        (isNewRender ||
-          (updates.outputVideo && updates.outputVideo !== shot.outputVideo)) &&
-        path
-      ) {
-        refreshVideoBlob(path);
-        generateWaveform(shot.id, path);
+      if (shot) {
+        const isNewRender = updates.status === "DONE";
+        const path = updates.outputVideo || shot.outputVideo;
+        if (
+          (isNewRender ||
+            (updates.outputVideo &&
+              updates.outputVideo !== shot.outputVideo)) &&
+          path
+        ) {
+          refreshVideoBlob(path);
+          generateWaveform(shot.id, path);
+        }
+        if (updates.audioPath && updates.audioPath !== shot.audioPath) {
+          generateWaveform(shot.id, updates.audioPath);
+        }
       }
-      if (updates.audioPath && updates.audioPath !== shot.audioPath) {
-        generateWaveform(shot.id, updates.audioPath);
-      }
-    }
 
-    setShots((prev) =>
-      prev.map((s) => (s.id === activeShotId ? { ...s, ...updates } : s)),
-    );
+      setShots((prev) =>
+        prev.map((s) => (s.id === activeShotId ? { ...s, ...updates } : s)),
+      );
 
-    // 2. Update the Timeline (Fixed for New Structure)
-    setTracks((prev) =>
-      prev.map((track) => ({
-        ...track,
-        clips: track.clips.map((clip) => {
-          if (clip.id === activeShotId) {
-            // Merge updates into the clip
-            // Note: We cast to 'any' briefly because Shot types and Clip types
-            // might have slight differences during this migration.
-            const newItem = { ...clip, ...updates } as any;
+      // 2. Update the Timeline (Fixed for New Structure)
+      setTracks((prev) =>
+        prev.map((track) => ({
+          ...track,
+          clips: track.clips.map((clip) => {
+            if (clip.id === activeShotId) {
+              // Merge updates into the clip
+              // Note: We cast to 'any' briefly because Shot types and Clip types
+              // might have slight differences during this migration.
+              const newItem = { ...clip, ...updates } as any;
 
-            if (updates.duration) {
-              newItem.duration = updates.duration;
+              if (updates.duration) {
+                newItem.duration = updates.duration;
+              }
+              return newItem;
             }
-            return newItem;
-          }
-          return clip;
-        }),
-      })),
-    );
-  }, [activeShotId, shots]);
+            return clip;
+          }),
+        })),
+      );
+    },
+    [activeShotId, shots],
+  );
 
   const handleUpdateItem = (
     id: string,
@@ -1371,6 +1396,7 @@ function StudioContent() {
                   selectedClipId={selectedClipId} // <--- NEW PROP
                   onSelectClip={setSelectedClipId} // <--- NEW PROP
                   onDeleteClip={handleDeleteClip} // <--- NEW PROP
+                  onRegisterHistory={recordHistory}
                 />
               </div>
             </div>
@@ -1518,8 +1544,8 @@ function StudioContent() {
                             }))
                           }
                           className={`py-2 px-3 rounded border text-xs font-bold transition-all ${exportOptions.format === preset.fmt
-                            ? "bg-[#D2FF44]/10 border-[#D2FF44] text-[#D2FF44]"
-                            : "bg-zinc-900 border-zinc-800 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
+                              ? "bg-[#D2FF44]/10 border-[#D2FF44] text-[#D2FF44]"
+                              : "bg-zinc-900 border-zinc-800 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
                             }`}
                         >
                           {preset.label}

@@ -662,22 +662,11 @@ func (a *App) SelectAndSaveWorkflow() string {
 // --- COMFYUI INTEGRATION ---
 
 // RenderShot orchestrates the ComfyUI generation
-func (a *App) RenderShot(projectId string, sceneId string, shotId string, workflowName string) (Shot, error) {
-	// 1. Get Shot
-	shots := a.GetShots(projectId, sceneId)
-	var shot *Shot
-	for i := range shots {
-		if shots[i].ID == shotId {
-			shot = &shots[i]
-			break
-		}
-	}
-	if shot == nil {
-		return Shot{}, fmt.Errorf("shot not found")
-	}
+func (a *App) RenderShot(projectId string, sceneId string, shot Shot, workflowName string) (Shot, error) {
+	// 1. Use provided shot as source of truth (avoids race conditions with disk save)
 
 	if shot.SourceImage == "" {
-		return *shot, fmt.Errorf("source image is missing")
+		return shot, fmt.Errorf("source image is missing")
 	}
 
 	// ---------------------------------------------------------
@@ -686,6 +675,8 @@ func (a *App) RenderShot(projectId string, sceneId string, shotId string, workfl
 	localAudioPath := shot.AudioPath
 	finalDuration := shot.AudioDuration
 
+	fmt.Printf("DEBUG: RenderShot Audio - Path: %s, Start: %f, Dur: %f\n", shot.AudioPath, shot.AudioStart, shot.AudioDuration)
+
 	// If no trim set, calculate full duration
 	if shot.AudioPath != "" && finalDuration <= 0 {
 		finalDuration = a.getVideoDuration(shot.AudioPath)
@@ -693,23 +684,46 @@ func (a *App) RenderShot(projectId string, sceneId string, shotId string, workfl
 
 	// Apply Trim if needed
 	if shot.AudioPath != "" && shot.AudioDuration > 0 {
-		tempName := fmt.Sprintf("trim_%s_%d%s", shot.ID, time.Now().Unix(), filepath.Ext(shot.AudioPath))
+		// Use a safe, clean temp filename
+		safeID := regexp.MustCompile(`[^a-zA-Z0-9]`).ReplaceAllString(shot.ID, "")
+		tempName := fmt.Sprintf("trim_%s_%d%s", safeID, time.Now().Unix(), filepath.Ext(shot.AudioPath))
 		tempPath := filepath.Join(os.TempDir(), tempName)
+		
+		// Debug the command for the user logs
+		fmt.Printf("DEBUG: Trimming %s (%.2f-%.2f) -> %s\n", shot.AudioPath, shot.AudioStart, shot.AudioStart+shot.AudioDuration, tempPath)
 
 		cmd := exec.Command("ffmpeg",
 			"-y",
-			"-i", shot.AudioPath,
-			"-ss", fmt.Sprintf("%f", shot.AudioStart),
+			"-i", shot.AudioPath, // Input first for accuracy
+			"-ss", fmt.Sprintf("%f", shot.AudioStart), // Seek after input is slower but safer for some formats
 			"-t", fmt.Sprintf("%f", shot.AudioDuration),
-			"-c:a", "aac", // Re-encode for frame-accurate trimming
+			"-c:a", "aac", 
+			"-b:a", "192k",
 			tempPath,
 		)
 
-		if err := cmd.Run(); err == nil {
+		// Try fast seek first (swapping order) if standard fails, but standard (-i then -ss) is frame accurate.
+		// Actually, for audio, -ss before -i is also fine usually. 
+		// Let's stick to -ss BEFORE -i as it was, but ensure format is OK.
+		// Reverting to previous flags but validating paths.
+		cmd = exec.Command("ffmpeg",
+			"-y",
+			"-ss", fmt.Sprintf("%.4f", shot.AudioStart), // Standardize float format
+			"-i", shot.AudioPath,
+			"-t", fmt.Sprintf("%.4f", shot.AudioDuration),
+			"-c:a", "aac",
+			"-b:a", "192k",
+			tempPath,
+		)
+
+		output, err := cmd.CombinedOutput()
+		if err == nil {
 			fmt.Println("Audio trimmed successfully:", tempPath)
-			localAudioPath = tempPath
+			localAudioPath = tempPath 
 		} else {
-			fmt.Printf("Warning: Audio trim failed, using original. Error: %v\n", err)
+			fmt.Printf("Warning: Audio trim failed: %v\nOutput: %s\n", err, string(output))
+			// Fallback: Try simpler command without transcoding if AAC fails? 
+			// No, ComfyUI needs standard formats.
 		}
 	}
 
@@ -724,7 +738,7 @@ func (a *App) RenderShot(projectId string, sceneId string, shotId string, workfl
 	// A. Upload Image
 	comfyImageName, err := a.uploadImageToComfy(shot.SourceImage)
 	if err != nil {
-		return *shot, fmt.Errorf("image upload failed: %v", err)
+		return shot, fmt.Errorf("image upload failed: %v", err)
 	}
 
 	// B. Upload Audio (If exists)
@@ -732,7 +746,7 @@ func (a *App) RenderShot(projectId string, sceneId string, shotId string, workfl
 	if localAudioPath != "" {
 		uploadedName, err := a.uploadImageToComfy(localAudioPath)
 		if err != nil {
-			return *shot, fmt.Errorf("audio upload failed: %v", err)
+			return shot, fmt.Errorf("audio upload failed: %v", err)
 		}
 		comfyAudioName = uploadedName
 		fmt.Printf("Audio uploaded to ComfyUI as: %s\n", comfyAudioName)
@@ -763,7 +777,7 @@ func (a *App) RenderShot(projectId string, sceneId string, shotId string, workfl
 	}
 	workflowPath := filepath.Join(a.getWorkflowsDir(), workflowName+".json")
 	if _, err := os.Stat(workflowPath); os.IsNotExist(err) {
-		return *shot, fmt.Errorf("workflow %s not found", workflowName)
+		return shot, fmt.Errorf("workflow %s not found", workflowName)
 	}
 
 	// 4. Prepare Workflow JSON
@@ -854,13 +868,13 @@ func (a *App) RenderShot(projectId string, sceneId string, shotId string, workfl
 	promptBytes, _ := json.Marshal(promptReq)
 	resp, err := http.Post(a.comfyURL+"/prompt", "application/json", bytes.NewBuffer(promptBytes))
 	if err != nil {
-		return *shot, fmt.Errorf("failed to connect to ComfyUI: %v", err)
+		return shot, fmt.Errorf("failed to connect to ComfyUI: %v", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
 		body, _ := io.ReadAll(resp.Body)
-		return *shot, fmt.Errorf("ComfyUI API Error (%d): %s", resp.StatusCode, string(body))
+		return shot, fmt.Errorf("ComfyUI API Error (%d): %s", resp.StatusCode, string(body))
 	}
 
 	var promptResp map[string]interface{}
@@ -924,7 +938,7 @@ loop:
 		case <-doneChan:
 			// WebSocket finished, but we still check history to be sure.
 		case <-timeout:
-			return *shot, fmt.Errorf("timeout: generation took longer than 60 minutes")
+			return shot, fmt.Errorf("timeout: generation took longer than 60 minutes")
 		case <-ticker.C:
 			// Check History directly
 			if resp, err := http.Get(a.comfyURL + "/history/" + promptID); err == nil {
@@ -956,12 +970,12 @@ loop:
 							if errPair, ok := messages[0].([]interface{}); ok && len(errPair) >= 2 {
                                 if errDetails, ok := errPair[1].(map[string]interface{}); ok {
                                     if msg, ok := errDetails["exception_message"].(string); ok {
-                                        return *shot, fmt.Errorf("ComfyUI Crashed: %s", msg)
+                                        return shot, fmt.Errorf("ComfyUI Crashed: %s", msg)
                                     }
                                 }
 							}
 						}
-						return *shot, fmt.Errorf("ComfyUI reported a fatal error during generation")
+						return shot, fmt.Errorf("ComfyUI reported a fatal error during generation")
 					}
 				}
 
@@ -996,18 +1010,18 @@ loop:
 	}
 
 	if outputFilename == "" {
-		return *shot, fmt.Errorf("job finished but no output file was found (check ComfyUI console)")
+		return shot, fmt.Errorf("job finished but no output file was found (check ComfyUI console)")
 	}
 
 	// 9. Download Result
-	outPath := filepath.Join(a.getAppDir(), projectId, "scenes", sceneId, shotId+".mp4")
+	outPath := filepath.Join(a.getAppDir(), projectId, "scenes", sceneId, shot.ID+".mp4")
 	query := fmt.Sprintf("filename=%s&subfolder=%s&type=%s", outputFilename, outputSubfolder, outputType)
 	vidResp, err := http.Get(fmt.Sprintf("%s/view?%s", a.comfyURL, query))
 	
 	if err == nil {
 		defer vidResp.Body.Close()
 		if vidResp.StatusCode != 200 {
-			return *shot, fmt.Errorf("download failed (Status %d)", vidResp.StatusCode)
+			return shot, fmt.Errorf("download failed (Status %d)", vidResp.StatusCode)
 		}
 
 		outFile, _ := os.Create(outPath)
@@ -1022,12 +1036,25 @@ loop:
 		shot.OutputVideo = outPath
 		shot.Status = "DONE"
 		shot.Duration = a.getVideoDuration(outPath)
-		a.SaveShots(projectId, sceneId, shots)
+		
+		// Save to DB (Merge with existing)
+		allShots := a.GetShots(projectId, sceneId)
+		found := false
+		for i, s := range allShots {
+			if s.ID == shot.ID {
+				allShots[i] = shot
+				found = true
+				break
+			}
+		}
+		if !found { allShots = append(allShots, shot) }
+		a.SaveShots(projectId, sceneId, allShots)
+
 	} else {
-		return *shot, fmt.Errorf("failed to download result: %v", err)
+		return shot, fmt.Errorf("failed to download result: %v", err)
 	}
 
-	return *shot, nil
+	return shot, nil
 }
 
 // sanitizeVideo re-encodes the video to a web-safe format (H.264, yuv420p)

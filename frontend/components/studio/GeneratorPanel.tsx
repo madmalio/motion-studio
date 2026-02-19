@@ -34,6 +34,7 @@ const GeneratorPanel = memo(function GeneratorPanel({
   updateActiveShot,
   project,
   scene,
+  shots, // <--- Accept shots
   isRendering,
   setIsRendering,
   setVideoCache,
@@ -166,6 +167,18 @@ const GeneratorPanel = memo(function GeneratorPanel({
           return;
         }
 
+        // FORCE SAVE (Race Condition Fix)
+        // Ensure the backend has the latest audioStart/Duration before we trigger remote render
+        // which might look up the shot by ID.
+        if (shots && shots.length > 0) {
+          // We must ensure 'shots' contains the *current* activeShot with latest edits.
+          // Since 'shots' comes from props, and parent updates it, it should be current.
+          const cleanShots = shots.map(({ previewBase64, ...keep }: any) => keep);
+          await import("../../wailsjs/go/main/App").then(mod =>
+            mod.SaveShots(project.id, scene.id, cleanShots)
+          );
+        }
+
         // 2. CALL THE CLOUD
         updatedShot = await RenderRemoteShot(
           project.id,
@@ -177,10 +190,17 @@ const GeneratorPanel = memo(function GeneratorPanel({
         );
       } else {
         // 3. CALL LOCAL COMFYUI (Existing Logic)
+        // Add PascalCase Params for Backup
+        const payload = {
+          ...activeShot,
+          AudioStart: activeShot.audioStart,
+          AudioDuration: activeShot.audioDuration
+        };
+
         updatedShot = await RenderShot(
           project.id,
           scene.id,
-          activeShot.id,
+          payload,
           selectedWorkflow,
         );
       }
