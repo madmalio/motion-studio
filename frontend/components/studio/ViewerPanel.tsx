@@ -1,8 +1,22 @@
 "use client";
-import React, { useRef, useEffect, useState } from "react";
-import { Player } from "@remotion/player";
-import { AbsoluteFill, Sequence, Video, Audio, Img } from "remotion";
-import { HelloWorld } from "./HelloWorld";
+
+import React, { useRef, useEffect, useMemo } from "react";
+import { Player, PlayerRef } from "@remotion/player";
+import { TimelineComposition } from "./TimelineComposition";
+import { TimelineTrack } from "./SimpleTimeline"; // Re-use your types
+
+// --- TYPES ---
+interface ViewerPanelProps {
+  tracks: TimelineTrack[];
+  totalDuration: number;
+  currentTime: number;
+  isPlaying: boolean;
+  setIsPlaying: (playing: boolean) => void;
+  setCurrentTime: (time: number) => void;
+  projectFps?: number;
+  volume?: number;
+  videoBlobs: Map<string, string>;
+}
 
 export default function ViewerPanel({
   tracks,
@@ -13,48 +27,34 @@ export default function ViewerPanel({
   setCurrentTime,
   projectFps = 30,
   volume = 1,
-  videoBlobs, // <--- NEW PROP
-}: any) {
-  const playerRef = useRef<any>(null);
+  videoBlobs,
+}: ViewerPanelProps) {
+  const playerRef = useRef<PlayerRef>(null);
 
-  // --- FORCE VOLUME UPDATE ---
-  // The Remotion Player usually handles volume via props, but sometimes
-  // needs a hard nudget depending on how the Composition uses the audio.
-  // This is a safety wrapper.
-  useEffect(() => {
-    if (playerRef.current) {
-      // Remotion player wrapper specific logic if available,
-      // otherwise we rely on the Composition passing the volume prop down.
-    }
-  }, [volume]);
-
-  // --- SYNC PLAYBACK STATE ---
+  // --- SYNC PLAYBACK STATE (Play/Pause) ---
   useEffect(() => {
     if (!playerRef.current) return;
 
-    if (isPlaying) {
-      if (!playerRef.current.isPlaying()) playerRef.current.play();
-    } else {
-      if (playerRef.current.isPlaying()) playerRef.current.pause();
+    if (isPlaying && !playerRef.current.isPlaying()) {
+      playerRef.current.play();
+    } else if (!isPlaying && playerRef.current.isPlaying()) {
+      playerRef.current.pause();
     }
   }, [isPlaying]);
 
-  // --- SYNC CURRENT TIME (SEEKING) ---
+  // --- SYNC CURRENT TIME (Seeking from Timeline) ---
   useEffect(() => {
-    // Prevent fighting: Only seek if we are NOT playing.
-    // When playing, the player drives the time, not the state.
-    if (isPlaying) return;
+    if (isPlaying || !playerRef.current) return; // Player drives time when playing
 
-    if (playerRef.current) {
-      const targetFrame = Math.floor(currentTime * projectFps);
-      const currentFrame = playerRef.current.getCurrentFrame();
-      if (Math.abs(currentFrame - targetFrame) > 1) {
-        playerRef.current.seekTo(targetFrame);
-      }
+    const targetFrame = Math.floor(currentTime * projectFps);
+    const currentFrame = playerRef.current.getCurrentFrame();
+
+    if (Math.abs(currentFrame - targetFrame) > 1) {
+      playerRef.current.seekTo(targetFrame);
     }
   }, [currentTime, projectFps, isPlaying]);
 
-  // --- POLL CURRENT FRAME DURING PLAYBACK ---
+  // --- POLL CURRENT FRAME (Driving Timeline Playhead) ---
   useEffect(() => {
     if (!isPlaying) return;
 
@@ -64,8 +64,8 @@ export default function ViewerPanel({
         const frame = playerRef.current.getCurrentFrame();
         const durationInFrames = Math.ceil(totalDuration * projectFps);
 
-        // Stop if we reached the end
-        if (frame >= durationInFrames - 1) { // -1 buffer to catch it before loop/reset
+        // Auto-pause at the end of the timeline
+        if (frame >= durationInFrames - 1) {
           setIsPlaying(false);
         }
 
@@ -73,32 +73,27 @@ export default function ViewerPanel({
       }
       handle = requestAnimationFrame(loop);
     };
+
     handle = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(handle);
-  }, [isPlaying, projectFps, setCurrentTime]);
+  }, [isPlaying, projectFps, setCurrentTime, totalDuration]);
 
-  // --- MEMOIZE INPUT PROPS (CRITICAL FIX) ---
-  // We explicitly memoize this object so that the Player doesn't see a "new"
-  // input object every single render cycle (which happens on every seek/time update).
-  // We also convert the videoBlobs Map to a plain object if needed, or pass it as is.
-  // Remotion inputProps must be JSON serializable mostly, but for local preview passing a Map *might* work
-  // if we are careful, but safer to pass as an object or just the raw map if we type it.
-  // Actually, for client-side player, passing the Map is fine.
-  const inputProps = React.useMemo(
+  // --- MEMOIZE INPUT PROPS ---
+  const inputProps = useMemo(
     () => ({
       tracks,
       volume,
       fps: projectFps,
-      videoBlobs, // Pass the blobs down
+      videoBlobs,
     }),
-    [tracks, volume, projectFps, videoBlobs],
+    [tracks, volume, projectFps, videoBlobs]
   );
 
   return (
     <div className="w-full h-full flex items-center justify-center bg-black">
       <Player
         ref={playerRef}
-        component={HelloWorld}
+        component={TimelineComposition}
         inputProps={inputProps}
         durationInFrames={Math.max(1, Math.ceil(totalDuration * projectFps))}
         fps={projectFps}

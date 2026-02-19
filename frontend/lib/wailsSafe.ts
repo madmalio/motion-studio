@@ -71,6 +71,9 @@ export const RenderRemoteShot = (
   prompt: string,
   imagePath: string,
   modalUrl: string,
+  audioPath: string,
+  audioStart: number,
+  audioDuration: number,
 ) =>
   callGo(
     () =>
@@ -81,6 +84,9 @@ export const RenderRemoteShot = (
         prompt,
         imagePath,
         modalUrl,
+        audioPath,
+        audioStart,
+        audioDuration,
       ),
     "RenderRemoteShot",
   );

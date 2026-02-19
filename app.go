@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"math"
 	"mime/multipart"
 	"net/http"
@@ -19,10 +18,9 @@ import (
 	"path/filepath"
 	"regexp"
 	stdRuntime "runtime"
+	"sort"
 	"strconv"
 	"strings"
-	"sort"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"       // <--- NEW
@@ -32,17 +30,17 @@ import (
 
 // App struct
 type App struct {
-	ctx      context.Context
-	comfyURL string
-	clientID string // <--- NEW: For WebSocket connection
+	ctx          context.Context
+	comfyURL     string
+	clientID     string                       // <--- NEW: For WebSocket connection
 	nodeMappings map[string]map[string]string // Class -> Input -> Type
 }
 
 // NewApp creates a new App application struct
 func NewApp() *App {
 	return &App{
-		comfyURL: "http://127.0.0.1:8188",
-		clientID: uuid.New().String(), // <--- Generate ID on startup
+		comfyURL:     "http://127.0.0.1:8188",
+		clientID:     uuid.New().String(), // <--- Generate ID on startup
 		nodeMappings: make(map[string]map[string]string),
 	}
 }
@@ -57,10 +55,9 @@ func (a *App) startup(ctx context.Context) {
 	}
 
 	// ---------------------------------------------------------
-	// CRITICAL FIX: START THE ENGINE HERE
+	// START STATIC MEDIA SERVER
 	// ---------------------------------------------------------
-	go StartStreamServer()
-	// ---------------------------------------------------------
+	go StartMediaServer()
 
 	a.loadConfig()
 	a.loadNodeMappings()
@@ -70,40 +67,6 @@ func (a *App) startup(ctx context.Context) {
 // is actually ready for backend calls.
 func (a *App) Ping() bool {
 	return true
-}
-
-// --- ENGINE BRIDGE (Frontend calls this) ---
-
-// UpdateTimeline receives a list of file paths, generates a playlist,
-// renders a gapless MP4 preview, and tells the frontend where to stream it from.
-func (a *App) UpdateTimeline(clips []string) string {
-	if server == nil {
-		return "error: server_not_ready"
-	}
-
-	// 1. Generate the FFmpeg playlist file
-	_, err := server.GeneratePlaylist(clips)
-	if err != nil {
-		fmt.Println("Error generating playlist:", err)
-		return "error: " + err.Error()
-	}
-
-	// 2. Render a gapless MP4 preview (fast concat because clips match)
-	_, err = server.RenderPreviewMP4()
-	if err != nil {
-		fmt.Println("Error rendering preview:", err)
-		return "error: " + err.Error()
-	}
-
-	// 3. Return the preview URL with a timestamp to force reload
-	return fmt.Sprintf("http://localhost:3456/preview.mp4?t=%d", time.Now().UnixMilli())
-}
-
-// RenderTimelinePreview generates a flattened preview video for the timeline
-func (a *App) RenderTimelinePreview(projectId string, sceneId string, timeline TimelineData) string {
-	// DEPRECATED: We now use Remotion for live preview.
-	// This function is kept as a stub to prevent errors if the frontend calls it.
-	return ""
 }
 
 // --- MODELS ---
@@ -127,19 +90,19 @@ type Scene struct {
 }
 
 type Shot struct {
-	ID             string  `json:"id"`
-	SceneID        string  `json:"sceneId"`
-	Name           string  `json:"name"`
-	SourceImage    string  `json:"sourceImage"`    // Path to input image
-	AudioPath      string  `json:"audioPath"`      // Path to audio file
-	AudioStart     float64 `json:"audioStart"`     // Start trim time
-	AudioDuration  float64 `json:"audioDuration"`  // Duration to keep
-	Prompt         string  `json:"prompt"`         // AI Prompt
-	MotionStrength int     `json:"motionStrength"` // 1-127
-	Seed           int64   `json:"seed"`
-	Duration       float64 `json:"duration"`    // Seconds
-	Status         string  `json:"status"`      // DRAFT, RENDERING, DONE
-	OutputVideo    string  `json:"outputVideo"` // Path to generated MP4
+	ID             string    `json:"id"`
+	SceneID        string    `json:"sceneId"`
+	Name           string    `json:"name"`
+	SourceImage    string    `json:"sourceImage"`    // Path to input image
+	AudioPath      string    `json:"audioPath"`      // Path to audio file
+	AudioStart     float64   `json:"audioStart"`     // Start trim time
+	AudioDuration  float64   `json:"audioDuration"`  // Duration to keep
+	Prompt         string    `json:"prompt"`         // AI Prompt
+	MotionStrength int       `json:"motionStrength"` // 1-127
+	Seed           int64     `json:"seed"`
+	Duration       float64   `json:"duration"`    // Seconds
+	Status         string    `json:"status"`      // DRAFT, RENDERING, DONE
+	OutputVideo    string    `json:"outputVideo"` // Path to generated MP4
 	Waveform       []float64 `json:"waveform"`
 }
 
@@ -161,7 +124,7 @@ type TrackSetting struct {
 }
 
 type ExportOptions struct {
-	Format       string `json:"format"`       // mp4, mov, mkv, mp3, wav
+	Format       string `json:"format"` // mp4, mov, mkv, mp3, wav
 	IncludeVideo bool   `json:"includeVideo"`
 	IncludeAudio bool   `json:"includeAudio"`
 	Quality      string `json:"quality"`
@@ -213,7 +176,7 @@ func (a *App) loadConfig() {
 func (a *App) loadNodeMappings() {
 	path := filepath.Join(a.getAppDir(), "node_mappings.json")
 	data, err := os.ReadFile(path)
-	
+
 	// Default Mappings
 	defaults := map[string]map[string]string{
 		"LoadImage":                {"image": "IMAGE"},
@@ -264,22 +227,22 @@ func (a *App) analyzeWorkflowForMappings(workflowData []byte) {
 
 					for key := range inputs {
 						lowerKey := strings.ToLower(key)
-						
+
 						// --- EXISTING RULES ---
 						if lowerKey == "seed" || lowerKey == "noise_seed" {
 							newRules[key] = "SEED"
 						} else if lowerKey == "text" || lowerKey == "prompt" || lowerKey == "positive" || lowerKey == "text_g" || lowerKey == "text_l" {
 							newRules[key] = "PROMPT"
-						} else if (strings.Contains(strings.ToLower(classType), "image") && lowerKey == "image") {
+						} else if strings.Contains(strings.ToLower(classType), "image") && lowerKey == "image" {
 							newRules[key] = "IMAGE"
-						} else if (strings.Contains(strings.ToLower(classType), "audio") && (lowerKey == "audio" || lowerKey == "filename" || lowerKey == "audio_file")) {
+						} else if strings.Contains(strings.ToLower(classType), "audio") && (lowerKey == "audio" || lowerKey == "filename" || lowerKey == "audio_file") {
 							newRules[key] = "AUDIO"
-						} else if (lowerKey == "max_frames" || lowerKey == "frame_count" || lowerKey == "video_length" || lowerKey == "num_frames") {
+						} else if lowerKey == "max_frames" || lowerKey == "frame_count" || lowerKey == "video_length" || lowerKey == "num_frames" {
 							newRules[key] = "MAX_FRAMES"
-						
-						// --- NEW RULE: CATCH "LENGTH" ---
-						} else if lowerKey == "length" { 
-							newRules[key] = "WAN_LENGTH" 
+
+							// --- NEW RULE: CATCH "LENGTH" ---
+						} else if lowerKey == "length" {
+							newRules[key] = "WAN_LENGTH"
 						}
 					}
 
@@ -649,16 +612,6 @@ func (a *App) DeleteWorkflow(name string) string {
 	return "Success"
 }
 
-// --- LEGACY SUPPORT (Fixes build errors in SettingsProvider) ---
-
-func (a *App) CheckWorkflowExists() bool {
-	return len(a.GetWorkflows()) > 0
-}
-
-func (a *App) SelectAndSaveWorkflow() string {
-	return a.ImportWorkflow("imported_workflow")
-}
-
 // --- COMFYUI INTEGRATION ---
 
 // RenderShot orchestrates the ComfyUI generation
@@ -684,57 +637,42 @@ func (a *App) RenderShot(projectId string, sceneId string, shot Shot, workflowNa
 
 	// Apply Trim if needed
 	if shot.AudioPath != "" && shot.AudioDuration > 0 {
-		// Use a safe, clean temp filename
+		// FIX: Force .wav extension for AI compatibility
 		safeID := regexp.MustCompile(`[^a-zA-Z0-9]`).ReplaceAllString(shot.ID, "")
-		tempName := fmt.Sprintf("trim_%s_%d%s", safeID, time.Now().Unix(), filepath.Ext(shot.AudioPath))
+		tempName := fmt.Sprintf("trim_%s_%d.wav", safeID, time.Now().Unix())
 		tempPath := filepath.Join(os.TempDir(), tempName)
-		
-		// Debug the command for the user logs
-		fmt.Printf("DEBUG: Trimming %s (%.2f-%.2f) -> %s\n", shot.AudioPath, shot.AudioStart, shot.AudioStart+shot.AudioDuration, tempPath)
 
+		fmt.Printf("DEBUG: EXECUTING TRIM: ffmpeg -y -i %s -ss %.4f -t %.4f %s\n", shot.AudioPath, shot.AudioStart, shot.AudioDuration, tempPath)
+
+		// FIX: Use pcm_s16le codec for standard WAV output
 		cmd := exec.Command("ffmpeg",
 			"-y",
-			"-i", shot.AudioPath, // Input first for accuracy
-			"-ss", fmt.Sprintf("%f", shot.AudioStart), // Seek after input is slower but safer for some formats
-			"-t", fmt.Sprintf("%f", shot.AudioDuration),
-			"-c:a", "aac", 
-			"-b:a", "192k",
-			tempPath,
-		)
-
-		// Try fast seek first (swapping order) if standard fails, but standard (-i then -ss) is frame accurate.
-		// Actually, for audio, -ss before -i is also fine usually. 
-		// Let's stick to -ss BEFORE -i as it was, but ensure format is OK.
-		// Reverting to previous flags but validating paths.
-		cmd = exec.Command("ffmpeg",
-			"-y",
-			"-ss", fmt.Sprintf("%.4f", shot.AudioStart), // Standardize float format
 			"-i", shot.AudioPath,
+			"-ss", fmt.Sprintf("%.4f", shot.AudioStart),
 			"-t", fmt.Sprintf("%.4f", shot.AudioDuration),
-			"-c:a", "aac",
-			"-b:a", "192k",
+			"-c:a", "pcm_s16le",
 			tempPath,
 		)
 
 		output, err := cmd.CombinedOutput()
 		if err == nil {
 			fmt.Println("Audio trimmed successfully:", tempPath)
-			localAudioPath = tempPath 
+			localAudioPath = tempPath
 		} else {
 			fmt.Printf("Warning: Audio trim failed: %v\nOutput: %s\n", err, string(output))
-			// Fallback: Try simpler command without transcoding if AAC fails? 
-			// No, ComfyUI needs standard formats.
 		}
 	}
 
 	// Calculate Max Frames for Audio-based workflows (standard 25fps)
-	if finalDuration <= 0 { finalDuration = 1.0 }
+	if finalDuration <= 0 {
+		finalDuration = 1.0
+	}
 	maxFrames := int(finalDuration * 25)
-	
+
 	// ---------------------------------------------------------
 	// 2. UPLOAD ASSETS TO COMFYUI
 	// ---------------------------------------------------------
-	
+
 	// A. Upload Image
 	comfyImageName, err := a.uploadImageToComfy(shot.SourceImage)
 	if err != nil {
@@ -789,16 +727,18 @@ func (a *App) RenderShot(projectId string, sceneId string, shot Shot, workflowNa
 	// 5. INJECT VALUES (UPDATED WITH FORCE FIX)
 	// =========================================================
 	imageInjected := false
-	
+
 	// --- A. Calculate Wan2 Frame Count ---
 	// Formula: 16 fps * duration + 1
 	// 5s = 81 frames, 10s = 161 frames
 	wanDuration := shot.Duration
-	if wanDuration <= 0 { wanDuration = 5 } // Default to 5s if unset
+	if wanDuration <= 0 {
+		wanDuration = 5
+	} // Default to 5s if unset
 	wanFrames := int(wanDuration*16) + 1
 
 	fmt.Printf("DEBUG: Generating Wan2 with %d seconds (%d frames)\n", int(wanDuration), wanFrames)
-	
+
 	// Prepare Injection Values
 	injectValues := map[string]interface{}{
 		"IMAGE":      comfyImageName,
@@ -807,7 +747,7 @@ func (a *App) RenderShot(projectId string, sceneId string, shot Shot, workflowNa
 		"MOTION":     shot.MotionStrength,
 		"WAN_LENGTH": wanFrames, // <--- Value for mapped "length" inputs
 	}
-	
+
 	if comfyAudioName != "" {
 		injectValues["AUDIO"] = comfyAudioName
 		injectValues["MAX_FRAMES"] = maxFrames
@@ -815,20 +755,26 @@ func (a *App) RenderShot(projectId string, sceneId string, shot Shot, workflowNa
 
 	for _, node := range workflow {
 		nodeMap, ok := node.(map[string]interface{})
-		if !ok { continue }
+		if !ok {
+			continue
+		}
 
 		classType, _ := nodeMap["class_type"].(string)
 		inputs, _ := nodeMap["inputs"].(map[string]interface{})
-		
+
 		// --- B. Standard Mapping Injection ---
 		if rules, known := a.nodeMappings[classType]; known {
 			for inputKey, valueType := range rules {
 				if _, inputExists := inputs[inputKey]; inputExists {
-					if _, isLink := inputs[inputKey].([]interface{}); isLink { continue }
+					if _, isLink := inputs[inputKey].([]interface{}); isLink {
+						continue
+					}
 
 					if val, hasVal := injectValues[valueType]; hasVal {
 						inputs[inputKey] = val
-						if valueType == "IMAGE" { imageInjected = true }
+						if valueType == "IMAGE" {
+							imageInjected = true
+						}
 					}
 				}
 			}
@@ -849,7 +795,9 @@ func (a *App) RenderShot(projectId string, sceneId string, shot Shot, workflowNa
 				lowerTitle := strings.ToLower(title)
 				if strings.Contains(lowerTitle, "max frames") || strings.Contains(lowerTitle, "frame count") {
 					if val, hasVal := injectValues["MAX_FRAMES"]; hasVal {
-						if _, ok := inputs["value"]; ok { inputs["value"] = val }
+						if _, ok := inputs["value"]; ok {
+							inputs["value"] = val
+						}
 					}
 				}
 			}
@@ -908,7 +856,7 @@ func (a *App) RenderShot(projectId string, sceneId string, shot Shot, workflowNa
 					percentage := int((val / max) * 100)
 					runtime.EventsEmit(a.ctx, "comfy:progress", percentage)
 				}
-				
+
 				if msgType == "executing" {
 					node := data["node"]
 					if node != nil {
@@ -945,7 +893,7 @@ loop:
 				var h map[string]interface{}
 				json.NewDecoder(resp.Body).Decode(&h)
 				resp.Body.Close()
-				
+
 				if _, ok := h[promptID]; ok {
 					break loop
 				}
@@ -962,17 +910,17 @@ loop:
 			histResp.Body.Close()
 
 			if data, ok := histMap[promptID].(map[string]interface{}); ok {
-				
+
 				// A. CHECK FOR CRASHES
 				if status, ok := data["status"].(map[string]interface{}); ok {
 					if statusStr, ok := status["status_str"].(string); ok && statusStr == "error" {
 						if messages, ok := status["messages"].([]interface{}); ok && len(messages) > 0 {
 							if errPair, ok := messages[0].([]interface{}); ok && len(errPair) >= 2 {
-                                if errDetails, ok := errPair[1].(map[string]interface{}); ok {
-                                    if msg, ok := errDetails["exception_message"].(string); ok {
-                                        return shot, fmt.Errorf("ComfyUI Crashed: %s", msg)
-                                    }
-                                }
+								if errDetails, ok := errPair[1].(map[string]interface{}); ok {
+									if msg, ok := errDetails["exception_message"].(string); ok {
+										return shot, fmt.Errorf("ComfyUI Crashed: %s", msg)
+									}
+								}
 							}
 						}
 						return shot, fmt.Errorf("ComfyUI reported a fatal error during generation")
@@ -983,21 +931,29 @@ loop:
 				if outputs, ok := data["outputs"].(map[string]interface{}); ok {
 					for _, outNode := range outputs {
 						outNodeMap, ok := outNode.(map[string]interface{})
-						if !ok { continue }
+						if !ok {
+							continue
+						}
 
 						for _, categoryValue := range outNodeMap {
 							if items, ok := categoryValue.([]interface{}); ok && len(items) > 0 {
 								if item, ok := items[0].(map[string]interface{}); ok {
 									if fn, ok := item["filename"].(string); ok {
 										outputFilename = fn
-										if s, ok := item["subfolder"].(string); ok { outputSubfolder = s }
-										if t, ok := item["type"].(string); ok { outputType = t }
+										if s, ok := item["subfolder"].(string); ok {
+											outputSubfolder = s
+										}
+										if t, ok := item["type"].(string); ok {
+											outputType = t
+										}
 										break
 									}
 								}
 							}
 						}
-						if outputFilename != "" { break }
+						if outputFilename != "" {
+							break
+						}
 					}
 				}
 			}
@@ -1017,7 +973,7 @@ loop:
 	outPath := filepath.Join(a.getAppDir(), projectId, "scenes", sceneId, shot.ID+".mp4")
 	query := fmt.Sprintf("filename=%s&subfolder=%s&type=%s", outputFilename, outputSubfolder, outputType)
 	vidResp, err := http.Get(fmt.Sprintf("%s/view?%s", a.comfyURL, query))
-	
+
 	if err == nil {
 		defer vidResp.Body.Close()
 		if vidResp.StatusCode != 200 {
@@ -1036,7 +992,7 @@ loop:
 		shot.OutputVideo = outPath
 		shot.Status = "DONE"
 		shot.Duration = a.getVideoDuration(outPath)
-		
+
 		// Save to DB (Merge with existing)
 		allShots := a.GetShots(projectId, sceneId)
 		found := false
@@ -1047,7 +1003,9 @@ loop:
 				break
 			}
 		}
-		if !found { allShots = append(allShots, shot) }
+		if !found {
+			allShots = append(allShots, shot)
+		}
 		a.SaveShots(projectId, sceneId, allShots)
 
 	} else {
@@ -1061,16 +1019,16 @@ loop:
 // This fixes the "Audio plays but no video" / "Format Error" in Chrome/WebView2
 func (a *App) sanitizeVideo(path string) error {
 	tempPath := path + ".temp.mp4"
-	
+
 	// ffmpeg -i input -c:v libx264 -pix_fmt yuv420p -profile:v main -level 3.1 -preset ultrafast -c:a copy output
-	cmd := exec.Command("ffmpeg", 
-		"-y", 
-		"-i", path, 
-		"-c:v", "libx264", 
+	cmd := exec.Command("ffmpeg",
+		"-y",
+		"-i", path,
+		"-c:v", "libx264",
 		"-pix_fmt", "yuv420p", // Forces standard pixel format
 		"-preset", "ultrafast", // Fast encoding
-		"-c:a", "aac",          // Force AAC audio (Web Standard)
-		"-shortest",            // Ensure audio doesn't overrun video duration
+		"-c:a", "aac", // Force AAC audio (Web Standard)
+		"-shortest", // Ensure audio doesn't overrun video duration
 		tempPath,
 	)
 
@@ -1243,11 +1201,11 @@ func (a *App) GetProjectAssets(projectId string) []ProjectAsset {
 		if !entry.IsDir() {
 			ext := strings.ToLower(filepath.Ext(entry.Name()))
 			assetType := "unknown"
-			
+
 			// Identify Images
 			if ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".webp" {
 				assetType = "image"
-			} 
+			}
 			// Identify Audio
 			if ext == ".mp3" || ext == ".wav" || ext == ".ogg" || ext == ".m4a" || ext == ".flac" {
 				assetType = "audio"
@@ -1358,25 +1316,25 @@ func (a *App) ExtractAudioPeaks(filePath string, samplesPerSec int) ([]float64, 
 	// -f s16le: output raw 16-bit little-endian PCM
 	// -: output to stdout
 	cmd := exec.Command("ffmpeg", "-i", filePath, "-vn", "-ac", "1", "-ar", "4000", "-f", "s16le", "-")
-	
+
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, err
 	}
-	
+
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
 
 	var peaks []float64
 	reader := bufio.NewReader(stdout)
-	
+
 	// 4000Hz sample rate / samplesPerSec (e.g. 20) = 200 samples per peak chunk
 	chunkSize := 4000 / samplesPerSec
-	
+
 	// Buffer for one sample (int16 = 2 bytes)
 	sampleBytes := make([]byte, 2)
-	
+
 	currentMax := 0.0
 	sampleCount := 0
 
@@ -1386,7 +1344,7 @@ func (a *App) ExtractAudioPeaks(filePath string, samplesPerSec int) ([]float64, 
 			break
 		}
 		if err != nil {
-			break 
+			break
 		}
 
 		// Convert bytes to int16
@@ -1407,8 +1365,8 @@ func (a *App) ExtractAudioPeaks(filePath string, samplesPerSec int) ([]float64, 
 			sampleCount = 0
 		}
 	}
-    
-	cmd.Wait() 
+
+	cmd.Wait()
 	return peaks, nil
 }
 
@@ -1458,11 +1416,11 @@ func (a *App) ExtractLastFrame(inputPath string) string {
 // --- EXPORT ENGINE ---
 
 type RenderSegment struct {
-	SourcePath string
-	InPoint    float64
-	OutPoint   float64
-	Duration   float64
-	IsImage    bool
+	SourcePath  string
+	InPoint     float64
+	OutPoint    float64
+	Duration    float64
+	IsImage     bool
 	AudioSource string
 }
 
@@ -1470,7 +1428,7 @@ func (a *App) ExportVideo(projectId string, sceneId string, options ExportOption
 	// 1. Select Output File
 	ext := "." + options.Format
 	filterPattern := "*" + ext
-	
+
 	outPath, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
 		Title:           "Export " + strings.ToUpper(options.Format),
 		DefaultFilename: "export" + ext,
@@ -1494,7 +1452,7 @@ func (a *App) ExportVideo(projectId string, sceneId string, options ExportOption
 	tempDir := os.TempDir()
 	videoOutput := ""
 	audioOutput := ""
-	
+
 	// 0. Prepare Black Frame for Gaps
 	blackPath := filepath.Join(tempDir, "black.png")
 	if _, err := os.Stat(blackPath); os.IsNotExist(err) {
@@ -1517,7 +1475,7 @@ func (a *App) ExportVideo(projectId string, sceneId string, options ExportOption
 		OutputVideo string
 		AudioPath   string
 		SourceImage string
-		PairID		string
+		PairID      string
 	}
 
 	// --- PASS 1: ANALYZE TIMELINE (VISUALS) ---
@@ -1535,13 +1493,27 @@ func (a *App) ExportVideo(projectId string, sceneId string, options ExportOption
 		var track []Item
 		for _, rawItem := range rawTrack {
 			item := Item{}
-			if v, ok := rawItem["startTime"].(float64); ok { item.StartTime = v }
-			if v, ok := rawItem["duration"].(float64); ok { item.Duration = v }
-			if v, ok := rawItem["trimStart"].(float64); ok { item.TrimStart = v }
-			if v, ok := rawItem["outputVideo"].(string); ok { item.OutputVideo = v }
-			if v, ok := rawItem["audioPath"].(string); ok { item.AudioPath = v }
-			if v, ok := rawItem["sourceImage"].(string); ok { item.SourceImage = v }
-			if v, ok := rawItem["pairId"].(string); ok { item.PairID = v } // <--- Parse PairID
+			if v, ok := rawItem["startTime"].(float64); ok {
+				item.StartTime = v
+			}
+			if v, ok := rawItem["duration"].(float64); ok {
+				item.Duration = v
+			}
+			if v, ok := rawItem["trimStart"].(float64); ok {
+				item.TrimStart = v
+			}
+			if v, ok := rawItem["outputVideo"].(string); ok {
+				item.OutputVideo = v
+			}
+			if v, ok := rawItem["audioPath"].(string); ok {
+				item.AudioPath = v
+			}
+			if v, ok := rawItem["sourceImage"].(string); ok {
+				item.SourceImage = v
+			}
+			if v, ok := rawItem["pairId"].(string); ok {
+				item.PairID = v
+			} // <--- Parse PairID
 
 			track = append(track, item)
 			timePoints = append(timePoints, item.StartTime)
@@ -1577,9 +1549,13 @@ func (a *App) ExportVideo(projectId string, sceneId string, options ExportOption
 		for tIdx, track := range tracks {
 			if tIdx < len(timeline.TrackSettings) {
 				ts := timeline.TrackSettings[tIdx]
-				if !ts.Visible { continue }
+				if !ts.Visible {
+					continue
+				}
 				isAudio := ts.Type == "audio" || strings.HasPrefix(ts.Name, "A")
-				if isAudio { continue }
+				if isAudio {
+					continue
+				}
 			}
 
 			foundClip := false
@@ -1591,7 +1567,9 @@ func (a *App) ExportVideo(projectId string, sceneId string, options ExportOption
 					break
 				}
 			}
-			if foundClip { break }
+			if foundClip {
+				break
+			}
 		}
 
 		if activeItem != nil {
@@ -1602,7 +1580,9 @@ func (a *App) ExportVideo(projectId string, sceneId string, options ExportOption
 
 			offset := start - activeItem.StartTime + activeItem.TrimStart
 			source := activeItem.OutputVideo
-			if source == "" { source = activeItem.SourceImage }
+			if source == "" {
+				source = activeItem.SourceImage
+			}
 
 			// ECHO FIX: Force AudioSource to Silence.
 			// We will rely entirely on Pass 3 (Audio Tracks) to render the audio.
@@ -1652,7 +1632,7 @@ func (a *App) ExportVideo(projectId string, sceneId string, options ExportOption
 		// --- QUALITY LOGIC ---
 		// H.264 (MP4/MKV): Lower CRF = Higher Quality.
 		// ProRes (MOV): Higher Profile = Higher Quality.
-		crf := "23"         // Default Medium
+		crf := "23"          // Default Medium
 		proresProfile := "2" // Default Standard (422)
 
 		switch options.Quality {
@@ -1690,7 +1670,7 @@ func (a *App) ExportVideo(projectId string, sceneId string, options ExportOption
 		}
 	}
 
-// --- PASS 3: RENDER AUDIO ---
+	// --- PASS 3: RENDER AUDIO ---
 	if options.IncludeAudio {
 		runtime.EventsEmit(a.ctx, "export:status", "Rendering Audio...")
 
@@ -1746,15 +1726,27 @@ func (a *App) ExportVideo(projectId string, sceneId string, options ExportOption
 				var track []Item
 				for _, rawItem := range rawTrack {
 					item := Item{}
-					if v, ok := rawItem["startTime"].(float64); ok { item.StartTime = v }
-					if v, ok := rawItem["duration"].(float64); ok { item.Duration = v }
-					if v, ok := rawItem["trimStart"].(float64); ok { item.TrimStart = v }
-					if v, ok := rawItem["outputVideo"].(string); ok { item.OutputVideo = v }
-					if v, ok := rawItem["audioPath"].(string); ok { item.AudioPath = v }
-					if v, ok := rawItem["pairId"].(string); ok { item.PairID = v }
+					if v, ok := rawItem["startTime"].(float64); ok {
+						item.StartTime = v
+					}
+					if v, ok := rawItem["duration"].(float64); ok {
+						item.Duration = v
+					}
+					if v, ok := rawItem["trimStart"].(float64); ok {
+						item.TrimStart = v
+					}
+					if v, ok := rawItem["outputVideo"].(string); ok {
+						item.OutputVideo = v
+					}
+					if v, ok := rawItem["audioPath"].(string); ok {
+						item.AudioPath = v
+					}
+					if v, ok := rawItem["pairId"].(string); ok {
+						item.PairID = v
+					}
 					// Volume default
 					item.Duration = item.Duration // hack to keep type
-					
+
 					// Add to our list
 					track = append(track, item)
 
@@ -1813,8 +1805,10 @@ func (a *App) ExportVideo(projectId string, sceneId string, options ExportOption
 				// Calculate trim
 				offset := start - activeItem.StartTime + activeItem.TrimStart
 				src := activeItem.OutputVideo
-				if src == "" { src = activeItem.AudioPath }
-				
+				if src == "" {
+					src = activeItem.AudioPath
+				}
+
 				if src != "" {
 					audioOps = append(audioOps, AudioOp{
 						Source:    src,
@@ -1849,7 +1843,7 @@ func (a *App) ExportVideo(projectId string, sceneId string, options ExportOption
 				delayMs := int(op.Start * 1000)
 				// Use exact duration logic for cleaner cuts
 				end := op.TrimStart + op.Duration
-				
+
 				// Apply Trim -> Reset Timestamp -> Delay -> Volume
 				filterComplex.WriteString(fmt.Sprintf("[%d:a]atrim=start=%f:end=%f,asetpts=PTS-STARTPTS,adelay=%d|%d,volume=%f[a%d];",
 					inputIdx, op.TrimStart, end, delayMs, delayMs, op.Volume, i))
@@ -1878,7 +1872,7 @@ func (a *App) ExportVideo(projectId string, sceneId string, options ExportOption
 			}
 		}
 	}
-	
+
 	// --- MUX / FINALIZE ---
 	runtime.EventsEmit(a.ctx, "export:status", "Finalizing...")
 
@@ -1945,13 +1939,13 @@ func (a *App) ExportVideo(projectId string, sceneId string, options ExportOption
 
 func (a *App) runFFmpegWithProgress(args []string, label string) error {
 	cmd := exec.Command("ffmpeg", args...)
-	
+
 	// Capture stderr for progress
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		return err
 	}
-	
+
 	if err := cmd.Start(); err != nil {
 		return err
 	}
@@ -1962,7 +1956,7 @@ func (a *App) runFFmpegWithProgress(args []string, label string) error {
 	// but for now, let's just pulse or show activity, or try to parse time.
 	// Since we don't easily know total duration inside this helper without passing it,
 	// we will just emit the raw time string or a "working" event.
-	
+
 	go func() {
 		scanner := bufio.NewScanner(stderr)
 		scanner.Split(bufio.ScanLines)
@@ -1984,178 +1978,34 @@ func (a *App) runFFmpegWithProgress(args []string, label string) error {
 }
 
 // =========================================================================
-//  ↓↓↓ VIDEO ENGINE (STREAMING SERVER) ↓↓↓
+//  ↓↓↓ STATIC MEDIA SERVER ↓↓↓
 // =========================================================================
 
-var server *StreamServer
-
-type StreamServer struct {
-	cmd        *exec.Cmd
-	running    bool
-	mu         sync.Mutex
-	currentDir string
-}
-
-func NewStreamServer() *StreamServer {
-	dir := filepath.Join(os.TempDir(), "motion_studio_stream")
-	os.MkdirAll(dir, 0755)
-	return &StreamServer{
-		currentDir: dir,
-	}
-}
-
-// GeneratePlaylist creates the ffmpeg "concat" text file
-func (s *StreamServer) GeneratePlaylist(clips []string) (string, error) {
-	var content strings.Builder
-	for _, clip := range clips {
-		// Normalize slashes for FFmpeg (Windows backslash fix)
-		normalized := filepath.ToSlash(clip)
-		// Escape single quotes for FFmpeg
-		safePath := strings.ReplaceAll(normalized, "'", "'\\''")
-		content.WriteString(fmt.Sprintf("file '%s'\n", safePath))
-	}
-
-	playlistPath := filepath.Join(s.currentDir, "playlist.txt")
-	err := os.WriteFile(playlistPath, []byte(content.String()), 0644)
-	return playlistPath, err
-}
-
-func (s *StreamServer) RenderPreviewMP4() (string, error) {
-	playlistPath := filepath.Join(s.currentDir, "playlist.txt")
-	if _, err := os.Stat(playlistPath); os.IsNotExist(err) {
-		return "", fmt.Errorf("playlist not found")
-	}
-
-	outPath := filepath.Join(s.currentDir, "preview.mp4")
-
-	// Fast concat (no re-encode). Requires matching codecs/params across clips.
-	cmd := exec.Command("ffmpeg",
-		"-y",
-		"-f", "concat",
-		"-safe", "0",
-		"-i", playlistPath,
-		"-c", "copy",
-		"-movflags", "+faststart",
-		outPath,
-	)
-
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return "", err
-	}
-	return outPath, nil
-}
-
-func (s *StreamServer) StartStreamHandler(w http.ResponseWriter, r *http.Request) {
-	// MJPEG Headers
-	w.Header().Set("Content-Type", "multipart/x-mixed-replace; boundary=ffmpeg")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-
-	s.mu.Lock()
-	// Clean up previous process
-	if s.cmd != nil && s.cmd.Process != nil {
-		s.cmd.Process.Kill()
-	}
-
-	playlistPath := filepath.Join(s.currentDir, "playlist.txt")
-	if _, err := os.Stat(playlistPath); os.IsNotExist(err) {
-		s.mu.Unlock()
-		return
-	}
-
-	// Run FFmpeg to output MJPEG stream to stdout
-	cmd := exec.Command("ffmpeg",
-		"-re",
-		"-f", "concat",
-		"-safe", "0",
-		"-i", playlistPath,
-		"-f", "mpjpeg", // Output format
-		"-q:v", "2", // Quality (2-31)
-		"-r", "24", // Frame rate
-		"-", // Output to stdout
-	)
-
-	// Pipe FFmpeg stderr to console for debugging
-	cmd.Stderr = os.Stderr
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		log.Println("Error creating stdout pipe:", err)
-		s.mu.Unlock()
-		return
-	}
-
-	if err := cmd.Start(); err != nil {
-		log.Println("Error starting ffmpeg:", err)
-		s.mu.Unlock()
-		return
-	}
-	s.cmd = cmd
-	s.running = true
-	s.mu.Unlock()
-
-	// Pipe stdout to HTTP response
-	buffer := make([]byte, 32*1024)
-	for {
-		n, err := stdout.Read(buffer)
-		if err != nil {
-			break
-		}
-		if n > 0 {
-			w.Write(buffer[:n])
-			if f, ok := w.(http.Flusher); ok {
-				f.Flush()
-			}
-		}
-	}
-}
-
-func StartStreamServer() {
-	server = NewStreamServer()
+func StartMediaServer() {
 	mux := http.NewServeMux()
 
-	// mux.HandleFunc("/stream", server.StartStreamHandler)
-
-	mux.HandleFunc("/preview.mp4", func(w http.ResponseWriter, r *http.Request) {
-		path := filepath.Join(server.currentDir, "preview.mp4")
-		if _, err := os.Stat(path); err != nil {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "video/mp4")
-		http.ServeFile(w, r, path)
-	})
-
 	// -------------------------------------------------------------
-	// FIX: UNIVERSAL PATH DECODER
+	// UNIVERSAL PATH DECODER (Serves local files to Web UI)
 	// -------------------------------------------------------------
 	mux.HandleFunc("/video/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Cache-Control", "public, max-age=3600")
 
-		// 1. Get raw encoded path (e.g. "C:/Users/Mark%20Barela/video.mp4")
 		urlPath := r.URL.Path
 		encodedPath := strings.TrimPrefix(urlPath, "/video/")
 
-		// 2. Decode special characters dynamically
-		// This turns "%20" into " " automatically, regardless of the username.
 		path, err := url.PathUnescape(encodedPath)
 		if err != nil {
 			http.Error(w, "Invalid path encoding", http.StatusBadRequest)
 			return
 		}
 
-		// 3. DEBUG: Check if file actually exists on disk
 		if _, err := os.Stat(path); os.IsNotExist(err) {
 			fmt.Printf("❌ 404 NOT FOUND: %s\n", path)
 			http.NotFound(w, r)
 			return
-		} else {
-			// fmt.Printf("✅ Serving: %s\n", path) // Optional: Uncomment to see successes
 		}
 
-		// 4. Set Content-Type Explicitly
 		ext := strings.ToLower(filepath.Ext(path))
 		switch ext {
 		case ".mp3":
@@ -2178,11 +2028,10 @@ func StartStreamServer() {
 	})
 
 	// -------------------------------------------------------------
-	// NEW: ROBUST QUERY-BASED FILE SERVER (Optimized for Video)
+	// QUERY-BASED FILE SERVER (Optimized for Video)
 	// -------------------------------------------------------------
 	mux.HandleFunc("/api/media", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		// Allow caching to support seeking and range requests better
 		w.Header().Set("Cache-Control", "public, max-age=3600")
 
 		filePath := r.URL.Query().Get("file")
@@ -2191,7 +2040,6 @@ func StartStreamServer() {
 			return
 		}
 
-		// Set Content-Type Explicitly
 		ext := strings.ToLower(filepath.Ext(filePath))
 		switch ext {
 		case ".mp3":
@@ -2213,15 +2061,15 @@ func StartStreamServer() {
 		http.ServeFile(w, r, filePath)
 	})
 
-	fmt.Println("🎥 File Server listening on http://localhost:3456")
+	fmt.Println("🎥 Lightweight Media Server listening on http://localhost:3456")
 	http.ListenAndServe(":3456", mux)
 }
 
 // RenderRemoteShot sends a prompt and image to the Cloud (Modal) and saves the result
-func (a *App) RenderRemoteShot(projectId string, sceneId string, shotId string, prompt string, imagePath string, modalUrl string) (Shot, error) {
+func (a *App) RenderRemoteShot(projectId string, sceneId string, shotId string, prompt string, imagePath string, modalUrl string, audioPath string, audioStart float64, audioDuration float64) (Shot, error) {
 	// 1. Get the current shots for this scene
-	shots := a.GetShots(projectId, sceneId) 
-	
+	shots := a.GetShots(projectId, sceneId)
+
 	var shotIndex int = -1
 
 	// Find the specific shot we are working on
@@ -2236,6 +2084,41 @@ func (a *App) RenderRemoteShot(projectId string, sceneId string, shotId string, 
 		return Shot{}, fmt.Errorf("could not find shot with ID: %s", shotId)
 	}
 
+	// ---------------------------------------------------------
+	// 1.5 HANDLE AUDIO TRIMMING FOR REMOTE RENDER
+	// ---------------------------------------------------------
+	localAudioPath := audioPath
+
+	fmt.Printf("DEBUG: RenderRemoteShot Audio - Path: %s, Start: %f, Dur: %f\n", audioPath, audioStart, audioDuration)
+
+	if audioPath != "" && audioDuration > 0 {
+		// FIX: Force .wav extension
+		safeID := regexp.MustCompile(`[^a-zA-Z0-9]`).ReplaceAllString(shotId, "")
+		tempName := fmt.Sprintf("trim_%s_%d.wav", safeID, time.Now().Unix())
+		tempPath := filepath.Join(os.TempDir(), tempName)
+
+		fmt.Printf("DEBUG: Trimming remote audio %s (%.2f-%.2f) -> %s\n", audioPath, audioStart, audioStart+audioDuration, tempPath)
+
+		// FIX: Use pcm_s16le codec for standard WAV output
+		cmd := exec.Command("ffmpeg",
+			"-y",
+			"-i", audioPath,
+			"-ss", fmt.Sprintf("%.4f", audioStart),
+			"-t", fmt.Sprintf("%.4f", audioDuration),
+			"-c:a", "pcm_s16le",
+			tempPath,
+		)
+
+		output, err := cmd.CombinedOutput()
+		if err == nil {
+			fmt.Println("Remote audio trimmed successfully:", tempPath)
+			localAudioPath = tempPath
+			defer os.Remove(tempPath) // Cleanup temp file after upload
+		} else {
+			fmt.Printf("Warning: Remote audio trim failed: %v\nOutput: %s\n", err, string(output))
+		}
+	}
+
 	// 2. Prepare the upload form
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
@@ -2245,10 +2128,28 @@ func (a *App) RenderRemoteShot(projectId string, sceneId string, shotId string, 
 	if err != nil {
 		return Shot{}, fmt.Errorf("could not open image: %w", err)
 	}
-	
+
 	part, _ := writer.CreateFormFile("image", filepath.Base(imagePath))
 	io.Copy(part, file)
 	file.Close()
+
+	// Upload trimmed audio if present
+	if localAudioPath != "" {
+		audioFile, err := os.Open(localAudioPath)
+		if err == nil {
+			audioPart, _ := writer.CreateFormFile("audio", filepath.Base(localAudioPath))
+			io.Copy(audioPart, audioFile)
+			audioFile.Close()
+
+			// Send trim metadata so the cloud can use it if needed
+			_ = writer.WriteField("audio_start", fmt.Sprintf("%.4f", audioStart))
+			_ = writer.WriteField("audio_duration", fmt.Sprintf("%.4f", audioDuration))
+			fmt.Printf("DEBUG: Uploaded audio to cloud: %s\n", localAudioPath)
+		} else {
+			fmt.Printf("Warning: Could not open audio for upload: %v\n", err)
+		}
+	}
+
 	writer.Close()
 
 	// 3. Send to Modal
@@ -2270,26 +2171,26 @@ func (a *App) RenderRemoteShot(projectId string, sceneId string, shotId string, 
 	}
 
 	// 4. SAVE THE VIDEO FILE TO THE CORRECT SCENE FOLDER
-    filename := fmt.Sprintf("%s.mp4", shotId) 
-    
-    // Path: Documents/MotionStudio/[ProjectID]/scenes/[SceneID]/[ShotID].mp4
-    outputDir := filepath.Join(a.getAppDir(), projectId, "scenes", sceneId) 
-    outputPath := filepath.Join(outputDir, filename)
+	filename := fmt.Sprintf("%s.mp4", shotId)
 
-    // Ensure the scene folder exists
-    os.MkdirAll(outputDir, 0755)
+	// Path: Documents/MotionStudio/[ProjectID]/scenes/[SceneID]/[ShotID].mp4
+	outputDir := filepath.Join(a.getAppDir(), projectId, "scenes", sceneId)
+	outputPath := filepath.Join(outputDir, filename)
 
-    outFile, err := os.Create(outputPath)
-    if err != nil {
-        return Shot{}, fmt.Errorf("failed to create file: %w", err)
-    }
-    defer outFile.Close()
-    
-    // This streams the video data from the cloud response into your local file
-    _, err = io.Copy(outFile, resp.Body)
-    if err != nil {
-        return Shot{}, fmt.Errorf("failed to save video data: %w", err)
-    }
+	// Ensure the scene folder exists
+	os.MkdirAll(outputDir, 0755)
+
+	outFile, err := os.Create(outputPath)
+	if err != nil {
+		return Shot{}, fmt.Errorf("failed to create file: %w", err)
+	}
+	defer outFile.Close()
+
+	// This streams the video data from the cloud response into your local file
+	_, err = io.Copy(outFile, resp.Body)
+	if err != nil {
+		return Shot{}, fmt.Errorf("failed to save video data: %w", err)
+	}
 
 	// CRITICAL FIX: Transcode to ensure browser compatibility
 	if err := a.sanitizeVideo(outputPath); err != nil {
@@ -2297,11 +2198,11 @@ func (a *App) RenderRemoteShot(projectId string, sceneId string, shotId string, 
 	}
 
 	// 5. Update only the fields we need to change
-	// This preserves your Name, Prompt, and Seed exactly as they were 
+	// This preserves your Name, Prompt, and Seed exactly as they were
 	shots[shotIndex].OutputVideo = outputPath
 	shots[shotIndex].Status = "done"
 
-	// 6. Save to your JSON database so it's permanent 
+	// 6. Save to your JSON database so it's permanent
 	a.SaveShots(projectId, sceneId, shots)
 
 	return shots[shotIndex], nil
@@ -2318,7 +2219,7 @@ func (a *App) RenderTimeline(manifestJson string) (string, error) {
 
 	// Go up one level to find the sibling folder
 	engineDir := filepath.Join(wd, "..", "motion-engine")
-	
+
 	// Define the files
 	// Use unique manifest name to prevent collisions
 	manifestName := fmt.Sprintf("render-manifest-%d.json", time.Now().UnixNano())
@@ -2375,22 +2276,22 @@ func (a *App) RenderTimeline(manifestJson string) (string, error) {
 // This is used to synchronize the Remotion engine with the actual clip speed.
 func (a *App) GetVideoFPS(filePath string) (float64, error) {
 	// We run ffprobe to get the average frame rate of the first video stream
-	cmd := exec.Command("ffprobe", 
-		"-v", "error", 
-		"-select_streams", "v:0", 
-		"-show_entries", "stream=avg_frame_rate", 
-		"-of", "default=noprint_wrappers=1:nokey=1", 
+	cmd := exec.Command("ffprobe",
+		"-v", "error",
+		"-select_streams", "v:0",
+		"-show_entries", "stream=avg_frame_rate",
+		"-of", "default=noprint_wrappers=1:nokey=1",
 		filePath)
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		// If ffprobe fails, we log it and return a default 30fps to avoid crashing
 		fmt.Printf("🔍 [FPS Probe] Error on %s: %v\n", filePath, err)
-		return 30.0, nil 
+		return 30.0, nil
 	}
 
 	raw := strings.TrimSpace(string(output))
-	
+
 	// FFmpeg often returns fractions like "24000/1001" (which is 23.976)
 	if strings.Contains(raw, "/") {
 		parts := strings.Split(raw, "/")

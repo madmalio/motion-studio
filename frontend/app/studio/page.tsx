@@ -11,7 +11,6 @@ import {
 } from "react";
 import { useConfirm } from "../../components/ConfirmProvider";
 import { Loader2, PanelLeft, PanelTop, Download, X } from "lucide-react";
-// --- DND KIT ---
 import {
   DndContext,
   DragOverlay,
@@ -26,7 +25,6 @@ import {
   defaultDropAnimationSideEffects,
 } from "@dnd-kit/core";
 import { sortableKeyboardCoordinates } from "@dnd-kit/sortable";
-import { useGaplessPlayback } from "../../hooks/useGaplessPlayback";
 
 const round = (n: number) => Math.round(n * 10000) / 10000;
 
@@ -61,7 +59,6 @@ declare global {
       main: {
         App: {
           GetVideoFPS: (path: string) => Promise<number>;
-          // We add these two lines so TypeScript knows they exist:
           RenderTimelinePreview: (
             projectId: string,
             sceneId: string,
@@ -109,71 +106,6 @@ interface Scene {
   id: string;
   name: string;
 }
-
-interface TimelineItem extends Shot {
-  timelineId: string;
-  pairId?: string;
-  trackIndex?: number;
-  startTime: number;
-  maxDuration?: number;
-  trimStart?: number;
-  volume?: number;
-  muted?: boolean;
-}
-
-// --- HELPERS ---
-const findContainer = (id: string, tracks: TimelineItem[][]) => {
-  if (id.toString().startsWith("timeline-track-")) return id;
-  for (let i = 0; i < tracks.length; i++) {
-    const item = tracks[i].find((s) => s.timelineId === id);
-    if (item) return `timeline-track-${i}`;
-  }
-  return undefined;
-};
-
-const isTimelineDropTarget = (overId: string, tracks: TimelineItem[][]) => {
-  if (overId.startsWith("track-")) return true;
-  return tracks.some((t) => t.some((item) => item.timelineId === overId));
-};
-
-const applyOverwrite = (trackItems: TimelineItem[], newItem: TimelineItem) => {
-  const result: TimelineItem[] = [];
-  const start = newItem.startTime;
-  const end = newItem.startTime + (newItem.duration || 0);
-  for (const item of trackItems) {
-    if (item.timelineId === newItem.timelineId) continue;
-    const itemStart = item.startTime;
-    const itemEnd = round(item.startTime + (item.duration || 0));
-    if (start < itemEnd && end > itemStart) {
-      if (start <= itemStart && end >= itemEnd) {
-        continue;
-      } else if (start > itemStart && end < itemEnd) {
-        result.push({ ...item, duration: round(start - itemStart) });
-        result.push({
-          ...item,
-          timelineId: crypto.randomUUID(),
-          startTime: end,
-          duration: round(itemEnd - end),
-          trimStart: round((item.trimStart || 0) + (end - itemStart)),
-        });
-      } else if (start > itemStart && start < itemEnd) {
-        result.push({ ...item, duration: round(start - itemStart) });
-      } else if (end > itemStart && end < itemEnd) {
-        const cut = end - itemStart;
-        result.push({
-          ...item,
-          startTime: end,
-          duration: round((item.duration || 0) - cut),
-          trimStart: round((item.trimStart || 0) + cut),
-        });
-      }
-    } else {
-      result.push(item);
-    }
-  }
-  result.push(newItem);
-  return result;
-};
 
 function WailsGuard({ children }: { children: React.ReactNode }) {
   const [isReady, setIsReady] = useState(false);
@@ -233,7 +165,6 @@ const formatTime = (seconds: number) => {
 };
 
 const estimateFileSize = (duration: number, format: string) => {
-  // Rough estimates: MP4 (15MB/min), ProRes (200MB/min), Audio (2MB/min)
   let mbPerMin = 15;
   if (format === "mov") mbPerMin = 200;
   if (format === "mp3" || format === "wav") mbPerMin = 2;
@@ -256,15 +187,16 @@ function StudioContent() {
   const [scene, setScene] = useState<Scene | null>(null);
   const [shots, setShots] = useState<Shot[]>([]);
   const [activeShotId, setActiveShotId] = useState<string | null>(null);
+
+  // PREVIEW STATE
   const [previewingShotId, setPreviewingShotId] = useState<string | null>(null);
+
   const [isRendering, setIsRendering] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [showExportModal, setShowExportModal] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
   const [exportStatus, setExportStatus] = useState("");
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null); // <--- NEW STATE
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const [exportOptions, setExportOptions] = useState({
     format: "mp4",
     includeVideo: true,
@@ -272,36 +204,22 @@ function StudioContent() {
     quality: "medium",
   });
 
-  const [currentTime, setCurrentTime] = useState(0);
+  // --- INDEPENDENT TIME STATES ---
+  const [currentTime, setCurrentTime] = useState(0);     // Global Timeline
+  const [previewTime, setPreviewTime] = useState(0);     // Isolated Library Preview
   const [isPlaying, setIsPlaying] = useState(false);
   const [projectFps, setProjectFps] = useState(30);
 
-  // --- REAL TIMELINE STATE (CLEAN) ---
+  // --- REAL TIMELINE STATE ---
   const [tracks, setTracks] = useState<TimelineTrack[]>([
-    {
-      id: "t1",
-      name: "Video 1",
-      type: "video",
-      clips: [], // <--- EMPTY!
-      isMuted: false,
-      isHidden: false,
-      isLocked: false,
-    },
-    {
-      id: "t2",
-      name: "Audio 1",
-      type: "audio",
-      clips: [], // <--- EMPTY!
-      isMuted: false,
-      isHidden: false,
-      isLocked: false,
-    },
+    { id: "t1", name: "Video 1", type: "video", clips: [], isMuted: false, isHidden: false, isLocked: false },
+    { id: "t2", name: "Audio 1", type: "audio", clips: [], isMuted: false, isHidden: false, isLocked: false },
   ]);
 
   const [activeDragItem, setActiveDragItem] = useState<any>(null);
-  const [zoom, setZoom] = useState(11); // px/second
+  const [zoom, setZoom] = useState(11);
   const [masterVolume, setMasterVolume] = useState(1);
-  const [selectedClipId, setSelectedClipId] = useState<string | null>(null); // <--- NEW STATE
+  const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
 
   const handleVolumeChange = useCallback((val: number) => {
     setMasterVolume(val);
@@ -320,21 +238,15 @@ function StudioContent() {
   const generatorWidthRef = useRef(generatorWidth);
   const libraryRef = useRef<HTMLDivElement>(null);
 
-  // --- PERSIST LAYOUT ---
   useEffect(() => {
     const saved = localStorage.getItem("motion-studio-layout-full");
-    if (saved !== null) {
-      setIsGeneratorFullHeight(saved === "true");
-    }
+    if (saved !== null) setIsGeneratorFullHeight(saved === "true");
     setIsLayoutLoaded(true);
   }, []);
 
   useEffect(() => {
     if (!isLayoutLoaded) return;
-    localStorage.setItem(
-      "motion-studio-layout-full",
-      String(isGeneratorFullHeight),
-    );
+    localStorage.setItem("motion-studio-layout-full", String(isGeneratorFullHeight));
   }, [isGeneratorFullHeight, isLayoutLoaded]);
 
   useEffect(() => {
@@ -344,35 +256,24 @@ function StudioContent() {
   useEffect(() => {
     const handlePointerMove = (e: PointerEvent) => {
       if (isResizingGen.current) {
-        const newW = Math.max(200, Math.min(600, e.clientX));
-        setGeneratorWidth(newW);
+        setGeneratorWidth(Math.max(200, Math.min(600, e.clientX)));
         document.body.style.cursor = "col-resize";
       }
       if (isResizingLib.current) {
-        const newW = Math.max(
-          200,
-          Math.min(800, e.clientX - generatorWidthRef.current),
-        );
-        setLibraryWidth(newW);
+        setLibraryWidth(Math.max(200, Math.min(800, e.clientX - generatorWidthRef.current)));
         document.body.style.cursor = "col-resize";
       }
       if (isResizingTime.current) {
-        const newH = Math.max(
-          150,
-          Math.min(800, window.innerHeight - e.clientY),
-        );
-        setTimelineHeight(newH);
+        setTimelineHeight(Math.max(150, Math.min(800, window.innerHeight - e.clientY)));
         document.body.style.cursor = "row-resize";
       }
     };
-
     const handlePointerUp = () => {
       isResizingGen.current = false;
       isResizingLib.current = false;
       isResizingTime.current = false;
       document.body.style.cursor = "default";
     };
-
     window.addEventListener("pointermove", handlePointerMove);
     window.addEventListener("pointerup", handlePointerUp);
     return () => {
@@ -384,35 +285,21 @@ function StudioContent() {
   const [videoBlobs, setVideoBlobs] = useState<Map<string, string>>(new Map());
   const initialized = useRef(false);
   const videoCache = useRef<Map<string, string>>(new Map());
-  const isCtrlPressed = useRef(false);
 
-  // --- UNDO / REDO (Fixed) ---
+  // --- UNDO / REDO ---
   const [history, setHistory] = useState<any[]>([]);
   const [redoStack, setRedoStack] = useState<any[]>([]);
 
   const recordHistory = () => {
-    setHistory((prev) => [
-      ...prev,
-      {
-        tracks: JSON.parse(JSON.stringify(tracks)),
-        shots: JSON.parse(JSON.stringify(shots)),
-      },
-    ]);
+    setHistory((prev) => [...prev, { tracks: JSON.parse(JSON.stringify(tracks)), shots: JSON.parse(JSON.stringify(shots)) }]);
     setRedoStack([]);
   };
 
   const undo = () => {
     if (history.length === 0) return;
     const previous = history[history.length - 1];
-    const newHistory = history.slice(0, -1);
-    setRedoStack((prev) => [
-      ...prev,
-      {
-        tracks: JSON.parse(JSON.stringify(tracks)),
-        shots: JSON.parse(JSON.stringify(shots)),
-      },
-    ]);
-    setHistory(newHistory);
+    setRedoStack((prev) => [...prev, { tracks: JSON.parse(JSON.stringify(tracks)), shots: JSON.parse(JSON.stringify(shots)) }]);
+    setHistory(history.slice(0, -1));
     setTracks(previous.tracks);
     setShots(previous.shots);
   };
@@ -420,81 +307,118 @@ function StudioContent() {
   const redo = () => {
     if (redoStack.length === 0) return;
     const next = redoStack[redoStack.length - 1];
-    const newRedo = redoStack.slice(0, -1);
-    setHistory((prev) => [
-      ...prev,
-      {
-        tracks: JSON.parse(JSON.stringify(tracks)),
-        shots: JSON.parse(JSON.stringify(shots)),
-      },
-    ]);
-    setRedoStack(newRedo);
+    setHistory((prev) => [...prev, { tracks: JSON.parse(JSON.stringify(tracks)), shots: JSON.parse(JSON.stringify(shots)) }]);
+    setRedoStack(redoStack.slice(0, -1));
     setTracks(next.tracks);
     setShots(next.shots);
   };
 
-  const totalDuration = Math.max(
-    0,
-    ...tracks.map((t) =>
-      // Fix 1: Access 't.clips' before reducing
-      // Fix 2: Use 's.start' instead of 's.startTime'
-      t.clips.reduce((acc, s) => Math.max(acc, s.start + (s.duration || 4)), 0),
-    ),
-  );
+  // --- PLAYBACK ROUTING ---
+  const totalDuration = Math.max(0, ...tracks.map((t) => t.clips.reduce((acc, s) => Math.max(acc, s.start + (s.duration || 4)), 0)));
 
+  // Derived Preview State (Tricks ViewerPanel into playing only the requested shot)
+  const previewShotObj = useMemo(() => shots.find(s => s.id === previewingShotId), [shots, previewingShotId]);
+
+  const displayTracks = useMemo(() => {
+    if (previewShotObj) {
+      return [
+        {
+          id: "preview-track",
+          name: "Preview",
+          type: "video" as const,
+          clips: [
+            {
+              id: previewShotObj.id,
+              type: previewShotObj.outputVideo ? "video" : (previewShotObj.audioPath ? "audio" : "video") as "video" | "audio",
+              name: previewShotObj.name,
+              src: previewShotObj.outputVideo || previewShotObj.audioPath || previewShotObj.sourceImage || "",
+              start: 0,
+              duration: previewShotObj.duration || 4,
+              offset: 0,
+              color: "bg-blue-600",
+              thumbnail: previewShotObj.previewBase64,
+            }
+          ],
+          isMuted: false,
+          isHidden: false,
+          isLocked: false
+        }
+      ];
+    }
+    return tracks;
+  }, [tracks, previewShotObj]);
+
+  const displayDuration = previewShotObj ? (previewShotObj.duration || 4) : totalDuration;
+
+  // Decide which time state the player should use
+  const activeTime = previewingShotId ? previewTime : currentTime;
+  const setActiveTime = previewingShotId ? setPreviewTime : setCurrentTime;
+
+  // Updated Toggles
   const togglePlay = useCallback(() => {
     setIsPlaying((prev) => {
-      // If we are at the very end of the video and hit play, jump back to start
-      if (!prev && currentTime >= totalDuration) {
-        setCurrentTime(0);
+      if (!prev) {
+        if (previewingShotId && previewTime >= displayDuration) setPreviewTime(0);
+        else if (!previewingShotId && currentTime >= totalDuration) setCurrentTime(0);
       }
       return !prev;
     });
-  }, [currentTime, totalDuration]);
+  }, [currentTime, totalDuration, previewingShotId, displayDuration, previewTime]);
 
-  const seekTo = useCallback((time: number) => {
+  // Break out of Preview mode if the user clicks the global timeline
+  const handleTimelineTimeChange = useCallback((time: number) => {
+    if (previewingShotId) {
+      setPreviewingShotId(null);
+      setIsPlaying(false);
+    }
     setCurrentTime(time);
-  }, []);
+  }, [previewingShotId]);
+
+  const handlePlayShot = useCallback(
+    async (shot: Shot) => {
+      // Toggle off
+      if (previewingShotId === shot.id) {
+        setPreviewingShotId(null);
+        setIsPlaying(false);
+        setPreviewTime(0);
+        return;
+      }
+      // Toggle on
+      setPreviewingShotId(shot.id);
+      setPreviewTime(0); // Instantly seek to 0:00 for the preview
+      setIsPlaying(true);
+    },
+    [previewingShotId],
+  );
 
   // --- AUTO-SAVE ---
   useEffect(() => {
     if (projectId && sceneId && initialized.current && shots.length > 0) {
-      const cleanShots = shots.map(({ previewBase64, ...keep }) => keep);
-      SaveShots(projectId, sceneId, cleanShots as any);
+      const timer = setTimeout(() => {
+        const cleanShots = shots.map(({ previewBase64, ...keep }) => keep);
+        SaveShots(projectId, sceneId, cleanShots as any);
+      }, 500);
+      return () => clearTimeout(timer);
     }
   }, [shots, projectId, sceneId]);
 
-  // --- AUTO-SAVE TIMELINE (FIXED COMPATIBILITY) ---
   useEffect(() => {
     if (projectId && sceneId && initialized.current) {
-      // 1. Convert New Tracks (Objects) -> Old Tracks (Array of Arrays)
-      // The backend expects [[clip, clip], [clip, clip]]
-      const legacyTracks = tracks.map((t) =>
-        t.clips.map((c) => ({
-          ...c,
-          // Map new fields back to old fields if necessary
-          timelineId: c.id,
-          startTime: c.start,
-          trimStart: c.offset,
-          // Ensure audio/video paths are set for the backend to recognize type
-          outputVideo: t.type === "video" ? c.src : undefined,
-          audioPath: t.type === "audio" ? c.src : undefined,
-        })),
-      );
-
-      // 2. Extract Track Settings (So names/mute status persist)
-      const legacySettings = tracks.map((t) => ({
-        name: t.name,
-        type: t.type,
-        visible: !t.isHidden,
-        locked: t.isLocked,
-        // You can add height/volume here if the backend supports it
-      }));
-
-      SaveTimeline(projectId, sceneId, {
-        tracks: legacyTracks, // <--- Sending Array of Arrays
-        trackSettings: legacySettings, // <--- Sending Settings separately
-      } as any);
+      const timer = setTimeout(() => {
+        const legacyTracks = tracks.map((t) =>
+          t.clips.map((c) => ({
+            ...c,
+            timelineId: c.id,
+            startTime: c.start,
+            trimStart: c.offset,
+            outputVideo: t.type === "video" ? c.src : undefined,
+            audioPath: t.type === "audio" ? c.src : undefined,
+          })),
+        );
+        const legacySettings = tracks.map((t) => ({ name: t.name, type: t.type, visible: !t.isHidden, locked: t.isLocked }));
+        SaveTimeline(projectId, sceneId, { tracks: legacyTracks, trackSettings: legacySettings } as any);
+      }, 500);
+      return () => clearTimeout(timer);
     }
   }, [tracks, projectId, sceneId]);
 
@@ -505,52 +429,33 @@ function StudioContent() {
         if (videoCache.current.has(shot.id)) {
           const b64 = videoCache.current.get(shot.id);
           if (b64) {
-            try {
-              const byteCharacters = atob(b64);
-              const byteNumbers = new Array(byteCharacters.length);
-              for (let i = 0; i < byteCharacters.length; i++) {
-                byteNumbers[i] = byteCharacters.charCodeAt(i);
-              }
-              const byteArray = new Uint8Array(byteNumbers);
-              const blob = new Blob([byteArray], { type: "video/mp4" });
-              const url = URL.createObjectURL(blob);
-              setVideoBlobs((prev) => new Map(prev).set(shot.outputVideo, url));
-            } catch (e) { }
+            fetch(b64)
+              .then(res => res.blob())
+              .then(blob => {
+                const url = URL.createObjectURL(blob);
+                setVideoBlobs((prev) => new Map(prev).set(shot.outputVideo, url));
+              })
+              .catch(err => console.error("Blob decode error", err));
           }
         }
       }
     });
-  }, [shots]);
+  }, [shots, videoBlobs]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Control") isCtrlPressed.current = true;
-      if (
-        e.target instanceof HTMLInputElement ||
-        e.target instanceof HTMLTextAreaElement
-      )
-        return;
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
 
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
         e.preventDefault();
-        if (e.shiftKey) {
-          redo();
-        } else {
-          undo();
-        }
+        e.shiftKey ? redo() : undo();
       }
 
-      // --- CLIP DELETION ---
       if (e.key === "Delete" || e.key === "Backspace") {
         if (selectedClipId) {
           e.preventDefault();
           recordHistory();
-          setTracks((prev) =>
-            prev.map((t) => ({
-              ...t,
-              clips: t.clips.filter((c) => c.id !== selectedClipId),
-            })),
-          );
+          setTracks((prev) => prev.map((t) => ({ ...t, clips: t.clips.filter((c) => c.id !== selectedClipId) })));
           setSelectedClipId(null);
         }
       }
@@ -561,52 +466,26 @@ function StudioContent() {
         togglePlay();
       }
     };
-    const handleKeyUp = (e: KeyboardEvent) => {
-      if (e.key === "Control") isCtrlPressed.current = false;
-    };
     window.addEventListener("keydown", handleKeyDown);
-    window.addEventListener("keyup", handleKeyUp);
-    return () => {
-      window.removeEventListener("keydown", handleKeyDown);
-      window.removeEventListener("keyup", handleKeyUp);
-    };
-  }, [history, redoStack, tracks, shots, togglePlay, selectedClipId]); // Added selectedClipId dependency
+    return () => { window.removeEventListener("keydown", handleKeyDown); };
+  }, [history, redoStack, tracks, shots, togglePlay, selectedClipId]);
 
-  // --- HANDLE DELETE CLIP (From UI) ---
   const handleDeleteClip = useCallback(
     (clipId: string) => {
       recordHistory();
-      setTracks((prev) =>
-        prev.map((t) => ({
-          ...t,
-          clips: t.clips.filter((c) => c.id !== clipId),
-        })),
-      );
-      if (selectedClipId === clipId) {
-        setSelectedClipId(null);
-      }
+      setTracks((prev) => prev.map((t) => ({ ...t, clips: t.clips.filter((c) => c.id !== clipId) })));
+      if (selectedClipId === clipId) setSelectedClipId(null);
     },
     [selectedClipId],
   );
 
-  // --- HELPER: GENERATE WAVEFORM ---
   const generateWaveform = async (shotId: string, filePath: string) => {
     if (!filePath) return;
     const peaks = await ExtractAudioPeaks(filePath, 20);
     if (peaks && peaks.length > 0) {
-      // 1. Update the Shot Library
-      setShots((prev) =>
-        prev.map((s) => (s.id === shotId ? { ...s, waveform: peaks } : s)),
-      );
-
-      // 2. Update the Timeline Tracks (Fixed for new structure)
+      setShots((prev) => prev.map((s) => (s.id === shotId ? { ...s, waveform: peaks } : s)));
       setTracks((prev) =>
-        prev.map((track) => ({
-          ...track,
-          clips: track.clips.map((clip) =>
-            clip.id === shotId ? { ...clip, waveform: peaks } : clip,
-          ),
-        })),
+        prev.map((track) => ({ ...track, clips: track.clips.map((clip) => clip.id === shotId ? { ...clip, waveform: peaks } : clip) })),
       );
     }
   };
@@ -629,34 +508,6 @@ function StudioContent() {
     }
   };
 
-  // --- PREVIEW PLAYER ---
-  const previewLoopRef = useRef<number | null>(null);
-
-  const handlePlayShot = useCallback(
-    async (shot: Shot) => {
-      // 1. If we are currently playing the main timeline, stop it
-      if (isPlaying) setIsPlaying(false);
-
-      // 2. TOGGLE OFF: If already previewing this shot, just stop and reset
-      if (previewingShotId === shot.id) {
-        setPreviewingShotId(null);
-        setCurrentTime(0);
-        return;
-      }
-
-      // 3. START PREVIEW:
-      // We find where this shot would be on a "temp" timeline,
-      // but for a simple preview, we'll just seek to its start
-      // if it's on the timeline, or simply set our state to its data.
-      setPreviewingShotId(shot.id);
-
-      // For now, we'll just toggle the global play state.
-      // In a future step, we can make this "solo" the specific shot.
-      setIsPlaying(true);
-    },
-    [isPlaying, previewingShotId],
-  );
-
   // --- LOAD DATA ---
   useEffect(() => {
     if (projectId && sceneId) loadData(projectId, sceneId);
@@ -671,16 +522,12 @@ function StudioContent() {
       const s = sData.find((x: any) => x.id === sId);
       setScene(s || null);
 
-      // 1. Load Library Shots
       const savedShots = await GetShots(pId, sId);
       let loadedShots: any[] = [];
       if (savedShots && savedShots.length > 0) {
         loadedShots = await Promise.all(
           savedShots.map(async (shot: any) => {
-            if (shot.sourceImage) {
-              const b64 = await ReadImageBase64(shot.sourceImage);
-              shot.previewBase64 = b64;
-            }
+            if (shot.sourceImage) shot.previewBase64 = await ReadImageBase64(shot.sourceImage);
             return shot;
           }),
         );
@@ -688,75 +535,37 @@ function StudioContent() {
         setActiveShotId(loadedShots[0].id);
       }
 
-      // 2. Load Timeline & Convert to New Format
       try {
         const timelineData = await GetTimeline(pId, sId);
-
         if (timelineData && timelineData.tracks) {
           const settings = timelineData.trackSettings || [];
-
-          // CONVERSION LOGIC: Transform [][]any to TimelineTrack[]
           const newTracks: TimelineTrack[] = await Promise.all(
             timelineData.tracks.map(async (rawClips: any[], index: number) => {
-              // A. Hydrate Clips
               const clips = await Promise.all(
                 rawClips.map(async (item: any) => {
-                  if (item.sourceImage) {
-                    await ReadImageBase64(item.sourceImage); // Preload (optional)
-                  }
-
-                  // Map Legacy Item -> New TimelineClip
+                  if (item.sourceImage) await ReadImageBase64(item.sourceImage);
                   return {
                     id: item.timelineId || crypto.randomUUID(),
-                    type: (item.audioPath ? "audio" : "video") as
-                      | "video"
-                      | "audio",
+                    type: item.outputVideo ? "video" : (item.audioPath ? "audio" : "video") as "video" | "audio",
                     name: item.name || "Untitled",
-                    // LOAD THE ACTUAL FILE PATH
-                    src:
-                      item.outputVideo ||
-                      item.audioPath ||
-                      item.sourceImage ||
-                      "",
+                    src: item.outputVideo || item.audioPath || item.sourceImage || "",
                     start: item.startTime,
                     duration: item.duration,
                     offset: item.trimStart || 0,
-                    sourceDuration: item.duration, // <--- Set sourceDuration (assuming item.duration was total length originally, or strictly from shot)
-                    // Actually, item.duration from backend MIGHT be the trimmed duration.
-                    // But we don't have the original total duration stored in the backend "TimelineItem" struct apparently unless we check the Shot library.
-                    // However, we can use the Shot Library to look it up if needed.
-                    // For now, let's assume valid clips come from Shots, and we should look up the shot if possible?
-                    // Better: The backend item might not have it.
-                    // Let's set it to item.duration + (item.trimStart || 0) + (maybe trimEnd? no).
-                    // Providing a safe fallback:
+                    sourceDuration: item.duration,
                     color: item.audioPath ? "bg-purple-600" : "bg-blue-600",
                   };
                 }),
               );
 
-              // B. Get Track Info from Settings
               const setting = settings[index] || {};
-              // Fallback names if settings are missing
               const defaultName = index === 0 ? "Video 1" : `Audio ${index}`;
               const trackName = setting.name || defaultName;
-              const trackType =
-                setting.type ||
-                (trackName.toUpperCase().startsWith("A") ? "audio" : "video");
+              const trackType = setting.type || (trackName.toUpperCase().startsWith("A") ? "audio" : "video");
 
-              // Post-process clips to add thumbnails from shots if available
               const clipsWithThumbnails = clips.map((clip) => {
-                // Try to find matching shot to get thumbnail
-                // We match by src mainly. Or we can match by "outputVideo" / "audioPath" if those were IDs.
-                // But here 'src' is the file path.
-                const matchingShot = loadedShots.find(
-                  (s) =>
-                    s.outputVideo === clip.src ||
-                    s.audioPath === clip.src ||
-                    s.sourceImage === clip.src,
-                );
-                if (matchingShot && matchingShot.previewBase64) {
-                  return { ...clip, thumbnail: matchingShot.previewBase64 };
-                }
+                const matchingShot = loadedShots.find((s) => s.outputVideo === clip.src || s.audioPath === clip.src || s.sourceImage === clip.src);
+                if (matchingShot && matchingShot.previewBase64) return { ...clip, thumbnail: matchingShot.previewBase64 };
                 return clip;
               });
 
@@ -774,11 +583,8 @@ function StudioContent() {
 
           setTracks(newTracks);
 
-          // C. Preload Video Blobs (so playback works immediately)
           const uniquePaths = new Set<string>();
-          timelineData.tracks.flat().forEach((item: any) => {
-            if (item.outputVideo) uniquePaths.add(item.outputVideo);
-          });
+          timelineData.tracks.flat().forEach((item: any) => { if (item.outputVideo) uniquePaths.add(item.outputVideo); });
 
           await Promise.all(
             Array.from(uniquePaths).map(async (path) => {
@@ -787,40 +593,22 @@ function StudioContent() {
                 const res = await fetch(url);
                 if (res.ok) {
                   const blob = await res.blob();
-                  setVideoBlobs((prev) =>
-                    new Map(prev).set(path, URL.createObjectURL(blob)),
-                  );
+                  setVideoBlobs((prev) => new Map(prev).set(path, URL.createObjectURL(blob)));
                 }
-              } catch (e) {
-                console.error("Failed to preload:", path);
-              }
+              } catch (e) { }
             }),
           );
         } else {
-          // Default Empty State
-          setTracks([
-            { id: "t1", name: "Video 1", type: "video", clips: [] },
-            { id: "t2", name: "Audio 1", type: "audio", clips: [] },
-          ]);
+          setTracks([{ id: "t1", name: "Video 1", type: "video", clips: [] }, { id: "t2", name: "Audio 1", type: "audio", clips: [] }]);
         }
       } catch (e) {
-        console.error("Timeline Load Error:", e);
-        // Fallback
-        setTracks([
-          { id: "t1", name: "Video 1", type: "video", clips: [] },
-          { id: "t2", name: "Audio 1", type: "audio", clips: [] },
-        ]);
+        setTracks([{ id: "t1", name: "Video 1", type: "video", clips: [] }, { id: "t2", name: "Audio 1", type: "audio", clips: [] }]);
       }
 
       initialized.current = true;
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setIsLoading(false);
-    }
+    } catch (err) { console.error(err); } finally { setIsLoading(false); }
   };
 
-  // --- SHOT LOGIC ---
   const activeShotIndex = shots.findIndex((s) => s.id === activeShotId);
   const activeShot = shots[activeShotIndex];
 
@@ -832,20 +620,8 @@ function StudioContent() {
       const newShot: Shot = {
         id: newId,
         sceneId: sceneId,
-        name: `Shot ${prev.reduce((max, s) => {
-          const match = s.name.match(/^Shot (\d+)$/);
-          return match ? Math.max(max, parseInt(match[1])) : max;
-        }, 0) + 1
-          }`,
-        sourceImage: "",
-        audioPath: "",
-        waveform: [],
-        prompt: "",
-        motionStrength: 127,
-        seed: Math.floor(Math.random() * 1000000),
-        duration: 4,
-        status: "DRAFT",
-        outputVideo: "",
+        name: `Shot ${prev.reduce((max, s) => { const match = s.name.match(/^Shot (\d+)$/); return match ? Math.max(max, parseInt(match[1])) : max; }, 0) + 1}`,
+        sourceImage: "", audioPath: "", waveform: [], prompt: "", motionStrength: 127, seed: Math.floor(Math.random() * 1000000), duration: 4, status: "DRAFT", outputVideo: "",
       };
       return [...prev, newShot];
     });
@@ -854,34 +630,17 @@ function StudioContent() {
 
   const createExtensionShot = useCallback(async (originalShot: Shot) => {
     const sourcePath = originalShot.outputVideo || originalShot.sourceImage;
-    if (!sourcePath) {
-      alert("Select source first");
-      return null;
-    }
+    if (!sourcePath) { alert("Select source first"); return null; }
     const lastFramePath = await ExtractLastFrame(sourcePath);
     if (!lastFramePath) return null;
     const b64 = await ReadImageBase64(lastFramePath);
-    const newId = crypto.randomUUID();
-    const newShot: Shot = {
-      ...originalShot,
-      id: newId,
-      name: `${originalShot.name} (Ext)`,
-      sourceImage: lastFramePath,
-      audioPath: "",
-      waveform: [],
-      previewBase64: b64,
-      status: "DRAFT",
-      outputVideo: "",
-      duration: 4,
-    };
-    return newShot;
+    return { ...originalShot, id: crypto.randomUUID(), name: `${originalShot.name} (Ext)`, sourceImage: lastFramePath, audioPath: "", waveform: [], previewBase64: b64, status: "DRAFT", outputVideo: "", duration: 4 };
   }, []);
 
   const handleExtendShot = useCallback(
     async (originalShot: Shot) => {
       const newShot = await createExtensionShot(originalShot);
       if (!newShot) return;
-
       recordHistory();
       setShots((prev) => {
         const idx = prev.findIndex((s) => s.id === originalShot.id);
@@ -895,280 +654,101 @@ function StudioContent() {
     [shots, createExtensionShot],
   );
 
-  const handleTimelineExtend = async (timelineId: string) => {
-    console.log("Extend feature pending migration to new timeline engine.");
-  };
-
-  const handleDeleteShot = useCallback(
-    (e: React.MouseEvent, id: string) => {
-      e.stopPropagation();
-      confirm({
-        title: "Delete Shot?",
-        message: "This will permanently remove the shot.",
-        variant: "danger",
-        onConfirm: async () => {
-          recordHistory();
-          if (project && scene) await DeleteShot(project.id, scene.id, id);
-          setShots((prev) => prev.filter((s) => s.id !== id));
-        },
-      });
-    },
-    [confirm, project, scene],
-  );
-
-  const updateActiveShot = useCallback(
-    (updates: Partial<Shot>) => {
-      if (!activeShotId) return;
-
-      // 1. Update the Source Library
-      const shot = shots.find((s) => s.id === activeShotId); // Access shots from state, but inside callback it might be stale if not in deps.
-      // Actually, better to use functional update for setShots if we want to avoid dep on shots,
-      // BUT we need 'shot' to check outputVideo changes.
-      // So we must depend on 'shots' or use a ref.
-      // Since shots don't change during playback, depending on shots is fine.
-
-      if (shot) {
-        const isNewRender = updates.status === "DONE";
-        const path = updates.outputVideo || shot.outputVideo;
-        if (
-          (isNewRender ||
-            (updates.outputVideo &&
-              updates.outputVideo !== shot.outputVideo)) &&
-          path
-        ) {
-          refreshVideoBlob(path);
-          generateWaveform(shot.id, path);
-        }
-        if (updates.audioPath && updates.audioPath !== shot.audioPath) {
-          generateWaveform(shot.id, updates.audioPath);
-        }
-      }
-
-      setShots((prev) =>
-        prev.map((s) => (s.id === activeShotId ? { ...s, ...updates } : s)),
-      );
-
-      // 2. Update the Timeline (Fixed for New Structure)
-      setTracks((prev) =>
-        prev.map((track) => ({
-          ...track,
-          clips: track.clips.map((clip) => {
-            if (clip.id === activeShotId) {
-              // Merge updates into the clip
-              // Note: We cast to 'any' briefly because Shot types and Clip types
-              // might have slight differences during this migration.
-              const newItem = { ...clip, ...updates } as any;
-
-              if (updates.duration) {
-                newItem.duration = updates.duration;
-              }
-              return newItem;
-            }
-            return clip;
-          }),
-        })),
-      );
-    },
-    [activeShotId, shots],
-  );
-
-  const handleUpdateItem = (
-    id: string,
-    updates: Partial<TimelineClip>, // Changed from TimelineItem to TimelineClip
-    skipHistory = false,
-  ) => {
-    if (!skipHistory) recordHistory();
-    setTracks((prev) =>
-      prev.map((track) => ({
-        ...track,
-        clips: track.clips.map((clip) =>
-          clip.id === id ? { ...clip, ...updates } : clip,
-        ),
-      })),
-    );
-  };
-
-  const handleSplit = (itemId: string, splitTime: number) => {
-    console.log("Split feature pending migration.");
-  };
-
-  // --- TRACK MANAGEMENT (FIXED) ---
-
-  const handleAddAudioTrack = () => {
-    recordHistory();
-    setTracks((prev) => {
-      // 1. Calculate next Audio Track Number (A1, A2...)
-      const audioTracks = prev.filter((t) => t.type === "audio");
-      let nextNum = 1;
-      if (audioTracks.length > 0) {
-        const last = audioTracks[audioTracks.length - 1];
-        const match = last.name.match(/(\d+)/);
-        if (match) nextNum = parseInt(match[1]) + 1;
-        else nextNum = audioTracks.length + 1;
-      }
-
-      // 2. Create Valid Track Object
-      const newTrack: TimelineTrack = {
-        id: crypto.randomUUID(),
-        name: `A${nextNum}`,
-        type: "audio",
-        clips: [],
-        isMuted: false,
-        isHidden: false,
-        isLocked: false,
-      };
-
-      return [...prev, newTrack];
+  const handleDeleteShot = useCallback((e: React.MouseEvent, id: string) => {
+    e.stopPropagation();
+    confirm({
+      title: "Delete Shot?", message: "This will permanently remove the shot.", variant: "danger",
+      onConfirm: async () => {
+        recordHistory();
+        if (project && scene) await DeleteShot(project.id, scene.id, id);
+        setShots((prev) => prev.filter((s) => s.id !== id));
+      },
     });
-  };
+  }, [confirm, project, scene]);
 
-  const handleAddTrack = () => {
-    recordHistory();
-    setTracks((prev) => {
-      // 1. Calculate next Video Track Number (V1, V2...)
-      const videoTracks = prev.filter((t) => t.type === "video");
-      const nextNum = videoTracks.length + 1;
+  const updateActiveShot = useCallback((updates: Partial<Shot>) => {
+    if (!activeShotId) return;
 
-      // 2. Create Valid Track Object
-      const newTrack: TimelineTrack = {
-        id: crypto.randomUUID(),
-        name: `V${nextNum}`,
-        type: "video",
-        clips: [],
-        isMuted: false,
-        isHidden: false,
-        isLocked: false,
-      };
+    const shot = shots.find((s) => s.id === activeShotId);
+    if (shot) {
+      const isNewRender = updates.status === "DONE";
+      const path = updates.outputVideo || shot.outputVideo;
+      if ((isNewRender || (updates.outputVideo && updates.outputVideo !== shot.outputVideo)) && path) {
+        refreshVideoBlob(path);
+        generateWaveform(shot.id, path);
+      }
+      if (updates.audioPath && updates.audioPath !== shot.audioPath) {
+        generateWaveform(shot.id, updates.audioPath);
+      }
+    }
 
-      // Insert at the TOP of the list (Standard for Video tracks in this UI)
-      return [newTrack, ...prev];
-    });
-  };
+    setShots((prev) => prev.map((s) => (s.id === activeShotId ? { ...s, ...updates } : s)));
+    setTracks((prev) => prev.map((track) => ({
+      ...track, clips: track.clips.map((clip) => {
+        if (clip.id === activeShotId) {
+          const newItem = { ...clip, ...updates } as any;
+          if (updates.duration) newItem.duration = updates.duration;
+          return newItem;
+        }
+        return clip;
+      })
+    })));
+  }, [activeShotId, shots]);
 
-  const handleDeleteTrack = (index: number) => {
-    recordHistory();
-    setTracks((prev) => prev.filter((_, i) => i !== index));
-  };
-
-  const handleRenameTrack = (index: number, newName: string) => {
-    setTracks((prev) =>
-      prev.map((t, i) => (i === index ? { ...t, name: newName } : t)),
-    );
-  };
-
-  // Note: Height resizing is removed for now to simplify the interface
-  const handleResizeTrack = (index: number, newHeight: number) => {
-    // Optional: Add 'height' to TimelineTrack interface if needed later
-  };
-
-  const handleToggleTrackLock = (index: number) => {
-    setTracks((prev) =>
-      prev.map((t, i) => (i === index ? { ...t, isLocked: !t.isLocked } : t)),
-    );
-  };
-
-  const handleToggleTrackVisibility = (index: number) => {
-    setTracks((prev) =>
-      prev.map((t, i) => (i === index ? { ...t, isHidden: !t.isHidden } : t)),
-    );
-  };
-
-  // --- DND LOGIC ---
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
-    useSensor(KeyboardSensor, {
-      coordinateGetter: sortableKeyboardCoordinates,
-      keyboardCodes: {
-        start: ["Enter"],
-        cancel: ["Escape"],
-        end: ["Enter"],
-      },
-    }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates, keyboardCodes: { start: ["Enter"], cancel: ["Escape"], end: ["Enter"] } }),
   );
 
   const handleDragStart = (event: DragStartEvent) => {
-    // 1. Check if dragging from Library (Shot data)
-    if (event.active.data.current?.shot) {
-      setActiveDragItem(event.active.data.current.shot);
-      return;
-    }
-
-    // 2. Check if dragging a Shot ID directly
+    if (event.active.data.current?.shot) return setActiveDragItem(event.active.data.current.shot);
     const shot = shots.find((s) => s.id === event.active.id);
-    if (shot) {
-      setActiveDragItem(shot);
-      return;
-    }
-
-    // 3. Check if dragging an existing Timeline Clip
-    // FIX: Look inside 'track.clips' instead of 'track'
+    if (shot) return setActiveDragItem(shot);
     for (const track of tracks) {
       const item = track.clips.find((i) => i.id === event.active.id);
-      if (item) {
-        setActiveDragItem(item);
-        return;
-      }
+      if (item) return setActiveDragItem(item);
     }
   };
 
-  const handleDragOver = (event: DragOverEvent) => {
-    const { active, over } = event;
-    if (!over) return;
-    if (active.data.current?.type === "shot") return;
-  };
+  const handleDragOver = (event: DragOverEvent) => { };
 
   const handleDragEnd = (event: DragEndEvent) => {
     const { active, over } = event;
     setActiveDragItem(null);
 
-    // 1. Must drop over a track
     if (!over) return;
     const overId = String(over.id);
     if (!overId.startsWith("track-")) return;
 
-    // 2. Identify the Track
     const trackIndex = parseInt(overId.split("-")[1]);
 
-    // 3. Identify the Shot (Handle "library-" prefix)
     let shotData = active.data.current?.shot;
     if (!shotData) {
       const activeId = String(active.id).replace("library-", "");
       shotData = shots.find((s) => s.id === activeId);
     }
 
-    // 4. Create the Clip
     if (shotData) {
       recordHistory();
-
-      // Calculate Drop Time: (Drop X - Track Start X) / Zoom
-      const dropX =
-        (active.rect.current.translated?.left || 0) - over.rect.left;
+      const dropX = (active.rect.current.translated?.left || 0) - over.rect.left;
       const startTime = Math.max(0, dropX / zoom);
 
       const newClip: TimelineClip = {
         id: crypto.randomUUID(),
-        type: shotData.audioPath ? "audio" : "video",
+        type: shotData.outputVideo ? "video" : (shotData.audioPath ? "audio" : "video"),
         name: shotData.name,
-        src:
-          shotData.outputVideo ||
-          shotData.audioPath ||
-          shotData.sourceImage ||
-          "",
+        src: shotData.outputVideo || shotData.audioPath || shotData.sourceImage || "",
         start: startTime,
         duration: shotData.duration || 4,
         offset: 0,
         color: shotData.audioPath ? "bg-purple-600" : "bg-blue-600",
-        thumbnail: shotData.previewBase64, // <--- NEW: Set thumbnail
+        thumbnail: shotData.previewBase64,
       };
 
-      // 5. Add to Track
       setTracks((prev) => {
         const next = [...prev];
         if (next[trackIndex]) {
-          next[trackIndex] = {
-            ...next[trackIndex],
-            clips: [...next[trackIndex].clips, newClip],
-          };
+          next[trackIndex] = { ...next[trackIndex], clips: [...next[trackIndex].clips, newClip] };
         }
         return next;
       });
@@ -1180,30 +760,12 @@ function StudioContent() {
     setExportProgress(0);
     setExportStatus("Initializing...");
 
-    // Listen for progress
-    const cleanupStatus = (window as any).runtime.EventsOn(
-      "export:status",
-      (msg: string) => {
-        setExportStatus(msg);
-      },
-    );
-    const cleanupProgress = (window as any).runtime.EventsOn(
-      "export:progress",
-      (pct: number) => {
-        setExportProgress(pct);
-      },
-    );
+    const cleanupStatus = (window as any).runtime.EventsOn("export:status", (msg: string) => setExportStatus(msg));
+    const cleanupProgress = (window as any).runtime.EventsOn("export:progress", (pct: number) => setExportProgress(pct));
 
     try {
-      // Call backend directly
-      const result = await (window as any).go.main.App.ExportVideo(
-        project?.id,
-        scene?.id,
-        exportOptions,
-      );
-      if (result !== "Success" && result !== "Cancelled") {
-        alert("Export failed: " + result);
-      }
+      const result = await (window as any).go.main.App.ExportVideo(project?.id, scene?.id, exportOptions);
+      if (result !== "Success" && result !== "Cancelled") alert("Export failed: " + result);
     } finally {
       cleanupStatus();
       cleanupProgress();
@@ -1223,20 +785,8 @@ function StudioContent() {
     <div className="flex flex-col h-full relative">
       <div className="h-8 border-b border-zinc-800 flex items-center justify-between px-2 bg-[#09090b] shrink-0">
         <span className="text-xs font-bold text-zinc-400">Generator</span>
-        <button
-          onClick={() => setIsGeneratorFullHeight(!isGeneratorFullHeight)}
-          className="text-zinc-400 hover:text-white"
-          title={
-            isGeneratorFullHeight
-              ? "Switch to Classic View"
-              : "Switch to Full Height"
-          }
-        >
-          {isGeneratorFullHeight ? (
-            <PanelTop size={14} />
-          ) : (
-            <PanelLeft size={14} />
-          )}
+        <button onClick={() => setIsGeneratorFullHeight(!isGeneratorFullHeight)} className="text-zinc-400 hover:text-white" title={isGeneratorFullHeight ? "Switch to Classic View" : "Switch to Full Height"}>
+          {isGeneratorFullHeight ? <PanelTop size={14} /> : <PanelLeft size={14} />}
         </button>
       </div>
       <div className="flex-1 min-h-0">
@@ -1245,11 +795,10 @@ function StudioContent() {
           updateActiveShot={updateActiveShot}
           project={project}
           scene={scene}
+          shots={shots}
           isRendering={isRendering}
           setIsRendering={setIsRendering}
-          setVideoCache={(id: string, b64: string) =>
-            videoCache.current.set(id, b64)
-          }
+          setVideoCache={(id: string, b64: string) => videoCache.current.set(id, b64)}
           setVideoSrc={() => { }}
         />
       </div>
@@ -1257,47 +806,22 @@ function StudioContent() {
   );
 
   return (
-    <DndContext
-      sensors={sensors}
-      collisionDetection={pointerWithin}
-      onDragStart={handleDragStart}
-      onDragOver={handleDragOver}
-      onDragEnd={handleDragEnd}
-    >
+    <DndContext sensors={sensors} collisionDetection={pointerWithin} onDragStart={handleDragStart} onDragOver={handleDragOver} onDragEnd={handleDragEnd}>
       <div className="flex-1 w-full flex flex-col overflow-hidden bg-[#09090b]">
         <header className="h-10 w-full border-b border-zinc-800 bg-[#09090b] flex items-center justify-between px-4 shrink-0">
           <h1 className="text-sm font-bold text-white flex items-center gap-2">
-            {scene.name} <span className="text-zinc-600">/</span>{" "}
-            <span className="text-zinc-500 font-normal">{project.name}</span>
+            {scene.name} <span className="text-zinc-600">/</span> <span className="text-zinc-500 font-normal">{project.name}</span>
           </h1>
-          <button
-            onClick={() => setShowExportModal(true)}
-            className="flex items-center gap-2 px-3 py-1.5 bg-[#D2FF44] text-black text-xs font-bold rounded hover:bg-[#b8e635] transition-colors"
-          >
-            <Download size={14} />
-            Export
+          <button onClick={() => setShowExportModal(true)} className="flex items-center gap-2 px-3 py-1.5 bg-[#D2FF44] text-black text-xs font-bold rounded hover:bg-[#b8e635] transition-colors">
+            <Download size={14} /> Export
           </button>
         </header>
 
         <div className="flex-1 flex overflow-hidden">
           {isGeneratorFullHeight && (
             <>
-              <div
-                style={{ width: generatorWidth }}
-                className="border-r border-zinc-800 bg-[#09090b] flex flex-col min-h-0 shrink-0"
-              >
-                {generatorContent}
-              </div>
-              <div
-                className="w-1 hover:w-1.5 bg-zinc-900 hover:bg-[#D2FF44] cursor-col-resize transition-all z-50 flex-shrink-0"
-                onPointerDown={(e) => {
-                  isResizingGen.current = true;
-                  e.currentTarget.setPointerCapture(e.pointerId);
-                }}
-                onPointerUp={(e) =>
-                  e.currentTarget.releasePointerCapture(e.pointerId)
-                }
-              />
+              <div style={{ width: generatorWidth }} className="border-r border-zinc-800 bg-[#09090b] flex flex-col min-h-0 shrink-0">{generatorContent}</div>
+              <div className="w-1 hover:w-1.5 bg-zinc-900 hover:bg-[#D2FF44] cursor-col-resize transition-all z-50 flex-shrink-0" onPointerDown={(e) => { isResizingGen.current = true; e.currentTarget.setPointerCapture(e.pointerId); }} onPointerUp={(e) => e.currentTarget.releasePointerCapture(e.pointerId)} />
             </>
           )}
 
@@ -1305,29 +829,11 @@ function StudioContent() {
             <div className="flex-1 flex overflow-hidden min-h-0">
               {!isGeneratorFullHeight && (
                 <>
-                  <div
-                    style={{ width: generatorWidth }}
-                    className="border-r border-zinc-800 bg-[#09090b] flex flex-col min-h-0 shrink-0"
-                  >
-                    {generatorContent}
-                  </div>
-                  <div
-                    className="w-1 hover:w-1.5 bg-zinc-900 hover:bg-[#D2FF44] cursor-col-resize transition-all z-50 flex-shrink-0"
-                    onPointerDown={(e) => {
-                      isResizingGen.current = true;
-                      e.currentTarget.setPointerCapture(e.pointerId);
-                    }}
-                    onPointerUp={(e) =>
-                      e.currentTarget.releasePointerCapture(e.pointerId)
-                    }
-                  />
+                  <div style={{ width: generatorWidth }} className="border-r border-zinc-800 bg-[#09090b] flex flex-col min-h-0 shrink-0">{generatorContent}</div>
+                  <div className="w-1 hover:w-1.5 bg-zinc-900 hover:bg-[#D2FF44] cursor-col-resize transition-all z-50 flex-shrink-0" onPointerDown={(e) => { isResizingGen.current = true; e.currentTarget.setPointerCapture(e.pointerId); }} onPointerUp={(e) => e.currentTarget.releasePointerCapture(e.pointerId)} />
                 </>
               )}
-              <div
-                ref={libraryRef}
-                style={{ width: libraryWidth }}
-                className="border-r border-zinc-800 bg-[#09090b] flex flex-col min-h-0 shrink-0"
-              >
+              <div ref={libraryRef} style={{ width: libraryWidth }} className="border-r border-zinc-800 bg-[#09090b] flex flex-col min-h-0 shrink-0">
                 <LibraryPanel
                   shots={shots}
                   activeShotId={activeShotId}
@@ -1336,66 +842,58 @@ function StudioContent() {
                   handleExtendShot={handleExtendShot}
                   handleDeleteShot={handleDeleteShot}
                   handlePlayShot={handlePlayShot}
-                  projectId={project.id}
                   previewingShotId={previewingShotId}
                 />
               </div>
-              <div
-                className="w-1 hover:w-1.5 bg-zinc-900 hover:bg-[#D2FF44] cursor-col-resize transition-all z-50 flex-shrink-0"
-                onPointerDown={(e) => {
-                  isResizingLib.current = true;
-                  e.currentTarget.setPointerCapture(e.pointerId);
-                }}
-                onPointerUp={(e) =>
-                  e.currentTarget.releasePointerCapture(e.pointerId)
-                }
-              />
-              <div className="flex-1 min-w-0 bg-black min-h-0">
+              <div className="w-1 hover:w-1.5 bg-zinc-900 hover:bg-[#D2FF44] cursor-col-resize transition-all z-50 flex-shrink-0" onPointerDown={(e) => { isResizingLib.current = true; e.currentTarget.setPointerCapture(e.pointerId); }} onPointerUp={(e) => e.currentTarget.releasePointerCapture(e.pointerId)} />
+
+              <div className="flex-1 min-w-0 bg-black min-h-0 relative">
+                {/* ViewerPanel receives the dynamically determined "active time".
+                  If previewing, it runs on 'previewTime' (starts at 0).
+                  If normal, it runs on 'currentTime' (global timeline).
+                */}
                 <ViewerPanel
-                  tracks={tracks}
-                  totalDuration={totalDuration}
-                  currentTime={currentTime}
+                  tracks={displayTracks}
+                  totalDuration={displayDuration}
+                  currentTime={activeTime}
                   isPlaying={isPlaying}
                   setIsPlaying={setIsPlaying}
-                  setCurrentTime={setCurrentTime}
+                  setCurrentTime={setActiveTime}
                   projectFps={projectFps}
                   volume={masterVolume}
                   videoBlobs={videoBlobs}
                 />
               </div>
+
             </div>
-            <div
-              className="h-1 hover:h-1.5 bg-zinc-900 hover:bg-[#D2FF44] cursor-row-resize transition-all z-50 shrink-0"
-              onPointerDown={(e) => {
-                isResizingTime.current = true;
-                e.currentTarget.setPointerCapture(e.pointerId);
-              }}
-              onPointerUp={(e) =>
-                e.currentTarget.releasePointerCapture(e.pointerId)
-              }
-            />
-            <div
-              style={{ height: timelineHeight }}
-              className="border-t border-zinc-800 bg-[#1e1e20] shrink-0"
-            >
-              {/* --- NEW TIMELINE --- */}
+            <div className="h-1 hover:h-1.5 bg-zinc-900 hover:bg-[#D2FF44] cursor-row-resize transition-all z-50 shrink-0" onPointerDown={(e) => { isResizingTime.current = true; e.currentTarget.setPointerCapture(e.pointerId); }} onPointerUp={(e) => e.currentTarget.releasePointerCapture(e.pointerId)} />
+
+            <div style={{ height: timelineHeight }} className="border-t border-zinc-800 bg-[#1e1e20] shrink-0">
               <div style={{ height: timelineHeight }} className="shrink-0">
                 <SimpleTimeline
                   tracks={tracks}
                   setTracks={setTracks}
+
+                  // Timeline always listens to the global currentTime
                   currentTime={currentTime}
-                  setCurrentTime={setCurrentTime}
+
+                  // If the user clicks the timeline to seek, instantly exit preview mode
+                  setCurrentTime={handleTimelineTimeChange}
+
                   zoom={zoom}
                   setZoom={setZoom}
+
+                  // It can still toggle play/pause globally
                   isPlaying={isPlaying}
                   setIsPlaying={setIsPlaying}
+
                   onUndo={undo}
                   onRedo={redo}
                   volume={masterVolume}
                   onVolumeChange={handleVolumeChange}
-                  selectedClipId={selectedClipId} // <--- NEW PROP
-                  onSelectClip={setSelectedClipId} // <--- NEW PROP
-                  onDeleteClip={handleDeleteClip} // <--- NEW PROP
+                  selectedClipId={selectedClipId}
+                  onSelectClip={setSelectedClipId}
+                  onDeleteClip={handleDeleteClip}
                   onRegisterHistory={recordHistory}
                 />
               </div>
@@ -1404,66 +902,25 @@ function StudioContent() {
         </div>
       </div>
 
-      <DragOverlay
-        dropAnimation={
-          activeDragItem && "timelineId" in activeDragItem
-            ? {
-              sideEffects: defaultDropAnimationSideEffects({
-                styles: { active: { opacity: "0.5" } },
-              }),
-            }
-            : null
-        }
-      >
+      <DragOverlay dropAnimation={activeDragItem && "timelineId" in activeDragItem ? { sideEffects: defaultDropAnimationSideEffects({ styles: { active: { opacity: "0.5" } } }) } : null}>
         {activeDragItem ? (
           "timelineId" in activeDragItem ? (
-            <div
-              style={{
-                width: (activeDragItem.duration || 4) * zoom,
-                height: "96px",
-              }}
-              className="relative flex flex-col overflow-hidden bg-[#375a6c] border border-[#213845] rounded-sm shadow-xl cursor-grabbing opacity-90"
-            >
+            <div style={{ width: (activeDragItem.duration || 4) * zoom, height: "96px" }} className="relative flex flex-col overflow-hidden bg-[#375a6c] border border-[#213845] rounded-sm shadow-xl cursor-grabbing opacity-90">
               <div className="flex-1 relative overflow-hidden flex">
-                {activeDragItem.previewBase64 && (
-                  <img
-                    src={activeDragItem.previewBase64}
-                    className="h-full w-full object-cover opacity-80"
-                  />
-                )}
+                {activeDragItem.previewBase64 && <img src={activeDragItem.previewBase64} className="h-full w-full object-cover opacity-80" />}
               </div>
-              {activeDragItem.waveform && (
-                <div className="absolute bottom-4 left-0 right-0 h-6 flex items-end gap-[1px] px-1 opacity-80 pointer-events-none">
-                  {activeDragItem.waveform.map((h: number, i: number) => (
-                    <div
-                      key={i}
-                      style={{ height: `${h * 100}%` }}
-                      className="flex-1 bg-white/60 rounded-t-[1px]"
-                    />
-                  ))}
-                </div>
-              )}
-              <div className="absolute bottom-0 w-full bg-[#20343e] px-2 py-0.5 text-[9px] text-zinc-300 truncate font-mono">
-                {activeDragItem.name} ({activeDragItem.duration?.toFixed(2)}s)
-              </div>
+              <div className="absolute bottom-0 w-full bg-[#20343e] px-2 py-0.5 text-[9px] text-zinc-300 truncate font-mono">{activeDragItem.name} ({activeDragItem.duration?.toFixed(2)}s)</div>
             </div>
           ) : (
             <div className="w-48 aspect-video rounded-lg overflow-hidden border-2 border-[#D2FF44] shadow-xl cursor-grabbing bg-zinc-900 opacity-90">
-              {activeDragItem.previewBase64 && (
-                <img
-                  src={activeDragItem.previewBase64}
-                  className="w-full h-full object-cover"
-                />
-              )}
-              <div className="absolute bottom-0 w-full bg-black/60 p-1 text-[10px] text-white truncate">
-                {activeDragItem.name}
-              </div>
+              {activeDragItem.previewBase64 && <img src={activeDragItem.previewBase64} className="w-full h-full object-cover" />}
+              <div className="absolute bottom-0 w-full bg-black/60 p-1 text-[10px] text-white truncate">{activeDragItem.name}</div>
             </div>
           )
         ) : null}
       </DragOverlay>
 
-      {/* PROFESSIONAL EXPORT MODAL */}
+      {/* EXPORT MODAL */}
       {showExportModal && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-md">
           <div className="bg-[#121214] border border-zinc-800 rounded-xl shadow-2xl w-[800px] overflow-hidden flex flex-col">
@@ -1475,78 +932,43 @@ function StudioContent() {
                   Export Project
                 </h2>
               </div>
-              <button
-                onClick={() => !isExporting && setShowExportModal(false)}
-                className="text-zinc-500 hover:text-white transition-colors"
-                disabled={isExporting}
-              >
+              <button onClick={() => !isExporting && setShowExportModal(false)} className="text-zinc-500 hover:text-white transition-colors" disabled={isExporting}>
                 <X size={20} />
               </button>
             </div>
 
             {isExporting ? (
-              /* RENDERING STATE */
               <div className="p-12 flex flex-col items-center justify-center gap-8 min-h-[400px]">
                 <div className="relative">
                   <div className="absolute inset-0 bg-[#D2FF44] blur-xl opacity-20 rounded-full animate-pulse" />
-                  <Loader2
-                    className="animate-spin text-[#D2FF44] relative z-10"
-                    size={64}
-                  />
+                  <Loader2 className="animate-spin text-[#D2FF44] relative z-10" size={64} />
                 </div>
 
                 <div className="text-center space-y-2 w-full max-w-md">
-                  <h3 className="text-2xl font-bold text-white">
-                    Rendering Video...
-                  </h3>
+                  <h3 className="text-2xl font-bold text-white">Rendering Video...</h3>
                   <div className="flex justify-between text-xs font-mono text-zinc-400 uppercase tracking-widest">
                     <span>Processing</span>
                     <span>{exportProgress}%</span>
                   </div>
-
-                  {/* Custom Progress Bar */}
                   <div className="h-2 w-full bg-zinc-800 rounded-full overflow-hidden">
-                    <div
-                      className="h-full bg-gradient-to-r from-[#D2FF44] to-[#a3d616] transition-all duration-300 ease-out shadow-[0_0_10px_#D2FF44]"
-                      style={{ width: `${exportProgress}%` }}
-                    />
+                    <div className="h-full bg-gradient-to-r from-[#D2FF44] to-[#a3d616] transition-all duration-300 ease-out shadow-[0_0_10px_#D2FF44]" style={{ width: `${exportProgress}%` }} />
                   </div>
-
                   <p className="text-xs text-zinc-500 font-mono mt-4 border border-zinc-800/50 bg-black/20 p-2 rounded text-center">
                     {exportStatus || "Initializing engine..."}
                   </p>
                 </div>
               </div>
             ) : (
-              /* SETTINGS STATE */
               <div className="flex h-[450px]">
-                {/* LEFT COLUMN: CONTROLS */}
                 <div className="w-[60%] p-8 flex flex-col gap-8">
-                  {/* Preset Buttons */}
                   <div className="space-y-3">
-                    <label className="text-xs font-bold text-zinc-500 uppercase tracking-wider">
-                      Quick Presets
-                    </label>
+                    <label className="text-xs font-bold text-zinc-500 uppercase tracking-wider">Quick Presets</label>
                     <div className="grid grid-cols-3 gap-2">
-                      {[
-                        { id: "web", label: "Web (MP4)", fmt: "mp4" },
-                        { id: "master", label: "Master (MOV)", fmt: "mov" },
-                        { id: "audio", label: "Audio Only", fmt: "mp3" },
-                      ].map((preset) => (
+                      {[{ id: "web", label: "Web (MP4)", fmt: "mp4" }, { id: "master", label: "Master (MOV)", fmt: "mov" }, { id: "audio", label: "Audio Only", fmt: "mp3" }].map((preset) => (
                         <button
                           key={preset.id}
-                          onClick={() =>
-                            setExportOptions((prev) => ({
-                              ...prev,
-                              format: preset.fmt,
-                              includeVideo: preset.fmt !== "mp3",
-                              includeAudio: true,
-                            }))
-                          }
-                          className={`py-2 px-3 rounded border text-xs font-bold transition-all ${exportOptions.format === preset.fmt
-                              ? "bg-[#D2FF44]/10 border-[#D2FF44] text-[#D2FF44]"
-                              : "bg-zinc-900 border-zinc-800 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
-                            }`}
+                          onClick={() => setExportOptions((prev) => ({ ...prev, format: preset.fmt, includeVideo: preset.fmt !== "mp3", includeAudio: true }))}
+                          className={`py-2 px-3 rounded border text-xs font-bold transition-all ${exportOptions.format === preset.fmt ? "bg-[#D2FF44]/10 border-[#D2FF44] text-[#D2FF44]" : "bg-zinc-900 border-zinc-800 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"}`}
                         >
                           {preset.label}
                         </button>
@@ -1554,22 +976,10 @@ function StudioContent() {
                     </div>
                   </div>
 
-                  {/* Manual Controls */}
                   <div className="grid grid-cols-2 gap-6">
                     <div className="space-y-2">
-                      <label className="text-xs font-bold text-zinc-500 uppercase tracking-wider">
-                        Format
-                      </label>
-                      <select
-                        value={exportOptions.format}
-                        onChange={(e) =>
-                          setExportOptions({
-                            ...exportOptions,
-                            format: e.target.value,
-                          })
-                        }
-                        className="w-full bg-zinc-900 border border-zinc-700 rounded-md p-2.5 text-sm text-white focus:border-[#D2FF44] focus:ring-1 focus:ring-[#D2FF44] outline-none"
-                      >
+                      <label className="text-xs font-bold text-zinc-500 uppercase tracking-wider">Format</label>
+                      <select value={exportOptions.format} onChange={(e) => setExportOptions({ ...exportOptions, format: e.target.value })} className="w-full bg-zinc-900 border border-zinc-700 rounded-md p-2.5 text-sm text-white focus:border-[#D2FF44] focus:ring-1 focus:ring-[#D2FF44] outline-none">
                         <option value="mp4">MP4 (H.264)</option>
                         <option value="mov">MOV (ProRes 422)</option>
                         <option value="mkv">MKV (Matroska)</option>
@@ -1577,25 +987,9 @@ function StudioContent() {
                         <option value="wav">WAV (Lossless)</option>
                       </select>
                     </div>
-
                     <div className="space-y-2">
-                      <label className="text-xs font-bold text-zinc-500 uppercase tracking-wider">
-                        Quality
-                      </label>
-                      <select
-                        value={exportOptions.quality}
-                        onChange={(e) =>
-                          setExportOptions({
-                            ...exportOptions,
-                            quality: e.target.value,
-                          })
-                        }
-                        disabled={
-                          exportOptions.format === "mp3" ||
-                          exportOptions.format === "wav"
-                        }
-                        className="w-full bg-zinc-900 border border-zinc-700 rounded-md p-2.5 text-sm text-white focus:border-[#D2FF44] focus:ring-1 focus:ring-[#D2FF44] outline-none disabled:opacity-50 disabled:cursor-not-allowed"
-                      >
+                      <label className="text-xs font-bold text-zinc-500 uppercase tracking-wider">Quality</label>
+                      <select value={exportOptions.quality} onChange={(e) => setExportOptions({ ...exportOptions, quality: e.target.value })} disabled={exportOptions.format === "mp3" || exportOptions.format === "wav"} className="w-full bg-zinc-900 border border-zinc-700 rounded-md p-2.5 text-sm text-white focus:border-[#D2FF44] focus:ring-1 focus:ring-[#D2FF44] outline-none disabled:opacity-50 disabled:cursor-not-allowed">
                         <option value="high">High (Best Quality)</option>
                         <option value="medium">Medium (Balanced)</option>
                         <option value="low">Low (Draft / Small)</option>
@@ -1603,124 +997,44 @@ function StudioContent() {
                     </div>
                   </div>
 
-                  {/* Toggles */}
                   <div className="space-y-3">
-                    <label className="text-xs font-bold text-zinc-500 uppercase tracking-wider">
-                      Streams
-                    </label>
+                    <label className="text-xs font-bold text-zinc-500 uppercase tracking-wider">Streams</label>
                     <div className="flex flex-col gap-3 bg-zinc-900/50 p-4 rounded-lg border border-zinc-800">
                       <label className="flex items-center justify-between cursor-pointer group">
-                        <span className="text-sm text-zinc-300 font-medium group-hover:text-white transition-colors">
-                          Export Video
-                        </span>
-                        <input
-                          type="checkbox"
-                          checked={exportOptions.includeVideo}
-                          disabled={
-                            exportOptions.format === "mp3" ||
-                            exportOptions.format === "wav"
-                          }
-                          onChange={(e) =>
-                            setExportOptions({
-                              ...exportOptions,
-                              includeVideo: e.target.checked,
-                            })
-                          }
-                          className="accent-[#D2FF44] h-4 w-4"
-                        />
+                        <span className="text-sm text-zinc-300 font-medium group-hover:text-white transition-colors">Export Video</span>
+                        <input type="checkbox" checked={exportOptions.includeVideo} disabled={exportOptions.format === "mp3" || exportOptions.format === "wav"} onChange={(e) => setExportOptions({ ...exportOptions, includeVideo: e.target.checked })} className="accent-[#D2FF44] h-4 w-4" />
                       </label>
                       <div className="h-px bg-zinc-800" />
                       <label className="flex items-center justify-between cursor-pointer group">
-                        <span className="text-sm text-zinc-300 font-medium group-hover:text-white transition-colors">
-                          Export Audio
-                        </span>
-                        <input
-                          type="checkbox"
-                          checked={exportOptions.includeAudio}
-                          onChange={(e) =>
-                            setExportOptions({
-                              ...exportOptions,
-                              includeAudio: e.target.checked,
-                            })
-                          }
-                          className="accent-[#D2FF44] h-4 w-4"
-                        />
+                        <span className="text-sm text-zinc-300 font-medium group-hover:text-white transition-colors">Export Audio</span>
+                        <input type="checkbox" checked={exportOptions.includeAudio} onChange={(e) => setExportOptions({ ...exportOptions, includeAudio: e.target.checked })} className="accent-[#D2FF44] h-4 w-4" />
                       </label>
                     </div>
                   </div>
                 </div>
 
-                {/* RIGHT COLUMN: SUMMARY */}
                 <div className="w-[40%] bg-[#0d0d10] border-l border-zinc-800 p-8 flex flex-col justify-between">
                   <div className="space-y-6">
-                    <h3 className="text-sm font-bold text-white uppercase tracking-widest border-b border-zinc-800 pb-2">
-                      Summary
-                    </h3>
-
-                    {/* Stat Grid */}
+                    <h3 className="text-sm font-bold text-white uppercase tracking-widest border-b border-zinc-800 pb-2">Summary</h3>
                     <div className="grid grid-cols-1 gap-4">
-                      <div className="flex justify-between items-center">
-                        <span className="text-xs text-zinc-500">Duration</span>
-                        <span className="text-sm font-mono text-zinc-200">
-                          {formatTime(totalDuration)}
-                        </span>
-                      </div>
-                      <div className="flex justify-between items-center">
-                        <span className="text-xs text-zinc-500">
-                          Resolution
-                        </span>
-                        <span className="text-sm font-mono text-zinc-200">
-                          1920 x 1080
-                        </span>
-                      </div>
-                      <div className="flex justify-between items-center">
-                        <span className="text-xs text-zinc-500">
-                          Frame Rate
-                        </span>
-                        <span className="text-sm font-mono text-zinc-200">
-                          24 FPS
-                        </span>
-                      </div>
-                      <div className="flex justify-between items-center">
-                        <span className="text-xs text-zinc-500">Codec</span>
-                        <span className="text-sm font-mono text-zinc-200 uppercase">
-                          {exportOptions.format === "mov"
-                            ? "ProRes 422"
-                            : "H.264 / AAC"}
-                        </span>
-                      </div>
+                      <div className="flex justify-between items-center"><span className="text-xs text-zinc-500">Duration</span><span className="text-sm font-mono text-zinc-200">{formatTime(totalDuration)}</span></div>
+                      <div className="flex justify-between items-center"><span className="text-xs text-zinc-500">Resolution</span><span className="text-sm font-mono text-zinc-200">1920 x 1080</span></div>
+                      <div className="flex justify-between items-center"><span className="text-xs text-zinc-500">Frame Rate</span><span className="text-sm font-mono text-zinc-200">24 FPS</span></div>
+                      <div className="flex justify-between items-center"><span className="text-xs text-zinc-500">Codec</span><span className="text-sm font-mono text-zinc-200 uppercase">{exportOptions.format === "mov" ? "ProRes 422" : "H.264 / AAC"}</span></div>
                     </div>
-
                     <div className="bg-zinc-900/50 p-4 rounded border border-dashed border-zinc-800">
                       <div className="flex justify-between items-end">
-                        <span className="text-xs text-zinc-500">
-                          Est. File Size
-                        </span>
-                        <span className="text-lg font-bold text-[#D2FF44]">
-                          ~
-                          {estimateFileSize(
-                            totalDuration,
-                            exportOptions.format,
-                          )}
-                        </span>
+                        <span className="text-xs text-zinc-500">Est. File Size</span>
+                        <span className="text-lg font-bold text-[#D2FF44]">~{estimateFileSize(totalDuration, exportOptions.format)}</span>
                       </div>
                     </div>
                   </div>
 
-                  {/* ACTION BUTTONS */}
                   <div className="flex flex-col gap-3">
-                    <button
-                      onClick={handleExport}
-                      disabled={isExporting}
-                      className="w-full py-3 bg-[#D2FF44] hover:bg-[#b8e635] text-black font-bold rounded-lg transition-all hover:scale-[1.02] active:scale-[0.98] flex items-center justify-center gap-2"
-                    >
-                      <Download size={18} />
-                      Render Video
+                    <button onClick={handleExport} disabled={isExporting} className="w-full py-3 bg-[#D2FF44] hover:bg-[#b8e635] text-black font-bold rounded-lg transition-all hover:scale-[1.02] active:scale-[0.98] flex items-center justify-center gap-2">
+                      <Download size={18} /> Render Video
                     </button>
-                    <button
-                      onClick={() => setShowExportModal(false)}
-                      className="w-full py-2 text-xs font-bold text-zinc-500 hover:text-white transition-colors"
-                    >
+                    <button onClick={() => setShowExportModal(false)} className="w-full py-2 text-xs font-bold text-zinc-500 hover:text-white transition-colors">
                       Cancel
                     </button>
                   </div>

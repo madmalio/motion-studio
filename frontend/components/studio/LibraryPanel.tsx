@@ -8,11 +8,41 @@ import {
   AlertCircle,
   Play,
   Square,
-  X,
 } from "lucide-react";
-import { memo, useState } from "react";
+import { memo } from "react";
 
-// --- DRAGGABLE ITEM (Internal) ---
+// --- TYPES ---
+interface Shot {
+  id: string;
+  name: string;
+  previewBase64?: string;
+  outputVideo?: string;
+  audioPath?: string;
+  duration?: number;
+}
+
+interface DraggableShotProps {
+  shot: Shot;
+  isActive: boolean;
+  onClick: () => void;
+  onExtend: (e: React.MouseEvent) => void;
+  onDelete: (e: React.MouseEvent) => void;
+  onPlay: () => void;
+  isPlaying: boolean;
+}
+
+interface LibraryPanelProps {
+  shots: Shot[];
+  activeShotId: string | null;
+  setActiveShotId: (id: string) => void;
+  handleAddShot: () => void;
+  handleExtendShot: (shot: Shot) => void;
+  handleDeleteShot: (e: React.MouseEvent, id: string) => void;
+  handlePlayShot?: (shot: Shot) => void;
+  previewingShotId?: string | null;
+}
+
+// --- DRAGGABLE ITEM ---
 const DraggableShotItem = memo(function DraggableShotItem({
   shot,
   isActive,
@@ -21,9 +51,10 @@ const DraggableShotItem = memo(function DraggableShotItem({
   onDelete,
   onPlay,
   isPlaying,
-}: any) {
+}: DraggableShotProps) {
   const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
     id: `library-${shot.id}`,
+    // OPTIMIZATION: Only pass necessary data
     data: { type: "shot", shot },
   });
 
@@ -34,16 +65,19 @@ const DraggableShotItem = memo(function DraggableShotItem({
       {...attributes}
       onClick={onClick}
       className={`
-                relative group aspect-video rounded border overflow-hidden cursor-grab active:cursor-grabbing
-                ${isActive ? "border-[#D2FF44] ring-1 ring-[#D2FF44]/30" : "border-zinc-800 hover:border-zinc-600"}
-                ${isDragging ? "opacity-50" : ""}
-            `}
+        relative group aspect-video rounded border overflow-hidden cursor-grab active:cursor-grabbing
+        ${isActive ? "border-[#D2FF44] ring-1 ring-[#D2FF44]/30" : "border-zinc-800 hover:border-zinc-600"}
+        ${isDragging ? "opacity-50" : ""}
+        ${isPlaying ? "ring-2 ring-[#D2FF44] ring-offset-2 ring-offset-zinc-900" : ""}
+      `}
     >
       <div className="absolute inset-0 bg-zinc-900">
         {shot.previewBase64 ? (
           <img
             src={shot.previewBase64}
             className="w-full h-full object-cover"
+            alt={shot.name}
+            draggable={false}
           />
         ) : (
           <div className="w-full h-full flex items-center justify-center text-zinc-700">
@@ -53,15 +87,15 @@ const DraggableShotItem = memo(function DraggableShotItem({
       </div>
 
       {/* Hover Actions */}
-      <div className="absolute top-1 right-1 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-        {/* NEW: Play Button for Renders */}
-        {shot.outputVideo && (
+      <div className={`absolute top-1 right-1 flex gap-1 transition-opacity ${isPlaying ? "opacity-100" : "opacity-0 group-hover:opacity-100"}`}>
+        {/* Play Button */}
+        {(shot.outputVideo || shot.audioPath) && (
           <button
             onClick={(e) => {
-              e.stopPropagation(); // Prevents selecting the shot
-              onPlay ? onPlay() : onClick(); // Triggers the preview
+              e.stopPropagation();
+              onPlay();
             }}
-            className="bg-black/60 hover:bg-[#D2FF44] hover:text-black text-white p-1 rounded backdrop-blur"
+            className={`bg-black/60 hover:bg-[#D2FF44] hover:text-black p-1 rounded backdrop-blur ${isPlaying ? "bg-[#D2FF44] text-black" : "text-white"}`}
             title={isPlaying ? "Stop Preview" : "Play Preview"}
           >
             {isPlaying ? (
@@ -91,7 +125,7 @@ const DraggableShotItem = memo(function DraggableShotItem({
 
       {/* Label */}
       <div className="absolute bottom-0 w-full bg-gradient-to-t from-black/90 to-transparent p-1.5 pointer-events-none">
-        <div className="text-[10px] font-bold text-white truncate">
+        <div className={`text-[10px] font-bold truncate ${isPlaying ? "text-[#D2FF44]" : "text-white"}`}>
           {shot.name}
         </div>
       </div>
@@ -99,7 +133,7 @@ const DraggableShotItem = memo(function DraggableShotItem({
   );
 });
 
-// --- MAIN PANEL (Memoized) ---
+// --- MAIN PANEL ---
 const LibraryPanel = memo(function LibraryPanel({
   shots,
   activeShotId,
@@ -109,17 +143,7 @@ const LibraryPanel = memo(function LibraryPanel({
   handleDeleteShot,
   handlePlayShot,
   previewingShotId,
-}: any) {
-  // --- LOCAL PREVIEW STATE ---
-  const [previewShot, setPreviewShot] = useState<any>(null);
-
-  const togglePreview = (shot: any) => {
-    if (previewShot?.id === shot.id) {
-      setPreviewShot(null);
-    } else {
-      setPreviewShot(shot);
-    }
-  };
+}: LibraryPanelProps) {
 
   return (
     <div className="h-full flex flex-col">
@@ -136,19 +160,19 @@ const LibraryPanel = memo(function LibraryPanel({
       </div>
       <div className="flex-1 overflow-y-auto p-4 content-start">
         <div className="grid grid-cols-2 gap-2">
-          {shots.map((shot: any) => (
+          {shots.map((shot) => (
             <DraggableShotItem
               key={shot.id}
               shot={shot}
               isActive={activeShotId === shot.id}
               onClick={() => setActiveShotId(shot.id)}
-              onExtend={(e: any) => {
+              onExtend={(e) => {
                 e.stopPropagation();
                 handleExtendShot(shot);
               }}
-              onDelete={(e: any) => handleDeleteShot(e, shot.id)}
-              onPlay={() => togglePreview(shot)}
-              isPlaying={previewShot?.id === shot.id}
+              onDelete={(e) => handleDeleteShot(e, shot.id)}
+              onPlay={() => handlePlayShot && handlePlayShot(shot)}
+              isPlaying={previewingShotId === shot.id}
             />
           ))}
           <button
@@ -163,37 +187,6 @@ const LibraryPanel = memo(function LibraryPanel({
           </button>
         </div>
       </div>
-
-      {/* --- PREVIEW OVERLAY (Solves "Needs Video" & "Separate from Timeline") --- */}
-      {previewShot && previewShot.outputVideo && (
-        <div
-          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm animate-in fade-in duration-200"
-          onClick={() => setPreviewShot(null)}
-        >
-          <div
-            className="relative bg-zinc-900 border border-zinc-800 rounded-xl shadow-2xl overflow-hidden max-w-[80vw] max-h-[80vh] flex flex-col"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between px-4 py-2 border-b border-zinc-800 bg-zinc-900/50">
-              <span className="text-xs font-bold text-zinc-400">
-                {previewShot.name}
-              </span>
-              <button
-                onClick={() => setPreviewShot(null)}
-                className="text-zinc-500 hover:text-white"
-              >
-                <X size={16} />
-              </button>
-            </div>
-            <video
-              src={`http://localhost:3456/video/${previewShot.outputVideo.replace(/\\/g, "/")}`}
-              autoPlay
-              controls
-              className="max-w-full max-h-[calc(80vh-40px)] outline-none bg-black"
-            />
-          </div>
-        </div>
-      )}
     </div>
   );
 });
