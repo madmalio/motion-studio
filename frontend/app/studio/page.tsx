@@ -69,6 +69,7 @@ declare global {
             sceneId: string,
             options: any,
           ) => Promise<string>;
+          SanitizeLocalFile: (path: string) => Promise<string>;
         };
       };
     };
@@ -100,6 +101,7 @@ interface Shot {
 interface Project {
   id: string;
   name: string;
+  fps?: number;
 }
 
 interface Scene {
@@ -204,7 +206,6 @@ function StudioContent() {
     quality: "medium",
   });
 
-  // --- INDEPENDENT TIME STATES ---
   const [currentTime, setCurrentTime] = useState(0);     // Global Timeline
   const [previewTime, setPreviewTime] = useState(0);     // Isolated Library Preview
   const [isPlaying, setIsPlaying] = useState(false);
@@ -215,6 +216,53 @@ function StudioContent() {
     { id: "t1", name: "Video 1", type: "video", clips: [], isMuted: false, isHidden: false, isLocked: false },
     { id: "t2", name: "Audio 1", type: "audio", clips: [], isMuted: false, isHidden: false, isLocked: false },
   ]);
+
+  const [isPrerendering, setIsPrerendering] = useState(false);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    // Determine if we need to render
+    // If tracks are empty, or just initialized, maybe skip?
+    if (!project || !scene || !initialized.current) return;
+
+    // Invalidate Cache Immediately on any change (Draft Mode)
+    // Only clear if we have a url, to avoid needless state updates
+    if (previewUrl) setPreviewUrl(null);
+
+    const timer = setTimeout(async () => {
+      setIsPrerendering(true);
+      console.log("⚡ Auto-Prerendering...");
+
+      // Construct Timeline Object
+      const legacyTracks = tracks.map((t) =>
+        t.clips.map((c) => ({
+          ...c,
+          timelineId: c.id,
+          startTime: c.start,
+          trimStart: c.offset,
+          outputVideo: t.type === "video" ? c.src : undefined,
+          audioPath: t.type === "audio" ? c.src : undefined,
+        }))
+      );
+      const legacySettings = tracks.map((t) => ({ name: t.name, type: t.type, visible: !t.isHidden, locked: t.isLocked }));
+      const timelineObj = { tracks: legacyTracks, trackSettings: legacySettings };
+
+      try {
+        // @ts-ignore
+        const url = await window.go.main.App.RenderTimelinePreview(project.id, scene.id, timelineObj);
+        if (url && url.startsWith("http")) {
+          setPreviewUrl(url);
+          console.log("⚡ Prerender Complete");
+        }
+      } catch (e) {
+        console.error("Prerender Failed", e);
+      } finally {
+        setIsPrerendering(false);
+      }
+    }, 2000); // 2 Second Debounce
+
+    return () => clearTimeout(timer);
+  }, [tracks, project, scene]);
 
   const [activeDragItem, setActiveDragItem] = useState<any>(null);
   const [zoom, setZoom] = useState(11);
@@ -366,12 +414,12 @@ function StudioContent() {
   }, [currentTime, totalDuration, previewingShotId, displayDuration, previewTime]);
 
   // Break out of Preview mode if the user clicks the global timeline
-  const handleTimelineTimeChange = useCallback((time: number) => {
+  const handleTimelineTimeChange: React.Dispatch<React.SetStateAction<number>> = useCallback((value) => {
     if (previewingShotId) {
       setPreviewingShotId(null);
       setIsPlaying(false);
     }
-    setCurrentTime(time);
+    setCurrentTime(value);
   }, [previewingShotId]);
 
   const handlePlayShot = useCallback(
@@ -709,7 +757,7 @@ function StudioContent() {
 
   const handleDragOver = (event: DragOverEvent) => { };
 
-  const handleDragEnd = (event: DragEndEvent) => {
+  const handleDragEnd = async (event: DragEndEvent) => {
     const { active, over } = event;
     setActiveDragItem(null);
 
@@ -728,16 +776,64 @@ function StudioContent() {
     if (shotData) {
       recordHistory();
       const dropX = (active.rect.current.translated?.left || 0) - over.rect.left;
-      const startTime = Math.max(0, dropX / zoom);
+      let startTime = Math.max(0, dropX / zoom);
+
+      // Quantize to frame
+      const fps = project?.fps || 30; // Use project FPS
+      startTime = Math.round(startTime * fps) / fps;
+
+      // --- DURATION FIX: Load Metadata ---
+      let duration = shotData.duration || 4;
+      const src = shotData.outputVideo || shotData.audioPath || shotData.sourceImage || "";
+      const isVideoOrAudio = shotData.outputVideo || shotData.audioPath;
+
+      if (isVideoOrAudio && src) {
+        try {
+          // --- PROXY ENGINE: Sanitize Dropped File ---
+          // This ensures local files get the same "Fast Decode" treatment as generated ones.
+          // Note: This operation might take a moment for large files. 
+          // Ideally we show a spinner, but for now we await it to guarantee stability.
+          console.log("Sanitizing/Proxying file...", src);
+          // @ts-ignore
+          await window.go.main.App.SanitizeLocalFile(src);
+          console.log("Sanitization complete.");
+
+          // Helper to get safe URL (local server)
+          const getSafeUrl = (filePath: string) => {
+            if (!filePath) return "";
+            if (filePath.startsWith("http") || filePath.startsWith("blob")) return filePath;
+            return `http://localhost:3456/video/${encodeURIComponent(filePath.replace(/\\/g, "/"))}`;
+          };
+
+          const mediaUrl = getSafeUrl(src);
+          const element = document.createElement(shotData.audioPath ? 'audio' : 'video');
+          element.src = mediaUrl;
+
+          await new Promise((resolve) => {
+            element.onloadedmetadata = () => {
+              if (element.duration && isFinite(element.duration)) {
+                duration = element.duration;
+              }
+              resolve(true);
+            };
+            element.onerror = () => resolve(false);
+            // Timeout to prevent hanging
+            setTimeout(() => resolve(false), 2000);
+          });
+        } catch (e) {
+          console.error("Failed to load metadata or sanitize:", e);
+        }
+      }
 
       const newClip: TimelineClip = {
         id: crypto.randomUUID(),
         type: shotData.outputVideo ? "video" : (shotData.audioPath ? "audio" : "video"),
         name: shotData.name,
-        src: shotData.outputVideo || shotData.audioPath || shotData.sourceImage || "",
+        src: src,
         start: startTime,
-        duration: shotData.duration || 4,
+        duration: duration,
         offset: 0,
+        sourceDuration: duration,
         color: shotData.audioPath ? "bg-purple-600" : "bg-blue-600",
         thumbnail: shotData.previewBase64,
       };
@@ -749,6 +845,7 @@ function StudioContent() {
         }
         return next;
       });
+      setPreviewUrl(null); // Invalidate Cache
     }
   };
 
@@ -802,6 +899,8 @@ function StudioContent() {
     </div>
   );
 
+
+
   return (
     <DndContext sensors={sensors} collisionDetection={pointerWithin} onDragStart={handleDragStart} onDragOver={handleDragOver} onDragEnd={handleDragEnd}>
       <div className="flex-1 w-full flex flex-col overflow-hidden bg-[#09090b]">
@@ -809,9 +908,26 @@ function StudioContent() {
           <h1 className="text-sm font-bold text-white flex items-center gap-2">
             {scene.name} <span className="text-zinc-600">/</span> <span className="text-zinc-500 font-normal">{project.name}</span>
           </h1>
-          <button onClick={() => setShowExportModal(true)} className="flex items-center gap-2 px-3 py-1.5 bg-[#D2FF44] text-black text-xs font-bold rounded hover:bg-[#b8e635] transition-colors">
-            <Download size={14} /> Export
-          </button>
+          <div className="flex gap-2 items-center">
+            {/* STATUS INDICATORS */}
+            {isPrerendering && (
+              <div className="flex items-center gap-1.5 px-3 py-1.5 bg-yellow-500/10 border border-yellow-500/20 rounded-md">
+                <Loader2 size={12} className="animate-spin text-yellow-500" />
+                <span className="text-[10px] font-medium text-yellow-500 uppercase tracking-wide">Rendering Preview</span>
+              </div>
+            )}
+            {!isPrerendering && previewUrl && (
+              <div className="flex items-center gap-1.5 px-3 py-1.5 bg-green-500/10 border border-green-500/20 rounded-md transition-all animate-in fade-in zoom-in duration-300">
+                <div className="w-1.5 h-1.5 rounded-full bg-green-500 shadow-[0_0_8px_#22c55e]" />
+                <span className="text-[10px] font-medium text-green-500 uppercase tracking-wide">Cached</span>
+              </div>
+            )}
+
+            <button
+              onClick={() => setShowExportModal(true)} className="flex items-center gap-2 px-3 py-1.5 bg-[#D2FF44] text-black text-xs font-bold rounded hover:bg-[#b8e635] transition-colors">
+              <Download size={14} /> Export
+            </button>
+          </div>
         </header>
 
         <div className="flex-1 flex overflow-hidden">
@@ -859,6 +975,7 @@ function StudioContent() {
                   projectFps={projectFps}
                   volume={masterVolume}
                   videoBlobs={videoBlobs}
+                  previewUrl={previewUrl}
                 />
               </div>
 
@@ -892,6 +1009,7 @@ function StudioContent() {
                   onSelectClip={setSelectedClipId}
                   onDeleteClip={handleDeleteClip}
                   onRegisterHistory={recordHistory}
+                  fps={projectFps}
                 />
               </div>
             </div>

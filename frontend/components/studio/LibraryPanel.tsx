@@ -12,13 +12,22 @@ import {
 import { memo } from "react";
 
 // --- TYPES ---
-interface Shot {
+export interface Shot {
   id: string;
+  sceneId: string;
   name: string;
+  sourceImage: string;
+  audioPath: string;
+  audioStart?: number;
+  audioDuration?: number;
+  waveform?: number[];
   previewBase64?: string;
-  outputVideo?: string;
-  audioPath?: string;
-  duration?: number;
+  prompt: string;
+  motionStrength: number;
+  seed: number;
+  duration: number;
+  status: string;
+  outputVideo: string;
 }
 
 interface DraggableShotProps {
@@ -36,10 +45,11 @@ interface LibraryPanelProps {
   activeShotId: string | null;
   setActiveShotId: (id: string) => void;
   handleAddShot: () => void;
-  handleExtendShot: (shot: Shot) => void;
+  handleExtendShot: (shot: Shot) => void | Promise<void>;
   handleDeleteShot: (e: React.MouseEvent, id: string) => void;
   handlePlayShot?: (shot: Shot) => void;
   previewingShotId?: string | null;
+  projectId?: string;
 }
 
 // --- DRAGGABLE ITEM ---

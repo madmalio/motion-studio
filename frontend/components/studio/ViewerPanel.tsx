@@ -16,6 +16,7 @@ interface ViewerPanelProps {
   projectFps?: number;
   volume?: number;
   videoBlobs: Map<string, string>;
+  previewUrl: string | null;
 }
 
 export default function ViewerPanel({
@@ -28,6 +29,7 @@ export default function ViewerPanel({
   projectFps = 30,
   volume = 1,
   videoBlobs,
+  previewUrl,
 }: ViewerPanelProps) {
   const playerRef = useRef<PlayerRef>(null);
 
@@ -47,12 +49,16 @@ export default function ViewerPanel({
     if (isPlaying || !playerRef.current) return; // Player drives time when playing
 
     const targetFrame = Math.floor(currentTime * projectFps);
+    const durationInFrames = Math.ceil(totalDuration * projectFps);
     const currentFrame = playerRef.current.getCurrentFrame();
 
-    if (Math.abs(currentFrame - targetFrame) > 1) {
-      playerRef.current.seekTo(targetFrame);
+    // Clamp target to prevent "position > duration" error
+    const clampedTarget = Math.min(targetFrame, Math.max(0, durationInFrames - 1));
+
+    if (Math.abs(currentFrame - clampedTarget) > 1) {
+      playerRef.current.seekTo(clampedTarget);
     }
-  }, [currentTime, projectFps, isPlaying]);
+  }, [currentTime, projectFps, isPlaying, totalDuration]);
 
   // --- POLL CURRENT FRAME (Driving Timeline Playhead) ---
   useEffect(() => {
@@ -85,8 +91,9 @@ export default function ViewerPanel({
       volume,
       fps: projectFps,
       videoBlobs,
+      previewUrl,
     }),
-    [tracks, volume, projectFps, videoBlobs]
+    [tracks, volume, projectFps, videoBlobs, previewUrl]
   );
 
   return (

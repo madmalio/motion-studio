@@ -62,7 +62,7 @@ interface SimpleTimelineProps {
   tracks: TimelineTrack[];
   setTracks: React.Dispatch<React.SetStateAction<TimelineTrack[]>>;
   currentTime: number;
-  setCurrentTime: (time: number) => void;
+  setCurrentTime: React.Dispatch<React.SetStateAction<number>>;
   zoom: number;
   setZoom: React.Dispatch<React.SetStateAction<number>>;
   isPlaying: boolean;
@@ -75,6 +75,7 @@ interface SimpleTimelineProps {
   onSelectClip?: (clipId: string | null) => void;
   onDeleteClip?: (clipId: string) => void;
   onRegisterHistory?: () => void;
+  fps?: number; // <--- NEW PROP
 }
 
 // --- 1. THE RULER (Fixed: Optional Labels) ---
@@ -302,11 +303,10 @@ const TrackRow = memo(
               <div
                 key={clip.id}
                 className={`absolute top-0 bottom-0 border flex flex-col overflow-hidden cursor-pointer select-none group/clip rounded-sm
-                ${
-                  track.type === "audio"
+                ${track.type === "audio"
                     ? "bg-[#1a1a1c] border-white/10"
                     : "bg-[#375a6c] border-[#213845]"
-                }
+                  }
                 ${track.isLocked ? "opacity-50 cursor-not-allowed" : "hover:brightness-110"}
                 ${dragState?.clipId === clip.id ? "ring-2 ring-[#D2FF44] z-30 opacity-80" : "z-10"}
                 ${isSelected ? "ring-2 ring-white z-20" : ""} 
@@ -502,7 +502,17 @@ export default function SimpleTimeline({
   onSelectClip,
   onDeleteClip, // <--- NEW PROP
   onRegisterHistory,
+  fps = 30,
 }: SimpleTimelineProps) {
+  // Helper: Grid Snap (1/fps)
+  const quantizeTime = useCallback(
+    (time: number) => {
+      const frameDuration = 1 / fps;
+      return Math.round(time / frameDuration) * frameDuration;
+    },
+    [fps],
+  );
+
   const containerRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const horizontalScrollRef = useRef<HTMLDivElement>(null);
@@ -574,14 +584,25 @@ export default function SimpleTimeline({
         return;
       }
 
-      switch (e.key.toLowerCase()) {
+      switch (e.key) {
+        case "ArrowLeft":
+          e.preventDefault();
+          setCurrentTime((prev) => Math.max(0, prev - 1 / (fps || 30)));
+          break;
+        case "ArrowRight":
+          e.preventDefault();
+          setCurrentTime((prev) => prev + 1 / (fps || 30));
+          break;
         case "a":
+        case "A":
           setActiveTool("select");
           break;
         case "b":
+        case "B":
           setActiveTool("split");
           break;
         case "n":
+        case "N":
           setIsSnappingEnabled((prev) => !prev);
           break;
       }
@@ -672,7 +693,8 @@ export default function SimpleTimeline({
   const handleSplitClip = useCallback(
     (trackIndex: number, x: number, zoom: number) => {
       if (onRegisterHistory) onRegisterHistory();
-      const splitTime = x / zoom;
+      const rawSplitTime = x / zoom;
+      const splitTime = quantizeTime(rawSplitTime);
 
       setTracks((prev) => {
         const newTracks = [...prev];
@@ -967,6 +989,9 @@ export default function SimpleTimeline({
               dragState.originalStart + deltaSeconds + snapDelta,
             );
 
+            // Quantize
+            newStart = quantizeTime(newStart);
+
             if (clip.start !== newStart) {
               clip.start = newStart;
               newTracks[currentTrackIdx].clips[clipIndex] = clip;
@@ -984,6 +1009,9 @@ export default function SimpleTimeline({
 
             // Cap at max duration (source length)
             newDuration = Math.min(newDuration, maxDuration);
+
+            // Quantize
+            newDuration = quantizeTime(newDuration);
 
             if (clip.duration !== newDuration) {
               clip.duration = newDuration;
@@ -1011,12 +1039,36 @@ export default function SimpleTimeline({
             const newDuration = dragState.originalDuration - shift;
             const newOffset = dragState.originalOffset + shift;
 
-            if (clip.start !== newStart || clip.duration !== newDuration) {
-              clip.start = newStart;
-              clip.duration = newDuration;
-              clip.offset = newOffset;
-              newTracks[currentTrackIdx].clips[clipIndex] = clip;
-              hasTrackChange = true;
+            // Quantize Start & Duration (Offset is derived)
+            const quantizedStart = quantizeTime(newStart);
+            const quantDiff = quantizedStart - newStart;
+
+            // Adjust others by the quantization difference to keep them in sync
+            // If we snap start to left, duration increases, offset decreases?
+            // Actually, simplest is to quantize the shift amount itself?
+            // No, shift + snapDelta is the total movement.
+
+            // Better: Quantize the *Start* and calculate the rest from there.
+            if (clip.start !== quantizedStart) {
+              const diff = quantizedStart - dragState.originalStart; // Total change from original
+
+              // Apply bounds again on the quantized shift?
+              // No, just clamp the quantized start
+
+              const finalStart = Math.max(0, quantizedStart);
+              const finalShift = finalStart - dragState.originalStart;
+
+              // Re-calculate based on quantized shift
+              const finalDuration = dragState.originalDuration - finalShift;
+              const finalOffset = dragState.originalOffset + finalShift;
+
+              if (finalDuration >= 0.1) { // Min duration check
+                clip.start = finalStart;
+                clip.duration = finalDuration;
+                clip.offset = finalOffset;
+                newTracks[currentTrackIdx].clips[clipIndex] = clip;
+                hasTrackChange = true;
+              }
             }
           }
         }
@@ -1161,6 +1213,25 @@ export default function SimpleTimeline({
 
         if (hasChanges) {
           track.clips = [...resolvedClips, draggedClip];
+
+          // --- GAP CLOSING PASS ---
+          // Sort clips by start time
+          track.clips.sort((a, b) => a.start - b.start);
+
+          for (let i = 0; i < track.clips.length - 1; i++) {
+            const current = track.clips[i];
+            const next = track.clips[i + 1];
+            const currentEnd = current.start + current.duration;
+            const gap = next.start - currentEnd;
+
+            // --- Gap Closing (Visual Double-Buffer Mode) ---
+            // REVERTED Physical Overlap. Just snap to exact end. 
+            // TimelineComposition handles visual overlap via double-buffering.
+            if (gap > 0 && gap < 0.1) {
+              next.start = currentEnd;
+            }
+          }
+
           newTracks[trackIdx] = track;
           return newTracks;
         }

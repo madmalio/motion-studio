@@ -58,6 +58,10 @@ export function RenderShot(arg1:string,arg2:string,arg3:main.Shot,arg4:string):P
 
 export function RenderTimeline(arg1:string):Promise<string>;
 
+export function RenderTimelinePreview(arg1:string,arg2:string,arg3:main.TimelineData):Promise<string>;
+
+export function SanitizeLocalFile(arg1:string):Promise<string>;
+
 export function SaveShots(arg1:string,arg2:string,arg3:Array<main.Shot>):Promise<void>;
 
 export function SaveTimeline(arg1:string,arg2:string,arg3:main.TimelineData):Promise<void>;

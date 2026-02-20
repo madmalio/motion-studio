@@ -114,6 +114,14 @@ export function RenderTimeline(arg1) {
   return window['go']['main']['App']['RenderTimeline'](arg1);
 }
 
+export function RenderTimelinePreview(arg1, arg2, arg3) {
+  return window['go']['main']['App']['RenderTimelinePreview'](arg1, arg2, arg3);
+}
+
+export function SanitizeLocalFile(arg1) {
+  return window['go']['main']['App']['SanitizeLocalFile'](arg1);
+}
+
 export function SaveShots(arg1, arg2, arg3) {
   return window['go']['main']['App']['SaveShots'](arg1, arg2, arg3);
 }

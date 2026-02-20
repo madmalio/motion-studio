@@ -1020,15 +1020,21 @@ loop:
 func (a *App) sanitizeVideo(path string) error {
 	tempPath := path + ".temp.mp4"
 
-	// ffmpeg -i input -c:v libx264 -pix_fmt yuv420p -profile:v main -level 3.1 -preset ultrafast -c:a copy output
+	// FIX: Optimized for Editing Performance (Proxy-like settings)
+	// -preset ultrafast: Encodes as fast as possible
+	// -tune fastdecode: Optimizes output for playback speed
+	// -g 15: Keyframe every 15 frames (0.5s) for instant seeking
+	// -pix_fmt yuv420p: Maximum compatibility
 	cmd := exec.Command("ffmpeg",
 		"-y",
 		"-i", path,
 		"-c:v", "libx264",
-		"-pix_fmt", "yuv420p", // Forces standard pixel format
-		"-preset", "ultrafast", // Fast encoding
-		"-c:a", "aac", // Force AAC audio (Web Standard)
-		"-shortest", // Ensure audio doesn't overrun video duration
+		"-pix_fmt", "yuv420p",
+		"-preset", "ultrafast",
+		"-tune", "fastdecode",
+		"-g", "15",
+		"-sc_threshold", "0",
+		"-c:a", "aac",
 		tempPath,
 	)
 
@@ -1038,6 +1044,17 @@ func (a *App) sanitizeVideo(path string) error {
 
 	// Replace original with sanitized version
 	return os.Rename(tempPath, path)
+}
+
+// SanitizeLocalFile exposes the sanitize logic to the frontend for dropped files
+func (a *App) SanitizeLocalFile(path string) (string, error) {
+	// 1. Check if already sanitized (optional, but good for performance)
+	// For now, we just run it. The ffmpeg command overwrites safely via temp file.
+	err := a.sanitizeVideo(path)
+	if err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 func (a *App) getVideoDuration(path string) float64 {
@@ -1400,13 +1417,21 @@ func (a *App) ExtractLastFrame(inputPath string) string {
 		return outputPath
 	}
 
-	// 2. If input is video, run FFmpeg
-	// Use -ss 0 to get the first frame. This is robust for short videos where -sseof -3 fails.
-	cmd := exec.Command("ffmpeg", "-y", "-i", inputPath, "-ss", "0", "-vframes", "1", outputPath)
+	// 2. If input is video, find the exact duration
+	duration := a.getVideoDuration(inputPath)
+
+	// Safely seek to 0.1 seconds before the very end to guarantee a valid visual frame
+	seekTime := 0.0
+	if duration > 0.1 {
+		seekTime = duration - 0.1
+	}
+
+	// Run FFmpeg: Note that placing -ss BEFORE -i makes the seek lightning fast
+	cmd := exec.Command("ffmpeg", "-y", "-ss", fmt.Sprintf("%.3f", seekTime), "-i", inputPath, "-vframes", "1", outputPath)
 
 	err := cmd.Run()
 	if err != nil {
-		fmt.Printf("FFmpeg Error: %v\n", err)
+		fmt.Printf("FFmpeg Error extracting last frame: %v\n", err)
 		return ""
 	}
 
@@ -1975,6 +2000,186 @@ func (a *App) runFFmpegWithProgress(args []string, label string) error {
 	}()
 
 	return cmd.Wait()
+}
+
+// RenderTimelinePreview generates a fast, temporary preview of the entire timeline
+func (a *App) RenderTimelinePreview(projectId string, sceneId string, timeline TimelineData) string {
+	// Re-use the "Export" logic, but simplified for speed
+	// Ideally we would refactor ExportVideo to be reusable, but for safety in this critical fix,
+	// we will duplicate the "Pass 2" logic which handles the concat.
+
+	// 1. Analyze Timeline (Flatten)
+	// We need to replicate the flattening logic from ExportVideo...
+	// Actually, to avoid code duplication and risk, let's call ExportVideo?
+	// No, ExportVideo prompts for a file dialog.
+	// Let's copy just the necessary parts tailored for "Preview".
+
+	// --- PART 1: FLATTEN LOGIC (Simplified) ---
+	tempDir := os.TempDir()
+	blackPath := filepath.Join(tempDir, "black.png")
+	if _, err := os.Stat(blackPath); os.IsNotExist(err) {
+		data, _ := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+		os.WriteFile(blackPath, data, 0644)
+	}
+
+	type Item struct {
+		StartTime   float64
+		Duration    float64
+		TrimStart   float64
+		OutputVideo string
+		AudioPath   string
+		SourceImage string
+		PairID      string
+	}
+
+	visiblePairIDs := make(map[string]bool)
+	timePoints := []float64{0.0}
+	var tracks [][]Item
+
+	for _, rawTrack := range timeline.Tracks {
+		var track []Item
+		for _, rawItem := range rawTrack {
+			item := Item{}
+			if v, ok := rawItem["startTime"].(float64); ok {
+				item.StartTime = v
+			}
+			if v, ok := rawItem["duration"].(float64); ok {
+				item.Duration = v
+			}
+			if v, ok := rawItem["trimStart"].(float64); ok {
+				item.TrimStart = v
+			}
+			if v, ok := rawItem["outputVideo"].(string); ok {
+				item.OutputVideo = v
+			}
+			if v, ok := rawItem["audioPath"].(string); ok {
+				item.AudioPath = v
+			}
+			if v, ok := rawItem["sourceImage"].(string); ok {
+				item.SourceImage = v
+			}
+			if v, ok := rawItem["pairId"].(string); ok {
+				item.PairID = v
+			}
+
+			track = append(track, item)
+			timePoints = append(timePoints, item.StartTime)
+			timePoints = append(timePoints, item.StartTime+item.Duration)
+		}
+		tracks = append(tracks, track)
+	}
+
+	sort.Float64s(timePoints)
+	uniquePoints := []float64{}
+	if len(timePoints) > 0 {
+		uniquePoints = append(uniquePoints, timePoints[0])
+		for i := 1; i < len(timePoints); i++ {
+			if timePoints[i] > timePoints[i-1]+0.01 {
+				uniquePoints = append(uniquePoints, timePoints[i])
+			}
+		}
+	}
+
+	var segments []RenderSegment
+
+	for i := 0; i < len(uniquePoints)-1; i++ {
+		start := uniquePoints[i]
+		end := uniquePoints[i+1]
+		mid := (start + end) / 2
+		dur := end - start
+
+		var activeItem *Item
+		// Find Video/Image
+		for tIdx, track := range tracks {
+			if tIdx < len(timeline.TrackSettings) {
+				ts := timeline.TrackSettings[tIdx]
+				if !ts.Visible {
+					continue
+				}
+				if ts.Type == "audio" || strings.HasPrefix(ts.Name, "A") {
+					continue
+				}
+			}
+			foundClip := false
+			for _, item := range track {
+				if mid >= item.StartTime && mid < item.StartTime+item.Duration {
+					itemCopy := item
+					activeItem = &itemCopy
+					foundClip = true
+					break
+				}
+			}
+			if foundClip {
+				break
+			}
+		}
+
+		if activeItem != nil {
+			if activeItem.PairID != "" {
+				visiblePairIDs[activeItem.PairID] = true
+			}
+			offset := start - activeItem.StartTime + activeItem.TrimStart
+			source := activeItem.OutputVideo
+			if source == "" {
+				source = activeItem.SourceImage
+			}
+
+			// Silence logic not needed for preview video-only test first
+			segments = append(segments, RenderSegment{
+				SourcePath: source,
+				InPoint:    offset,
+				OutPoint:   offset + dur,
+				Duration:   dur,
+				IsImage:    strings.HasSuffix(source, ".png") || strings.HasSuffix(source, ".jpg"),
+			})
+		} else {
+			segments = append(segments, RenderSegment{
+				SourcePath: blackPath,
+				Duration:   dur,
+				IsImage:    true,
+				InPoint:    0,
+				OutPoint:   dur,
+			})
+		}
+	}
+
+	// --- PART 2: RENDER (Fast) ---
+	var concat strings.Builder
+	concat.WriteString("ffconcat version 1.0\n")
+	for _, seg := range segments {
+		safePath := strings.ReplaceAll(filepath.ToSlash(seg.SourcePath), "'", "'\\''")
+		concat.WriteString(fmt.Sprintf("file '%s'\n", safePath))
+		if !seg.IsImage {
+			concat.WriteString(fmt.Sprintf("inpoint %f\n", seg.InPoint))
+			concat.WriteString(fmt.Sprintf("outpoint %f\n", seg.OutPoint))
+		}
+		if seg.IsImage {
+			concat.WriteString(fmt.Sprintf("duration %f\n", seg.Duration))
+		}
+	}
+
+	listPath := filepath.Join(tempDir, fmt.Sprintf("preview_list_%d.txt", time.Now().Unix()))
+	os.WriteFile(listPath, []byte(concat.String()), 0644)
+
+	previewFilename := fmt.Sprintf("preview_%d.mp4", time.Now().Unix())
+	previewPath := filepath.Join(tempDir, previewFilename)
+
+	// PREVIEW SETTINGS: Ultrafast, CRF 28 (Low Quality for Speed)
+	// We assume Sanitized Files (yuv420p) so concat is safeish, but we re-encode to be sure of resolution.
+	args := []string{
+		"-y", "-f", "concat", "-safe", "0", "-i", listPath,
+		"-c:v", "libx264", "-pix_fmt", "yuv420p",
+		"-preset", "ultrafast", "-crf", "28",
+		"-an", // No Audio for now (focus on video gaps), or add audio later if needed
+		previewPath,
+	}
+
+	if err := a.runFFmpegWithProgress(args, "Preview"); err != nil {
+		return "Error: " + err.Error()
+	}
+
+	// Return URL
+	return fmt.Sprintf("http://localhost:3456/video/%s", url.PathEscape(filepath.ToSlash(previewPath)))
 }
 
 // =========================================================================
