@@ -1,4 +1,5 @@
-import { AbsoluteFill, Video, Audio, Sequence, Img, useCurrentFrame } from "remotion";
+import React from "react";
+import { AbsoluteFill, Sequence, Img, useCurrentFrame, Video, Audio } from "remotion";
 import { RemotionManifest } from "@/lib/remotionBridge";
 
 // Helper to safely encode Windows paths for URLs
@@ -11,44 +12,8 @@ const getSafeUrl = (filePath: string) => {
   return `http://localhost:3456/video/${encodeURIComponent(filePath.replace(/\\/g, "/"))}`;
 };
 
-// --- BUFFERED VIDEO COMPONENT ---
-// Grand Unified Strategy (The Proxy Force):
-// 1. ALL clips get a massive 3-second (90 frame) warm-up buffer.
-// 2. Trimmed clips (with handles) play at 1.0x speed (Seamless).
-// 3. Raw clips (no handles) play at 0.1x speed (Safe Slow-Mo).
-//    - This ensures decoder is active without eating too much content.
-const BufferedVideo = ({ src, startFrom, volume, playbackRate, onError, preBufferFrames, preRollSpeed }: any) => {
-  const frame = useCurrentFrame();
-
-  // Opacity Logic:
-  // If we are in the pre-buffer window, be invisible.
-  const isPreroll = frame < preBufferFrames;
-
-  // Speed Logic:
-  // During pre-roll, usage the calculated safe speed (1.0 or 0.1).
-  // After pre-roll, use normal speed (usually 1.0).
-  const currentRate = isPreroll ? (preRollSpeed || 1) : (playbackRate || 1);
-
-  return (
-    <Video
-      src={src}
-      crossOrigin="anonymous"
-      startFrom={startFrom}
-      style={{
-        width: "100%",
-        height: "100%",
-        objectFit: "contain",
-        backgroundColor: "transparent",
-        opacity: isPreroll ? 0 : 1, // Fade in instantly after pre-roll
-      }}
-      volume={volume}
-      // @ts-ignore
-      preload="auto"
-      playbackRate={currentRate}
-      onError={onError}
-    />
-  );
-};
+// --- DIRECT VIDEO COMPONENT ---
+// Removed BufferedVideo as modern Remotion native Video component with correct startFrom/duration handles this properly.
 
 export const TimelineComposition = (props: any) => {
   const {
@@ -56,28 +21,12 @@ export const TimelineComposition = (props: any) => {
     fps,
     volume: globalVolume,
     videoBlobs,
+    isPlaying,
   } = props as RemotionManifest & {
     volume: number;
     videoBlobs?: Map<string, string>;
-    previewUrl?: string | null;
+    isPlaying?: boolean;
   };
-
-  // --- CACHED PLAYBACK MODE ---
-  // If a prerender exists, we bypass the complex track stacking and just play the flat file.
-  // This guarantees 0 gaps during playback.
-  if (props.previewUrl) {
-    return (
-      <AbsoluteFill style={{ backgroundColor: "black" }}>
-        <Video
-          src={props.previewUrl}
-          style={{ width: "100%", height: "100%", objectFit: "contain" }}
-          crossOrigin="anonymous"
-          // @ts-ignore
-          preload="auto"
-        />
-      </AbsoluteFill>
-    );
-  }
 
   return (
     <AbsoluteFill style={{ backgroundColor: "black" }}>
@@ -110,123 +59,119 @@ export const TimelineComposition = (props: any) => {
               trackIsMuted: track.isMuted,
               startFrame, // Original Start
               durationInFrames, // Original Duration
-              // Z-INDEX SORTING: -clipIdx ensures later clips (Clip 2) are LOWER in the stack than Clip 1
-              // Crucial so the Universal Buffer of Clip 2 hides behind Clip 1.
-              score: (tracks.length - trackIdx) * 1000 - clipIdx,
+              // Z-INDEX SORTING: (100 - trackIdx) * 1000 ensures Track 0 (top of UI) is rendered LATER than Track 1 (so it's ON TOP)
+              score: (100 - trackIdx) * 1000 + clipIdx,
             };
           });
         });
 
-        // 2. Sort by Score (Low -> High)
         allClips.sort((a, b) => a.score - b.score);
 
-        // 3. Render
-        return allClips.map((item) => {
-          const { clip: c, startFrame, durationInFrames, trackIsMuted } = item;
-
-          let renderStart = startFrame;
-          let renderDuration = durationInFrames;
-          let preBuffer = 0;
-          let driftOffset = 0;
-          let preRollSpeed = 1;
-
-          // Apply Universal Buffer to VIDEO only
-          if (c.type !== 'audio' && !/\.(jpg|jpeg|png|webp|gif)$/i.test(c.src || "")) {
-            // PROXY ENGINE ENABLED:
-            // With the backend now producing "Fast Decode" media (GOP 15), we don't need massive buffers.
-            // We stick to the "Intelligent" Strategy (Scenario A/B) at 1.0x speed.
-            const TARGET_BUFFER = 15; // 0.5s is enough for tuned media
-            const MIN_BUFFER = 3;     // 0.1s floor
-
-            const trimStartFrames = Math.round((c.trimStart || c.offset || 0) * fps);
-
-            if (trimStartFrames >= TARGET_BUFFER) {
-              // Scenario A: Use handle
-              preBuffer = TARGET_BUFFER;
-              driftOffset = TARGET_BUFFER;
-            } else {
-              // Scenario B: Raw clip / No Handle
-              // PROXY ENGINE TUNING:
-              // 0 frames caused a black flash (decoder wake-up > 0ms).
-              // 3 frames caused a visible skip (100ms).
-              // We compromise with a 1-frame Micro-Buffer (33ms).
-              // This should be invisible enough but sufficient for the fast-decode media.
-              preBuffer = 1;
-              driftOffset = 0;
-            }
-
-            preRollSpeed = 1.0; // Strictly stable speed
-
-            renderStart -= preBuffer;
-            renderDuration += preBuffer;
-          }
-
-          // Compensation:
-          const startFromFrames = Math.max(0, Math.round((c.trimStart || c.offset || 0) * fps) - driftOffset);
-
-          // RESOLVE SOURCE
-          let src = c.src || c.file || "";
-          if (videoBlobs && videoBlobs instanceof Map && videoBlobs.has(src)) {
-            src = videoBlobs.get(src)!;
-          } else {
-            src = getSafeUrl(src);
-          }
-
-          if (!src) return null;
-
-          const volume = typeof c.volume === "number" ? c.volume : 1;
-          const finalVolume = volume * (typeof globalVolume === "number" ? globalVolume : 1);
-          const isMuted = finalVolume === 0 || !!trackIsMuted || !!c.isMuted;
-          const isImage = /\.(jpg|jpeg|png|webp|gif)$/i.test(src);
-
-          // Dynamic Volume: Handle Muting & Track Occlusion
-          const volumeFn = (f: number) => {
-            if (isMuted) return 0;
-            // Note: f includes pre-roll frames. 
-            // We align volume logic to logical frames by subtracting preBuffer.
-            const logicalFrame = startFrame + (f - preBuffer);
-
-            // Check against *logical* boundaries of other clips
-            const isOccluded = allClips.some((other) => {
-              if (other.trackIdx >= item.trackIdx) return false;
-              // Check strictly against *logical* boundaries (without buffer)
-              return logicalFrame >= other.startFrame && logicalFrame < (other.startFrame + other.durationInFrames);
-            });
-            return isOccluded ? 0 : finalVolume;
-          };
-
-          return (
-            <Sequence
-              key={item.id}
-              from={renderStart}
-              durationInFrames={renderDuration}
-            >
-              {c.type === "audio" ? (
-                <Audio
-                  src={src}
-                  startFrom={startFromFrames}
-                  volume={volumeFn}
-                  onError={(e) => console.error(`❌ Audio File Failed: ${src}`, e)}
-                />
-              ) : isImage ? (
-                <Img
-                  src={src}
-                  style={{ width: "100%", height: "100%", objectFit: "contain" }}
-                />
-              ) : (
-                <BufferedVideo
-                  src={src}
-                  startFrom={startFromFrames}
-                  volume={volumeFn}
-                  preBufferFrames={preBuffer}
-                  preRollSpeed={preRollSpeed}
-                  onError={(e: any) => console.error(`❌ Video Failed: ${src}`, e)}
-                />
-              )}
-            </Sequence>
-          );
-        });
+        return allClips.map((item) => (
+          <VideoClipRenderer
+            key={item.id}
+            item={item}
+            fps={fps}
+            globalVolume={globalVolume}
+            videoBlobs={videoBlobs}
+            isPlaying={isPlaying}
+          />
+        ));
       })()}
     </AbsoluteFill>
+  );
+};
+
+// --- GAPLESS DOM CLIP RENDERER ---
+const VideoClipRenderer = ({ item, fps, globalVolume, videoBlobs, isPlaying }: {
+  item: any;
+  fps: number;
+  globalVolume: number;
+  videoBlobs?: Map<string, string>;
+  isPlaying?: boolean;
+}) => {
+  const { clip: c, startFrame, durationInFrames, trackIsMuted } = item;
+
+  let src = c.src || c.file || "";
+  if (c.type === "audio") {
+    src = getSafeUrl(src);
+  } else if (videoBlobs && videoBlobs instanceof Map && videoBlobs.has(src)) {
+    src = videoBlobs.get(src)!;
+  } else {
+    src = getSafeUrl(src);
+  }
+
+  if (!src) return null;
+
+  const isImage = /\.(jpg|jpeg|png|webp|gif)$/i.test(src);
+
+  // Remotion Official Warmup: 30 frames
+  // The Component mounts 1 second earlier invisibly to natively prepare the WebCodecs buffer!
+  const PREMOUNT_FRAMES = 30;
+
+  const seqFrom = startFrame;
+  const seqDuration = Math.max(durationInFrames, 1);
+  const startFrom = Math.max(0, Math.round((c.trimStart || c.offset || 0) * fps));
+
+  const volume = typeof c.volume === "number" ? c.volume : 1;
+  const finalVolume = volume * (typeof globalVolume === "number" ? globalVolume : 1);
+  const isMuted = finalVolume === 0 || !!trackIsMuted || !!c.isMuted;
+
+  const volumeVal = isMuted ? 0 : finalVolume;
+
+  return (
+    <Sequence
+      from={seqFrom}
+      durationInFrames={seqDuration}
+      premountFor={PREMOUNT_FRAMES} // NATIVE GAPLESS MAGIC!
+    >
+      <ClipContent
+        c={c}
+        src={src}
+        startFrom={startFrom}
+        volumeVal={volumeVal}
+        isMuted={isMuted}
+        isImage={isImage}
+      />
+    </Sequence>
+  );
+};
+
+// Use a tertiary component to access useCurrentFrame cleanly inside the Sequence
+const ClipContent = ({ c, src, startFrom, volumeVal, isMuted, isImage }: any) => {
+  if (c.type === "audio") {
+    return (
+      <Audio
+        src={src}
+        startFrom={startFrom}
+        volume={volumeVal}
+        muted={isMuted}
+        pauseWhenBuffering={false} // NEVER FREEZE TIMELINE!
+        onError={(e) => console.error(`❌ Audio File Failed: ${src}`, e)}
+      />
+    );
+  }
+
+  if (isImage) {
+    return (
+      <Img
+        src={src}
+        style={{ width: "100%", height: "100%", objectFit: "contain" }}
+      />
+    );
+  }
+
+  return (
+    <div style={{ width: "100%", height: "100%" }}>
+      <Video
+        src={src}
+        startFrom={startFrom}
+        volume={volumeVal}
+        muted={isMuted}
+        style={{ width: "100%", height: "100%", objectFit: "contain", backgroundColor: "transparent" }}
+        pauseWhenBuffering={false} // NEVER FREEZE TIMELINE!
+        onError={(e: any) => console.error(`❌ Video Failed: ${src}`, e)}
+      />
+    </div>
   );
 };

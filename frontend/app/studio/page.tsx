@@ -217,54 +217,8 @@ function StudioContent() {
     { id: "t2", name: "Audio 1", type: "audio", clips: [], isMuted: false, isHidden: false, isLocked: false },
   ]);
 
-  const [isPrerendering, setIsPrerendering] = useState(false);
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-
-  useEffect(() => {
-    // Determine if we need to render
-    // If tracks are empty, or just initialized, maybe skip?
-    if (!project || !scene || !initialized.current) return;
-
-    // Invalidate Cache Immediately on any change (Draft Mode)
-    // Only clear if we have a url, to avoid needless state updates
-    if (previewUrl) setPreviewUrl(null);
-
-    const timer = setTimeout(async () => {
-      setIsPrerendering(true);
-      console.log("⚡ Auto-Prerendering...");
-
-      // Construct Timeline Object
-      const legacyTracks = tracks.map((t) =>
-        t.clips.map((c) => ({
-          ...c,
-          timelineId: c.id,
-          startTime: c.start,
-          trimStart: c.offset,
-          outputVideo: t.type === "video" ? c.src : undefined,
-          audioPath: t.type === "audio" ? c.src : undefined,
-        }))
-      );
-      const legacySettings = tracks.map((t) => ({ name: t.name, type: t.type, visible: !t.isHidden, locked: t.isLocked }));
-      const timelineObj = { tracks: legacyTracks, trackSettings: legacySettings };
-
-      try {
-        // @ts-ignore
-        const url = await window.go.main.App.RenderTimelinePreview(project.id, scene.id, timelineObj);
-        if (url && url.startsWith("http")) {
-          setPreviewUrl(url);
-          console.log("⚡ Prerender Complete");
-        }
-      } catch (e) {
-        console.error("Prerender Failed", e);
-      } finally {
-        setIsPrerendering(false);
-      }
-    }, 2000); // 2 Second Debounce
-
-    return () => clearTimeout(timer);
-  }, [tracks, project, scene]);
-
   const [activeDragItem, setActiveDragItem] = useState<any>(null);
+  const [dragContext, setDragContext] = useState<{ cursorOffsetX: number, cursorOffsetY: number } | null>(null);
   const [zoom, setZoom] = useState(11);
   const [masterVolume, setMasterVolume] = useState(1);
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
@@ -338,15 +292,30 @@ function StudioContent() {
   const [history, setHistory] = useState<any[]>([]);
   const [redoStack, setRedoStack] = useState<any[]>([]);
 
+  // --- FAST DEEP CLONE HELPER ---
+  // Avoids JSON.parse(JSON.stringify) which completely freezes the UI for seconds when processing multi-megabyte base64 thumbnails!
+  const cloneProjectState = (currentTracks: TimelineTrack[], currentShots: Shot[]) => {
+    return {
+      tracks: currentTracks.map((t) => ({
+        ...t,
+        clips: t.clips.map((c) => ({ ...c }))
+      })),
+      shots: currentShots.map((s) => ({
+        ...s,
+        waveform: s.waveform ? [...s.waveform] : undefined
+      }))
+    };
+  };
+
   const recordHistory = () => {
-    setHistory((prev) => [...prev, { tracks: JSON.parse(JSON.stringify(tracks)), shots: JSON.parse(JSON.stringify(shots)) }]);
+    setHistory((prev) => [...prev, cloneProjectState(tracks, shots)]);
     setRedoStack([]);
   };
 
   const undo = () => {
     if (history.length === 0) return;
     const previous = history[history.length - 1];
-    setRedoStack((prev) => [...prev, { tracks: JSON.parse(JSON.stringify(tracks)), shots: JSON.parse(JSON.stringify(shots)) }]);
+    setRedoStack((prev) => [...prev, cloneProjectState(tracks, shots)]);
     setHistory(history.slice(0, -1));
     setTracks(previous.tracks);
     setShots(previous.shots);
@@ -355,7 +324,7 @@ function StudioContent() {
   const redo = () => {
     if (redoStack.length === 0) return;
     const next = redoStack[redoStack.length - 1];
-    setHistory((prev) => [...prev, { tracks: JSON.parse(JSON.stringify(tracks)), shots: JSON.parse(JSON.stringify(shots)) }]);
+    setHistory((prev) => [...prev, cloneProjectState(tracks, shots)]);
     setRedoStack(redoStack.slice(0, -1));
     setTracks(next.tracks);
     setShots(next.shots);
@@ -438,6 +407,16 @@ function StudioContent() {
     },
     [previewingShotId],
   );
+
+  // --- AUTO-CLEAR PREVIEW WHEN VIDEO ENDS ---
+  // If the ViewerPanel reaches the end of the clip, it calls setIsPlaying(false).
+  // We need to catch that and officially exit Preview Mode so the timeline works again!
+  useEffect(() => {
+    if (previewingShotId && !isPlaying) {
+      setPreviewingShotId(null);
+      setPreviewTime(0);
+    }
+  }, [isPlaying, previewingShotId]);
 
   // --- AUTO-SAVE ---
   useEffect(() => {
@@ -622,10 +601,13 @@ function StudioContent() {
             }),
           );
 
-          setTracks(newTracks);
-
           const uniquePaths = new Set<string>();
           timelineData.tracks.flat().forEach((item: any) => { if (item.outputVideo) uniquePaths.add(item.outputVideo); });
+
+          // Set initialized to true BEFORE setting tracks so that the useEffect hooks (prerender, auto-save) 
+          // can fire when the render commits.
+          initialized.current = true;
+          setTracks(newTracks);
 
           await Promise.all(
             Array.from(uniquePaths).map(async (path) => {
@@ -640,13 +622,13 @@ function StudioContent() {
             }),
           );
         } else {
+          initialized.current = true;
           setTracks([{ id: "t1", name: "Video 1", type: "video", clips: [] }, { id: "t2", name: "Audio 1", type: "audio", clips: [] }]);
         }
       } catch (e) {
+        initialized.current = true;
         setTracks([{ id: "t1", name: "Video 1", type: "video", clips: [] }, { id: "t2", name: "Audio 1", type: "audio", clips: [] }]);
       }
-
-      initialized.current = true;
     } catch (err) { console.error(err); } finally { setIsLoading(false); }
   };
 
@@ -746,6 +728,16 @@ function StudioContent() {
   );
 
   const handleDragStart = (event: DragStartEvent) => {
+    const activatorEvent = event.activatorEvent as any;
+    if (activatorEvent && 'clientX' in activatorEvent && event.active.rect.current.initial) {
+      setDragContext({
+        cursorOffsetX: activatorEvent.clientX - event.active.rect.current.initial.left,
+        cursorOffsetY: activatorEvent.clientY - event.active.rect.current.initial.top,
+      });
+    } else {
+      setDragContext(null);
+    }
+
     if (event.active.data.current?.shot) return setActiveDragItem(event.active.data.current.shot);
     const shot = shots.find((s) => s.id === event.active.id);
     if (shot) return setActiveDragItem(shot);
@@ -760,6 +752,8 @@ function StudioContent() {
   const handleDragEnd = async (event: DragEndEvent) => {
     const { active, over } = event;
     setActiveDragItem(null);
+    const currentDragContext = dragContext;
+    setDragContext(null);
 
     if (!over) return;
     const overId = String(over.id);
@@ -775,7 +769,14 @@ function StudioContent() {
 
     if (shotData) {
       recordHistory();
-      const dropX = (active.rect.current.translated?.left || 0) - over.rect.left;
+      let dropX = (active.rect.current.translated?.left || 0) - over.rect.left;
+
+      // If we snapped the overlay to the cursor, we shift the drop by the same amount 
+      // so it drops exactly where the visual overlay was tracking.
+      if (currentDragContext) {
+        dropX += currentDragContext.cursorOffsetX;
+      }
+
       let startTime = Math.max(0, dropX / zoom);
 
       // Quantize to frame
@@ -845,7 +846,6 @@ function StudioContent() {
         }
         return next;
       });
-      setPreviewUrl(null); // Invalidate Cache
     }
   };
 
@@ -909,20 +909,6 @@ function StudioContent() {
             {scene.name} <span className="text-zinc-600">/</span> <span className="text-zinc-500 font-normal">{project.name}</span>
           </h1>
           <div className="flex gap-2 items-center">
-            {/* STATUS INDICATORS */}
-            {isPrerendering && (
-              <div className="flex items-center gap-1.5 px-3 py-1.5 bg-yellow-500/10 border border-yellow-500/20 rounded-md">
-                <Loader2 size={12} className="animate-spin text-yellow-500" />
-                <span className="text-[10px] font-medium text-yellow-500 uppercase tracking-wide">Rendering Preview</span>
-              </div>
-            )}
-            {!isPrerendering && previewUrl && (
-              <div className="flex items-center gap-1.5 px-3 py-1.5 bg-green-500/10 border border-green-500/20 rounded-md transition-all animate-in fade-in zoom-in duration-300">
-                <div className="w-1.5 h-1.5 rounded-full bg-green-500 shadow-[0_0_8px_#22c55e]" />
-                <span className="text-[10px] font-medium text-green-500 uppercase tracking-wide">Cached</span>
-              </div>
-            )}
-
             <button
               onClick={() => setShowExportModal(true)} className="flex items-center gap-2 px-3 py-1.5 bg-[#D2FF44] text-black text-xs font-bold rounded hover:bg-[#b8e635] transition-colors">
               <Download size={14} /> Export
@@ -975,7 +961,6 @@ function StudioContent() {
                   projectFps={projectFps}
                   volume={masterVolume}
                   videoBlobs={videoBlobs}
-                  previewUrl={previewUrl}
                 />
               </div>
 
@@ -1017,7 +1002,26 @@ function StudioContent() {
         </div>
       </div>
 
-      <DragOverlay dropAnimation={activeDragItem && "timelineId" in activeDragItem ? { sideEffects: defaultDropAnimationSideEffects({ styles: { active: { opacity: "0.5" } } }) } : null}>
+      <DragOverlay
+        modifiers={[
+          ({ transform, activeNodeRect, activatorEvent }) => {
+            if (!activeNodeRect || !activatorEvent) return transform;
+            if (activatorEvent instanceof PointerEvent || activatorEvent instanceof MouseEvent || ('clientX' in activatorEvent)) {
+              const e = activatorEvent as any;
+              const offsetX = e.clientX - activeNodeRect.left;
+              const offsetY = e.clientY - activeNodeRect.top;
+              // Add a slight 2px offset so the cursor doesn't completely block the top-left edge
+              return {
+                ...transform,
+                x: transform.x + offsetX + 2,
+                y: transform.y + offsetY + 2,
+              };
+            }
+            return transform;
+          }
+        ]}
+        dropAnimation={activeDragItem && "timelineId" in activeDragItem ? { sideEffects: defaultDropAnimationSideEffects({ styles: { active: { opacity: "0.5" } } }) } : null}
+      >
         {activeDragItem ? (
           "timelineId" in activeDragItem ? (
             <div style={{ width: (activeDragItem.duration || 4) * zoom, height: "96px" }} className="relative flex flex-col overflow-hidden bg-[#375a6c] border border-[#213845] rounded-sm shadow-xl cursor-grabbing opacity-90">
@@ -1027,9 +1031,36 @@ function StudioContent() {
               <div className="absolute bottom-0 w-full bg-[#20343e] px-2 py-0.5 text-[9px] text-zinc-300 truncate font-mono">{activeDragItem.name} ({activeDragItem.duration?.toFixed(2)}s)</div>
             </div>
           ) : (
-            <div className="w-48 aspect-video rounded-lg overflow-hidden border-2 border-[#D2FF44] shadow-xl cursor-grabbing bg-zinc-900 opacity-90">
-              {activeDragItem.previewBase64 && <img src={activeDragItem.previewBase64} className="w-full h-full object-cover" />}
-              <div className="absolute bottom-0 w-full bg-black/60 p-1 text-[10px] text-white truncate">{activeDragItem.name}</div>
+            <div
+              style={{
+                width: ((activeDragItem.duration || 4) * zoom),
+                height: 48, // TRACK_HEIGHT
+              }}
+              className={`relative flex flex-col overflow-hidden border rounded-sm shadow-xl cursor-grabbing opacity-90
+                ${activeDragItem.audioPath && !activeDragItem.outputVideo ? "bg-[#1a1a1c] border-white/10" : "bg-[#375a6c] border-[#213845]"}
+              `}
+            >
+              {!(activeDragItem.audioPath && !activeDragItem.outputVideo) && (
+                <div className="flex-1 relative overflow-hidden flex bg-zinc-800">
+                  {activeDragItem.previewBase64 && (
+                    <img
+                      src={activeDragItem.previewBase64}
+                      className="w-full h-full object-cover opacity-70 pointer-events-none"
+                    />
+                  )}
+                  <div className="absolute bottom-0 w-full bg-gradient-to-t from-black/90 to-transparent px-2 py-0.5 text-[9px] text-zinc-300 truncate font-mono pointer-events-none z-10">
+                    {activeDragItem.name}
+                  </div>
+                </div>
+              )}
+              {(activeDragItem.audioPath && !activeDragItem.outputVideo) && (
+                <div className="relative overflow-hidden shrink-0 flex items-center flex-1 w-full bg-[#101012]">
+                  <div className="w-full h-px bg-[#D2FF44]/30" />
+                  <div className="absolute top-1 left-2 text-[9px] text-zinc-400 font-mono pointer-events-none">
+                    {activeDragItem.name}
+                  </div>
+                </div>
+              )}
             </div>
           )
         ) : null}

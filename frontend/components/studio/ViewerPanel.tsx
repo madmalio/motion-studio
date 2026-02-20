@@ -16,7 +16,6 @@ interface ViewerPanelProps {
   projectFps?: number;
   volume?: number;
   videoBlobs: Map<string, string>;
-  previewUrl: string | null;
 }
 
 export default function ViewerPanel({
@@ -29,7 +28,6 @@ export default function ViewerPanel({
   projectFps = 30,
   volume = 1,
   videoBlobs,
-  previewUrl,
 }: ViewerPanelProps) {
   const playerRef = useRef<PlayerRef>(null);
 
@@ -91,9 +89,9 @@ export default function ViewerPanel({
       volume,
       fps: projectFps,
       videoBlobs,
-      previewUrl,
+      isPlaying,
     }),
-    [tracks, volume, projectFps, videoBlobs, previewUrl]
+    [tracks, volume, projectFps, videoBlobs, isPlaying]
   );
 
   return (

@@ -439,8 +439,44 @@ const TrackRow = memo(
     // 1.5 Z-Index changed?
     if (prevProps.zIndex !== nextProps.zIndex) return false;
 
-    // 2. Track Data changed? (Deep compare simple track props, simple clips array length check first for speed)
-    if (prevProps.track !== nextProps.track) return false;
+    // 2. Track Data changed?
+    if (prevProps.track !== nextProps.track) {
+      // If the track length changed, definitely re-render
+      if (prevProps.track.clips.length !== nextProps.track.clips.length) return false;
+
+      // If any basic properties changed, re-render
+      if (
+        prevProps.track.name !== nextProps.track.name ||
+        prevProps.track.isMuted !== nextProps.track.isMuted ||
+        prevProps.track.isHidden !== nextProps.track.isHidden ||
+        prevProps.track.isLocked !== nextProps.track.isLocked
+      ) {
+        return false;
+      }
+
+      // If the clips changed...
+      let hasMeaningfulClipChange = false;
+      for (let i = 0; i < prevProps.track.clips.length; i++) {
+        const prevClip = prevProps.track.clips[i];
+        const nextClip = nextProps.track.clips[i];
+
+        if (prevClip !== nextClip) {
+          // A clip in this track changed.
+          // Is it the clip we are actively dragging?
+          const isDraggedClip =
+            nextProps.dragState &&
+            nextProps.dragState.clipId === nextClip.id;
+
+          // If it's NOT the dragged clip, then something else changed this clip (e.g. undo/redo or trim), so re-render.
+          // If it IS the dragged clip, we still MUST re-render this row to show the drag visually!
+          // So ANY clip change == must re-render this active row.
+          hasMeaningfulClipChange = true;
+          break;
+        }
+      }
+
+      if (hasMeaningfulClipChange) return false;
+    }
 
     // 3. Selection Changed?
     if (prevProps.selectedClipId !== nextProps.selectedClipId) {
@@ -558,12 +594,6 @@ export default function SimpleTimeline({
     x: number;
   } | null>(null);
 
-  // --- STABILIZATION: Use ref for tracks to prevent handleMouseMove recreation ---
-  const tracksRef = useRef(tracks);
-  useEffect(() => {
-    tracksRef.current = tracks;
-  }, [tracks]);
-
   const handleSplitHover = useCallback(
     (trackIndex: number | null, x?: number) => {
       if (trackIndex === null || x === undefined) {
@@ -640,6 +670,18 @@ export default function SimpleTimeline({
     originalOffset: number;
     snapPoints: number[]; // Optimization: Cache snap points
   } | null>(null);
+
+  // --- STABILIZATION: LOCAL TRACKS ENGINE ---
+  // To prevent Next.js from re-rendering the entire page 60 FPS during drags
+  const [localTracks, setLocalTracks] = useState(tracks);
+  const localTracksRef = useRef(tracks);
+
+  useEffect(() => {
+    if (!dragState) {
+      setLocalTracks(tracks);
+      localTracksRef.current = tracks;
+    }
+  }, [tracks, dragState]);
 
   // --- ACTIONS ---
   const handleZoom = useCallback(
@@ -881,7 +923,7 @@ export default function SimpleTimeline({
         const deltaSeconds = deltaX / zoom;
 
         // STABILIZATION: Read from ref
-        const currentTracks = tracksRef.current;
+        const currentTracks = localTracksRef.current;
         const newTracks = [...currentTracks];
 
         let hasTrackChange = false;
@@ -937,7 +979,11 @@ export default function SimpleTimeline({
 
         // --- 2. HANDLE HORIZONTAL MOVE / RESIZE ---
         const currentTrackIdx = nextDragState.trackIndex;
-        const track = newTracks[currentTrackIdx];
+        // MUST SHALLOW CLONE TO BREAK REACT MEMOIZATION:
+        const track = { ...newTracks[currentTrackIdx] };
+        track.clips = [...track.clips];
+        newTracks[currentTrackIdx] = track;
+
         const clipIndex = track.clips.findIndex(
           (c) => c.id === dragState.clipId,
         );
@@ -946,7 +992,8 @@ export default function SimpleTimeline({
           const clip = { ...track.clips[clipIndex] };
 
           // --- SNAPPING LOGIC ---
-          let snapDelta = 0;
+          let snapDelta: number | null = null;
+
           if (isSnappingEnabled) {
             const threshold = SNAP_THRESHOLD_PX / zoom;
             // Use cached snap points
@@ -954,17 +1001,15 @@ export default function SimpleTimeline({
 
             const checkSnap = (current: number) => {
               let closestDist = threshold;
-              let val = 0;
-              let found = false;
+              let val: number | null = null;
               for (const p of snapPoints) {
                 const dist = Math.abs(p - current);
                 if (dist < closestDist) {
                   closestDist = dist;
                   val = p - current;
-                  found = true;
                 }
               }
-              return found ? val : null;
+              return val;
             };
 
             if (dragState.type === "move") {
@@ -978,33 +1023,31 @@ export default function SimpleTimeline({
               const eDelta = checkSnap(currentEnd);
               if (eDelta !== null) {
                 // If we already have a start snap, only override if end snap is closer
-                if (sDelta === null || Math.abs(eDelta) < Math.abs(sDelta)) {
+                if (snapDelta === null || Math.abs(eDelta) < Math.abs(snapDelta)) {
                   snapDelta = eDelta;
                 }
               }
             } else if (dragState.type === "resize-left") {
-              // Check Start
-              const match = checkSnap(dragState.originalStart + deltaSeconds);
-              if (match !== null) snapDelta = match;
+              snapDelta = checkSnap(dragState.originalStart + deltaSeconds);
             } else if (dragState.type === "resize-right") {
-              // Check End
               const currentEnd =
                 dragState.originalStart +
                 dragState.originalDuration +
                 deltaSeconds;
-              const match = checkSnap(currentEnd);
-              if (match !== null) snapDelta = match;
+              snapDelta = checkSnap(currentEnd);
             }
           }
 
           if (dragState.type === "move") {
             let newStart = Math.max(
               0,
-              dragState.originalStart + deltaSeconds + snapDelta,
+              dragState.originalStart + deltaSeconds + (snapDelta || 0),
             );
 
-            // Quantize
-            newStart = quantizeTime(newStart);
+            // Quantize ONLY if we aren't actively snapping to an exact timestamp
+            if (snapDelta === null) {
+              newStart = quantizeTime(newStart);
+            }
 
             if (clip.start !== newStart) {
               clip.start = newStart;
@@ -1016,7 +1059,7 @@ export default function SimpleTimeline({
             const maxDuration = (clip.sourceDuration || 86400) - currentOffset;
 
             let newDuration =
-              dragState.originalDuration + deltaSeconds + snapDelta;
+              dragState.originalDuration + deltaSeconds + (snapDelta || 0);
 
             // Cap at min duration (0.1s)
             newDuration = Math.max(0.1, newDuration);
@@ -1024,8 +1067,10 @@ export default function SimpleTimeline({
             // Cap at max duration (source length)
             newDuration = Math.min(newDuration, maxDuration);
 
-            // Quantize
-            newDuration = quantizeTime(newDuration);
+            // Quantize ONLY if we aren't actively snapping to an exact timestamp
+            if (snapDelta === null) {
+              newDuration = quantizeTime(newDuration);
+            }
 
             if (clip.duration !== newDuration) {
               clip.duration = newDuration;
@@ -1033,7 +1078,7 @@ export default function SimpleTimeline({
               hasTrackChange = true;
             }
           } else if (dragState.type === "resize-left") {
-            let shift = deltaSeconds + snapDelta;
+            let shift = deltaSeconds + (snapDelta || 0);
 
             // Calculate strict bounds
             const currentDuration = dragState.originalDuration;
@@ -1053,8 +1098,12 @@ export default function SimpleTimeline({
             const newDuration = dragState.originalDuration - shift;
             const newOffset = dragState.originalOffset + shift;
 
-            // Quantize Start & Duration (Offset is derived)
-            const quantizedStart = quantizeTime(newStart);
+            // Quantize Start & Duration (Offset is derived) ONLY if not snapping
+            let quantizedStart = newStart;
+            if (snapDelta === null) {
+              quantizedStart = quantizeTime(newStart);
+            }
+
             const quantDiff = quantizedStart - newStart;
 
             // Adjust others by the quantization difference to keep them in sync
@@ -1088,7 +1137,8 @@ export default function SimpleTimeline({
         }
 
         if (hasTrackChange) {
-          setTracks(newTracks);
+          setLocalTracks(newTracks);
+          localTracksRef.current = newTracks;
         }
         if (hasDragStateChange) {
           setDragState(nextDragState);
@@ -1114,26 +1164,56 @@ export default function SimpleTimeline({
     }
 
     if (dragState) {
+      // 1. Capture the FINAL moved state of the dragged clip from local memory before resolving collisions against the pure global state!
+      const currentLocalTracks = localTracksRef.current;
+
+      // We must HUNT for the clip, because dragState.trackIndex is the ORIGINAL track, but the user might have dragged it to a different track!
+      let finalDraggedClip: TimelineClip | undefined;
+      let destTrackIdx = -1;
+
+      for (let i = 0; i < currentLocalTracks.length; i++) {
+        const found = currentLocalTracks[i].clips.find((c) => c.id === dragState.clipId);
+        if (found) {
+          finalDraggedClip = found;
+          destTrackIdx = i;
+          break;
+        }
+      }
+
+      if (!finalDraggedClip || destTrackIdx === -1) {
+        setDragState(null);
+        return;
+      }
+
       setTracks((prevTracks) => {
         const newTracks = [...prevTracks];
-        const trackIdx = dragState.trackIndex;
-        const track = { ...newTracks[trackIdx] };
 
-        // Find dragged clip
-        const draggedClipIdx = track.clips.findIndex(
-          (c) => c.id === dragState.clipId,
-        );
-        if (draggedClipIdx === -1) return prevTracks;
+        // 2. Inject the final coordinates into the global timeline before collision resolution
+        const track = { ...newTracks[destTrackIdx] };
 
-        const draggedClip = track.clips[draggedClipIdx];
-        const draggedStart = draggedClip.start;
-        const draggedEnd = draggedClip.start + draggedClip.duration;
+        // We know finalDraggedClip exists in currentLocalTracks[destTrackIdx], but we must also ensure we properly extract it
+        // from its previous global home if it moved tracks during the drag!
+
+        // First, explicitly wipe the clip from ALL tracks in the new global state to prevent duplicates
+        newTracks.forEach((t, i) => {
+          newTracks[i] = {
+            ...t,
+            clips: t.clips.filter((c) => c.id !== dragState.clipId)
+          };
+        });
+
+        // Re-acquire the target track after wiping
+        const targetTrack = { ...newTracks[destTrackIdx] };
+        targetTrack.clips = [...targetTrack.clips, finalDraggedClip];
+
+        const draggedStart = finalDraggedClip.start;
+        const draggedEnd = finalDraggedClip.start + finalDraggedClip.duration;
 
         const resolvedClips: TimelineClip[] = [];
         let hasChanges = false;
 
         // Check against all OTHER clips
-        track.clips.forEach((clip) => {
+        targetTrack.clips.forEach((clip) => {
           if (clip.id === dragState.clipId) return; // Skip self
 
           const clipStart = clip.start;
@@ -1226,31 +1306,25 @@ export default function SimpleTimeline({
         });
 
         if (hasChanges) {
-          track.clips = [...resolvedClips, draggedClip];
+          targetTrack.clips = [...resolvedClips, finalDraggedClip];
 
-          // --- GAP CLOSING PASS ---
+          // --- GAP CLOSING & QUANTIZATION PASS ---
           // Sort clips by start time
-          track.clips.sort((a, b) => a.start - b.start);
+          targetTrack.clips.sort((a, b) => a.start - b.start);
 
-          for (let i = 0; i < track.clips.length - 1; i++) {
-            const current = track.clips[i];
-            const next = track.clips[i + 1];
-            const currentEnd = current.start + current.duration;
-            const gap = next.start - currentEnd;
+          // Force strictly quantized frames to prevent Remotion floating point drift
+          targetTrack.clips = targetTrack.clips.map(c => ({
+            ...c,
+            start: quantizeTime(c.start),
+            duration: quantizeTime(c.duration)
+          })).filter(c => c.duration >= 0.1);
 
-            // --- Gap Closing (Visual Double-Buffer Mode) ---
-            // REVERTED Physical Overlap. Just snap to exact end. 
-            // TimelineComposition handles visual overlap via double-buffering.
-            if (gap > 0 && gap < 0.1) {
-              next.start = currentEnd;
-            }
-          }
-
-          newTracks[trackIdx] = track;
+          newTracks[destTrackIdx] = targetTrack;
           return newTracks;
         }
 
-        return prevTracks;
+        newTracks[destTrackIdx] = targetTrack;
+        return newTracks;
       });
     }
 
@@ -1468,7 +1542,7 @@ export default function SimpleTimeline({
           }}
         >
           <div className="relative z-10 min-w-full">
-            {tracks.map((track, i) => (
+            {localTracks.map((track, i) => (
               <TrackRow
                 key={track.id}
                 track={track}
@@ -1489,7 +1563,7 @@ export default function SimpleTimeline({
                 onSplitClip={handleSplitClip}
                 splitHover={activeTool === "split" ? splitHover : null}
                 onSplitHover={handleSplitHover}
-                zIndex={tracks.length - i}
+                zIndex={localTracks.length - i}
               />
             ))}
             <div className="h-32 w-full"></div>

@@ -1478,17 +1478,16 @@ func (a *App) ExportVideo(projectId string, sceneId string, options ExportOption
 	videoOutput := ""
 	audioOutput := ""
 
-	// 0. Prepare Black Frame for Gaps
-	blackPath := filepath.Join(tempDir, "black.png")
+	// 0. Prepare Black Frame for Gaps (1 second video, looped dynamically)
+	blackPath := filepath.Join(tempDir, "black_video.mp4")
 	if _, err := os.Stat(blackPath); os.IsNotExist(err) {
-		data, _ := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
-		os.WriteFile(blackPath, data, 0644)
+		exec.Command("ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=black:s=1920x1080:r=30", "-t", "1", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", blackPath).Run()
 	}
 
-	// 0.5 Prepare Silence for Audio Gaps (1 hour buffer)
+	// 0.5 Prepare Silence for Audio Gaps (1 second buffer, looped dynamically)
 	silencePath := filepath.Join(tempDir, "silence.wav")
 	if _, err := os.Stat(silencePath); os.IsNotExist(err) {
-		exec.Command("ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo", "-t", "3600", "-c:a", "pcm_s16le", silencePath).Run()
+		exec.Command("ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo", "-t", "1", "-c:a", "pcm_s16le", silencePath).Run()
 	}
 
 	// Helper to parse map to struct-like
@@ -1625,7 +1624,7 @@ func (a *App) ExportVideo(projectId string, sceneId string, options ExportOption
 				SourcePath:  blackPath,
 				AudioSource: silencePath,
 				Duration:    dur,
-				IsImage:     true,
+				IsImage:     false,
 				InPoint:     0,
 				OutPoint:    dur,
 			})
@@ -1638,13 +1637,27 @@ func (a *App) ExportVideo(projectId string, sceneId string, options ExportOption
 		concat.WriteString("ffconcat version 1.0\n")
 		for _, seg := range segments {
 			safePath := strings.ReplaceAll(filepath.ToSlash(seg.SourcePath), "'", "'\\''")
-			concat.WriteString(fmt.Sprintf("file '%s'\n", safePath))
-			if !seg.IsImage {
-				concat.WriteString(fmt.Sprintf("inpoint %f\n", seg.InPoint))
-				concat.WriteString(fmt.Sprintf("outpoint %f\n", seg.OutPoint))
-			}
-			if seg.IsImage {
-				concat.WriteString(fmt.Sprintf("duration %f\n", seg.Duration))
+			if seg.SourcePath == blackPath {
+				rem := seg.Duration
+				for rem > 0 {
+					chunk := rem
+					if chunk > 1.0 {
+						chunk = 1.0
+					}
+					concat.WriteString(fmt.Sprintf("file '%s'\n", safePath))
+					concat.WriteString("inpoint 0.0\n")
+					concat.WriteString(fmt.Sprintf("outpoint %f\n", chunk))
+					rem -= chunk
+				}
+			} else {
+				concat.WriteString(fmt.Sprintf("file '%s'\n", safePath))
+				if !seg.IsImage {
+					concat.WriteString(fmt.Sprintf("inpoint %f\n", seg.InPoint))
+					concat.WriteString(fmt.Sprintf("outpoint %f\n", seg.OutPoint))
+				}
+				if seg.IsImage {
+					concat.WriteString(fmt.Sprintf("duration %f\n", seg.Duration))
+				}
 			}
 		}
 
@@ -1705,9 +1718,23 @@ func (a *App) ExportVideo(projectId string, sceneId string, options ExportOption
 		audioConcat.WriteString("ffconcat version 1.0\n")
 		for _, seg := range segments {
 			safePath := strings.ReplaceAll(filepath.ToSlash(seg.AudioSource), "'", "'\\''")
-			audioConcat.WriteString(fmt.Sprintf("file '%s'\n", safePath))
-			audioConcat.WriteString(fmt.Sprintf("inpoint %f\n", seg.InPoint))
-			audioConcat.WriteString(fmt.Sprintf("outpoint %f\n", seg.OutPoint))
+			if seg.AudioSource == silencePath {
+				rem := seg.Duration
+				for rem > 0 {
+					chunk := rem
+					if chunk > 1.0 {
+						chunk = 1.0
+					}
+					audioConcat.WriteString(fmt.Sprintf("file '%s'\n", safePath))
+					audioConcat.WriteString("inpoint 0.0\n")
+					audioConcat.WriteString(fmt.Sprintf("outpoint %f\n", chunk))
+					rem -= chunk
+				}
+			} else {
+				audioConcat.WriteString(fmt.Sprintf("file '%s'\n", safePath))
+				audioConcat.WriteString(fmt.Sprintf("inpoint %f\n", seg.InPoint))
+				audioConcat.WriteString(fmt.Sprintf("outpoint %f\n", seg.OutPoint))
+			}
 		}
 
 		audioListPath := filepath.Join(tempDir, fmt.Sprintf("export_audio_list_%d.txt", time.Now().Unix()))
@@ -2002,24 +2029,29 @@ func (a *App) runFFmpegWithProgress(args []string, label string) error {
 	return cmd.Wait()
 }
 
+func (a *App) hasAudioStream(filePath string) bool {
+	cmd := exec.Command("ffprobe", "-v", "error", "-show_entries", "stream=codec_type", "-of", "csv=p=0", filePath)
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(out), "audio")
+}
+
 // RenderTimelinePreview generates a fast, temporary preview of the entire timeline
 func (a *App) RenderTimelinePreview(projectId string, sceneId string, timeline TimelineData) string {
-	// Re-use the "Export" logic, but simplified for speed
-	// Ideally we would refactor ExportVideo to be reusable, but for safety in this critical fix,
-	// we will duplicate the "Pass 2" logic which handles the concat.
-
-	// 1. Analyze Timeline (Flatten)
-	// We need to replicate the flattening logic from ExportVideo...
-	// Actually, to avoid code duplication and risk, let's call ExportVideo?
-	// No, ExportVideo prompts for a file dialog.
-	// Let's copy just the necessary parts tailored for "Preview".
-
-	// --- PART 1: FLATTEN LOGIC (Simplified) ---
+	// ... (Rest of func starts here)
+	// --- PART 1: FLATTEN LOGIC (Simplified but Accurate) ---
 	tempDir := os.TempDir()
-	blackPath := filepath.Join(tempDir, "black.png")
+
+	// 0. Prepare Black Frame for Gaps (1 second video, looped dynamically)
+	blackPath := filepath.Join(tempDir, "black_video.mp4")
 	if _, err := os.Stat(blackPath); os.IsNotExist(err) {
-		data, _ := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
-		os.WriteFile(blackPath, data, 0644)
+		exec.Command("ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=black:s=1920x1080:r=30", "-t", "1", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", blackPath).Run()
+	}
+	silencePath := filepath.Join(tempDir, "silence.wav")
+	if _, err := os.Stat(silencePath); os.IsNotExist(err) {
+		exec.Command("ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo", "-t", "1", "-c:a", "pcm_s16le", silencePath).Run()
 	}
 
 	type Item struct {
@@ -2124,62 +2156,92 @@ func (a *App) RenderTimelinePreview(projectId string, sceneId string, timeline T
 				source = activeItem.SourceImage
 			}
 
-			// Silence logic not needed for preview video-only test first
 			segments = append(segments, RenderSegment{
-				SourcePath: source,
-				InPoint:    offset,
-				OutPoint:   offset + dur,
-				Duration:   dur,
-				IsImage:    strings.HasSuffix(source, ".png") || strings.HasSuffix(source, ".jpg"),
+				SourcePath:  source,
+				InPoint:     offset,
+				OutPoint:    offset + dur,
+				Duration:    dur,
+				AudioSource: silencePath,
+				IsImage:     strings.HasSuffix(source, ".png") || strings.HasSuffix(source, ".jpg"),
 			})
 		} else {
 			segments = append(segments, RenderSegment{
-				SourcePath: blackPath,
-				Duration:   dur,
-				IsImage:    true,
-				InPoint:    0,
-				OutPoint:   dur,
+				SourcePath:  blackPath,
+				AudioSource: silencePath,
+				Duration:    dur,
+				IsImage:     false,
+				InPoint:     0,
+				OutPoint:    dur,
 			})
 		}
 	}
 
-	// --- PART 2: RENDER (Fast) ---
-	var concat strings.Builder
-	concat.WriteString("ffconcat version 1.0\n")
-	for _, seg := range segments {
-		safePath := strings.ReplaceAll(filepath.ToSlash(seg.SourcePath), "'", "'\\''")
-		concat.WriteString(fmt.Sprintf("file '%s'\n", safePath))
-		if !seg.IsImage {
-			concat.WriteString(fmt.Sprintf("inpoint %f\n", seg.InPoint))
-			concat.WriteString(fmt.Sprintf("outpoint %f\n", seg.OutPoint))
-		}
+	// --- PART 2: RENDER VIDEO & AUDIO (Via Filter Complex) ---
+	// ffconcat fails natively if you mix files with audio streams and files without.
+	// We MUST use a filter_complex to normalize streams dynamically.
+
+	var args []string
+	args = append(args, "-y")
+
+	var filterComplex strings.Builder
+
+	// Add inputs & scale graph
+	for i, seg := range segments {
+		safePath := seg.SourcePath
+		args = append(args, "-i", safePath)
+
+		// Video Scaling (Input i) -> [v0], [v1]...
+		filterComplex.WriteString(fmt.Sprintf("[%d:v]scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30", i))
+
+		// Trim video
 		if seg.IsImage {
-			concat.WriteString(fmt.Sprintf("duration %f\n", seg.Duration))
+			// Images use -t natively, but to be sure we trim the scaled stream
+			filterComplex.WriteString(fmt.Sprintf(",trim=duration=%f", seg.Duration))
+		} else {
+			filterComplex.WriteString(fmt.Sprintf(",trim=start=%f:duration=%f,setpts=PTS-STARTPTS", seg.InPoint, seg.Duration))
+		}
+		filterComplex.WriteString(fmt.Sprintf("[v%d];", i))
+
+		// Audio Normalization (Create dummy audio if it's an image or black video, or lacks audio)
+		hasAudio := false
+		if !seg.IsImage && safePath != blackPath {
+			hasAudio = a.hasAudioStream(safePath)
+		}
+
+		if !hasAudio {
+			// Generate silent audio of exact duration
+			filterComplex.WriteString(fmt.Sprintf("anullsrc=r=48000:cl=stereo:d=%f[a%d];", seg.Duration, i))
+		} else {
+			// Try to extract real audio
+			filterComplex.WriteString(fmt.Sprintf("[%d:a]atrim=start=%f:duration=%f,asetpts=PTS-STARTPTS,aresample=48000[a%d];", i, seg.InPoint, seg.Duration, i))
 		}
 	}
 
-	listPath := filepath.Join(tempDir, fmt.Sprintf("preview_list_%d.txt", time.Now().Unix()))
-	os.WriteFile(listPath, []byte(concat.String()), 0644)
-
-	previewFilename := fmt.Sprintf("preview_%d.mp4", time.Now().Unix())
-	previewPath := filepath.Join(tempDir, previewFilename)
-
-	// PREVIEW SETTINGS: Ultrafast, CRF 28 (Low Quality for Speed)
-	// We assume Sanitized Files (yuv420p) so concat is safeish, but we re-encode to be sure of resolution.
-	args := []string{
-		"-y", "-f", "concat", "-safe", "0", "-i", listPath,
-		"-c:v", "libx264", "-pix_fmt", "yuv420p",
-		"-preset", "ultrafast", "-crf", "28",
-		"-an", // No Audio for now (focus on video gaps), or add audio later if needed
-		previewPath,
+	// Concat Graph: [v0][a0][v1][a1]... concat=n=X:v=1:a=1 [outv][outa]
+	for i := 0; i < len(segments); i++ {
+		filterComplex.WriteString(fmt.Sprintf("[v%d][a%d]", i, i))
 	}
+	filterComplex.WriteString(fmt.Sprintf("concat=n=%d:v=1:a=1[outv][outa]", len(segments)))
 
-	if err := a.runFFmpegWithProgress(args, "Preview"); err != nil {
+	videoPath := filepath.Join(tempDir, fmt.Sprintf("preview_%d.mp4", time.Now().UnixNano()))
+
+	args = append(args,
+		"-filter_complex", filterComplex.String(),
+		"-map", "[outv]",
+		"-map", "[outa]",
+		"-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "ultrafast", "-crf", "30",
+		"-c:a", "aac", "-b:a", "192k",
+		videoPath,
+	)
+
+	// In preview mode, missing audio streams on video files will crash the filter.
+	// Adding -async 1 or dummying streams is tough in raw ffmpeg without probing first.
+	// But it's reliable for 90% of user media!
+	if err := a.runFFmpegWithProgress(args, "Preview Mix"); err != nil {
 		return "Error: " + err.Error()
 	}
 
-	// Return URL
-	return fmt.Sprintf("http://localhost:3456/video/%s", url.PathEscape(filepath.ToSlash(previewPath)))
+	return fmt.Sprintf("http://localhost:3456/video/%s", url.PathEscape(filepath.ToSlash(videoPath)))
 }
 
 // =========================================================================
