@@ -291,10 +291,21 @@ const TrackRow = memo(
         >
           {/* SPLIT LINE INDICATOR */}
           {activeTool === "split" && splitHover?.trackIndex === trackIdx && (
-            <div
-              className="absolute top-0 bottom-0 w-px bg-red-500 z-50 pointer-events-none"
-              style={{ left: splitHover.x }}
-            />
+            (() => {
+              // Check if hovering over a clip
+              const hoverTime = splitHover.x / zoom;
+              const hoveringClip = track.clips.find((c: any) => hoverTime >= c.start && hoverTime <= c.start + c.duration);
+
+              if (hoveringClip) {
+                return (
+                  <div
+                    className="absolute top-0 bottom-0 w-px bg-red-500 z-50 pointer-events-none"
+                    style={{ left: splitHover.x }}
+                  />
+                );
+              }
+              return null;
+            })()
           )}
 
           {track.clips.map((clip: any) => {
@@ -468,7 +479,10 @@ const TrackRow = memo(
       }
     }
 
-    // 5. Split Tool Hover
+    // 5. Tool Changed?
+    if (prevProps.activeTool !== nextProps.activeTool) return false;
+
+    // 6. Split Clip Hover Position Changed?
     if (prevProps.activeTool === "split" || nextProps.activeTool === "split") {
       if (prevProps.splitHover !== nextProps.splitHover) {
         // Only re-render if hover affects THIS track
