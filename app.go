@@ -1025,6 +1025,7 @@ func (a *App) sanitizeVideo(path string) error {
 	// -tune fastdecode: Optimizes output for playback speed
 	// -g 15: Keyframe every 15 frames (0.5s) for instant seeking
 	// -pix_fmt yuv420p: Maximum compatibility
+	// AUDIO FIX: Enforce 320k high-fidelity AAC and slight headroom drop (-5%) to prevent float-to-int AAC peaking artifacts
 	cmd := exec.Command("ffmpeg",
 		"-y",
 		"-i", path,
@@ -1035,6 +1036,8 @@ func (a *App) sanitizeVideo(path string) error {
 		"-g", "15",
 		"-sc_threshold", "0",
 		"-c:a", "aac",
+		"-b:a", "320k",
+		"-af", "volume=0.95",
 		tempPath,
 	)
 
