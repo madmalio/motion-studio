@@ -2,21 +2,28 @@
 
 import { usePathname } from "next/navigation";
 import BottomBar from "./BottomBar";
-import { Suspense, useEffect } from "react";
+import { Suspense, useEffect, useRef } from "react";
 import { WindowMaximise, WindowUnmaximise } from "../wailsjs/runtime/runtime";
 
 export default function Shell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const isDashboard = pathname === "/";
+  const hasInitialized = useRef(false);
 
   useEffect(() => {
     // FIX: Check if the Wails runtime exists before calling it
     // This prevents crashes during browser refreshes or dev mode
     if ((window as any).runtime) {
       if (isDashboard) {
-        WindowUnmaximise();
+        // Only shrink the window on the very first load of the dashboard
+        if (!hasInitialized.current) {
+          WindowUnmaximise();
+          hasInitialized.current = true;
+        }
       } else {
+        // Always maximize when entering any project-related page
         WindowMaximise();
+        hasInitialized.current = true; // Mark as initialized so we don't shrink later
       }
     }
   }, [isDashboard]);
@@ -34,7 +41,7 @@ export default function Shell({ children }: { children: React.ReactNode }) {
 
       <Suspense
         fallback={
-          <div className="h-14 bg-[#09090b] border-t border-zinc-800 w-full" />
+          <div className="h-12 bg-[#09090b] border-t border-zinc-800 w-full" />
         }
       >
         <BottomBar />

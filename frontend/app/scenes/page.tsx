@@ -112,93 +112,94 @@ function ScenesContent() {
 
   return (
     <>
-      {/* HEADER: Changed w-screen to w-full */}
-      <header className="h-16 w-full border-b border-zinc-800 flex items-center justify-between px-8 bg-[#09090b] shrink-0">
-        <div>
-          <h1 className="text-xl font-bold tracking-tight text-white flex items-center gap-3">
-            {project.name}
-          </h1>
-          <span className="text-[10px] text-zinc-500 font-mono uppercase tracking-wider pl-0.5">
-            Scene Manager
-          </span>
-        </div>
-
-        <div className="flex gap-4">
-          <div className="hidden md:flex items-center bg-zinc-900 border border-zinc-800 rounded-md px-3 py-1.5 w-48">
-            <Search size={14} className="text-zinc-500 mr-2" />
-            <input
-              className="bg-transparent outline-none text-xs text-white w-full placeholder-zinc-600"
-              placeholder="Find scene..."
-            />
-          </div>
-
-          <button
-            onClick={openNewSceneModal}
-            className="bg-[#D2FF44] hover:bg-[#c2eb39] text-black text-xs font-bold px-4 py-2 rounded flex items-center gap-2 transition-colors"
-          >
-            <Plus size={16} strokeWidth={3} />
-            NEW SCENE
-          </button>
-        </div>
-      </header>
-
       {/* GRID: Ensure w-full */}
-      <div className="flex-1 w-full overflow-y-auto p-8">
-        <div className="max-w-[1600px] mx-auto grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
-          {/* Create Card */}
-          <div
-            onClick={openNewSceneModal}
-            className="aspect-[16/10] border border-dashed border-zinc-800 rounded-lg flex flex-col items-center justify-center gap-3 text-zinc-600 hover:text-[#D2FF44] hover:border-[#D2FF44] hover:bg-zinc-900/40 transition-all cursor-pointer group"
-          >
-            <div className="h-10 w-10 rounded-full bg-zinc-900 border border-zinc-800 flex items-center justify-center group-hover:scale-110 transition-transform">
-              <Plus size={20} />
-            </div>
-            <span className="text-xs font-bold">Add Scene</span>
-          </div>
-
-          {/* Scene Cards */}
-          {scenes.map((scene) => (
-            <div
-              key={scene.id}
-              onClick={() =>
-                router.push(
-                  `/studio?sceneId=${scene.id}&projectId=${projectId}`,
-                )
-              }
-              className="group aspect-[16/10] bg-zinc-900 border border-zinc-800 rounded-lg hover:border-[#D2FF44]/50 hover:shadow-[0_4px_20px_rgba(0,0,0,0.5)] transition-all cursor-pointer relative"
-            >
-              {/* Image Area */}
-              <div className="absolute inset-0 overflow-hidden rounded-lg bg-zinc-950">
-                {scene.displayThumbnail ? (
-                  <img
-                    src={scene.displayThumbnail}
-                    className="w-full h-full object-cover opacity-60 group-hover:opacity-100 group-hover:scale-105 transition-all duration-500"
-                  />
-                ) : (
-                  <div className="w-full h-full bg-gradient-to-br from-zinc-800 to-zinc-900 flex items-center justify-center opacity-60 group-hover:opacity-100 transition-all">
-                    <Film className="text-zinc-700" size={32} />
-                  </div>
-                )}
-                <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/20 to-transparent" />
+      <div className="flex-1 w-full overflow-y-auto p-8 relative">
+        <div className="max-w-[1600px] mx-auto">
+          {/* Top Actions Row */}
+          <div className="flex items-center justify-between mb-8">
+            <div>
+              <h2 className="text-zinc-500 text-[10px] font-bold uppercase tracking-[0.2em] mb-1">Project Library</h2>
+              <div className="flex items-center gap-3">
+                <div className="w-1 h-6 bg-[#D2FF44] rounded-full" />
+                <h1 className="text-2xl font-black text-white tracking-tight">Select Scene</h1>
               </div>
+            </div>
 
-              {/* Content Footer */}
-              <div className="absolute bottom-0 left-0 w-full p-3 flex justify-between items-end z-10">
-                <div>
-                  <h3 className="text-sm font-bold text-white group-hover:text-[#D2FF44] transition-colors leading-tight truncate pr-2">
-                    {scene.name}
-                  </h3>
-                  <p className="text-[10px] text-zinc-400 font-bold tracking-wider mt-0.5 uppercase">
-                    {scene.shotCount} SHOTS
-                  </p>
-                </div>
-                <CardMenu
-                  onDelete={() => handleDelete(scene.id)}
-                  onRename={() => handleEdit(scene)}
+            <div className="flex gap-3">
+              <div className="flex items-center bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 w-64 focus-within:border-zinc-600 transition-colors">
+                <Search size={14} className="text-zinc-600 mr-2" />
+                <input
+                  className="bg-transparent outline-none text-xs text-white w-full placeholder-zinc-700 font-medium"
+                  placeholder="Filter scenes..."
                 />
               </div>
+
+              <button
+                onClick={openNewSceneModal}
+                className="bg-[#D2FF44] hover:bg-[#c2eb39] text-black text-[11px] font-black px-5 py-2 rounded-lg flex items-center gap-2 transition-all hover:scale-[1.02] active:scale-[0.98] shadow-[0_4px_15px_rgba(210,255,68,0.2)]"
+              >
+                <Plus size={16} strokeWidth={3} />
+                NEW SCENE
+              </button>
             </div>
-          ))}
+          </div>
+
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-6">
+            {/* Create Card */}
+            <div
+              onClick={openNewSceneModal}
+              className="aspect-[16/10] border-2 border-dashed border-zinc-800 rounded-xl flex flex-col items-center justify-center gap-3 text-zinc-600 hover:text-[#D2FF44] hover:border-[#D2FF44]/50 hover:bg-zinc-900/40 transition-all cursor-pointer group"
+            >
+              <div className="h-12 w-12 rounded-full bg-zinc-900 border border-zinc-800 flex items-center justify-center group-hover:scale-110 group-hover:bg-[#D2FF44] group-hover:text-black transition-all duration-300">
+                <Plus size={24} strokeWidth={2.5} />
+              </div>
+              <span className="text-[10px] font-black uppercase tracking-widest">Add Scene</span>
+            </div>
+
+            {/* Scene Cards */}
+            {scenes.map((scene) => (
+              <div
+                key={scene.id}
+                onClick={() =>
+                  router.push(
+                    `/studio?sceneId=${scene.id}&projectId=${projectId}`,
+                  )
+                }
+                className="group aspect-[16/10] bg-zinc-900 border border-zinc-800 rounded-lg hover:border-[#D2FF44]/50 hover:shadow-[0_4px_20px_rgba(0,0,0,0.5)] transition-all cursor-pointer relative"
+              >
+                {/* Image Area */}
+                <div className="absolute inset-0 overflow-hidden rounded-lg bg-zinc-950">
+                  {scene.displayThumbnail ? (
+                    <img
+                      src={scene.displayThumbnail}
+                      className="w-full h-full object-cover opacity-60 group-hover:opacity-100 group-hover:scale-105 transition-all duration-500"
+                    />
+                  ) : (
+                    <div className="w-full h-full bg-gradient-to-br from-zinc-800 to-zinc-900 flex items-center justify-center opacity-60 group-hover:opacity-100 transition-all">
+                      <Film className="text-zinc-700" size={32} />
+                    </div>
+                  )}
+                  <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/20 to-transparent" />
+                </div>
+
+                {/* Content Footer */}
+                <div className="absolute bottom-0 left-0 w-full p-3 flex justify-between items-end z-10">
+                  <div>
+                    <h3 className="text-sm font-bold text-white group-hover:text-[#D2FF44] transition-colors leading-tight truncate pr-2">
+                      {scene.name}
+                    </h3>
+                    <p className="text-[10px] text-zinc-400 font-bold tracking-wider mt-0.5 uppercase">
+                      {scene.shotCount} SHOTS
+                    </p>
+                  </div>
+                  <CardMenu
+                    onDelete={() => handleDelete(scene.id)}
+                    onRename={() => handleEdit(scene)}
+                  />
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
       </div>
 

@@ -10,6 +10,7 @@ import {
   useMemo,
 } from "react";
 import { useConfirm } from "../../components/ConfirmProvider";
+import { useStudio } from "../../components/StudioProvider";
 import { Loader2, PanelLeft, PanelTop, Download, X } from "lucide-react";
 import {
   DndContext,
@@ -183,6 +184,7 @@ function StudioContent() {
   const projectId = searchParams.get("projectId") || "";
   const sceneId = searchParams.get("sceneId") || "";
   const { confirm } = useConfirm();
+  const { isExportModalOpen, closeExportModal } = useStudio();
 
   // --- STATE ---
   const [project, setProject] = useState<Project | null>(null);
@@ -195,7 +197,6 @@ function StudioContent() {
 
   const [isRendering, setIsRendering] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
-  const [showExportModal, setShowExportModal] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
   const [exportStatus, setExportStatus] = useState("");
@@ -897,7 +898,7 @@ function StudioContent() {
       cleanupStatus();
       cleanupProgress();
       setIsExporting(false);
-      setShowExportModal(false);
+      closeExportModal();
     }
   };
 
@@ -943,18 +944,6 @@ function StudioContent() {
       onDragEnd={handleDragEnd}
     >
       <div className="flex-1 w-full flex flex-col overflow-hidden bg-[#09090b]">
-        <header className="h-10 w-full border-b border-zinc-800 bg-[#09090b] flex items-center justify-between px-4 shrink-0">
-          <h1 className="text-sm font-bold text-white flex items-center gap-2">
-            {scene.name} <span className="text-zinc-600">/</span> <span className="text-zinc-500 font-normal">{project.name}</span>
-          </h1>
-          <div className="flex gap-2 items-center">
-            <button
-              onClick={() => setShowExportModal(true)} className="flex items-center gap-2 px-3 py-1.5 bg-[#D2FF44] text-black text-xs font-bold rounded hover:bg-[#b8e635] transition-colors">
-              <Download size={14} /> Export
-            </button>
-          </div>
-        </header>
-
         <div className="flex-1 flex overflow-hidden">
           {isGeneratorFullHeight && (
             <>
@@ -1136,7 +1125,7 @@ function StudioContent() {
       </DragOverlay>
 
       {/* EXPORT MODAL */}
-      {showExportModal && (
+      {isExportModalOpen && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-md">
           <div className="bg-[#121214] border border-zinc-800 rounded-xl shadow-2xl w-[800px] overflow-hidden flex flex-col">
             {/* HEADER */}
@@ -1147,7 +1136,7 @@ function StudioContent() {
                   Export Project
                 </h2>
               </div>
-              <button onClick={() => !isExporting && setShowExportModal(false)} className="text-zinc-500 hover:text-white transition-colors" disabled={isExporting}>
+              <button onClick={() => !isExporting && closeExportModal()} className="text-zinc-500 hover:text-white transition-colors" disabled={isExporting}>
                 <X size={20} />
               </button>
             </div>
@@ -1249,7 +1238,7 @@ function StudioContent() {
                     <button onClick={handleExport} disabled={isExporting} className="w-full py-3 bg-[#D2FF44] hover:bg-[#b8e635] text-black font-bold rounded-lg transition-all hover:scale-[1.02] active:scale-[0.98] flex items-center justify-center gap-2">
                       <Download size={18} /> Render Video
                     </button>
-                    <button onClick={() => setShowExportModal(false)} className="w-full py-2 text-xs font-bold text-zinc-500 hover:text-white transition-colors">
+                    <button onClick={() => closeExportModal()} className="w-full py-2 text-xs font-bold text-zinc-500 hover:text-white transition-colors">
                       Cancel
                     </button>
                   </div>

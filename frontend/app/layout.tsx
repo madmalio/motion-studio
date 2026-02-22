@@ -3,6 +3,7 @@ import "./globals.css";
 import Shell from "../components/Shell";
 import { ConfirmProvider } from "../components/ConfirmProvider";
 import { SettingsProvider } from "../components/SettingsProvider";
+import { StudioProvider } from "../components/StudioProvider";
 import WailsScripts from "../components/WailsScripts";
 
 export const metadata: Metadata = {
@@ -23,7 +24,9 @@ export default function RootLayout({
 
         <ConfirmProvider>
           <SettingsProvider>
-            <Shell>{children}</Shell>
+            <StudioProvider>
+              <Shell>{children}</Shell>
+            </StudioProvider>
           </SettingsProvider>
         </ConfirmProvider>
       </body>
