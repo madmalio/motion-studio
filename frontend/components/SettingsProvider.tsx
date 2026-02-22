@@ -137,7 +137,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     return () => clearInterval(interval);
   }, [status]);
 
-  // 4. REMOTE URL CHECKER
+  // 4. REMOTE URL CHECKER (Typing Debounce)
   useEffect(() => {
     if (!isOpen) return;
     if (!remoteUrl) {
@@ -152,6 +152,34 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
 
     return () => clearTimeout(timer);
   }, [remoteUrl, isOpen]);
+
+  // 5. REMOTE HEARTBEAT
+  useEffect(() => {
+    const heartbeat = async () => {
+      if (remoteStatus === "testing" || !remoteUrl) return;
+
+      try {
+        // Attempt to reach the endpoint. Even a 4xx/5xx response means the server is reachable.
+        await fetch(remoteUrl, {
+          method: "POST",
+          body: JSON.stringify({ ping: true }),
+        });
+        setRemoteStatus((prev) => {
+          if (prev === "testing") return prev;
+          return "success";
+        });
+      } catch (e) {
+        setRemoteStatus((prev) => {
+          if (prev === "testing") return prev;
+          return "error";
+        });
+      }
+    };
+
+    heartbeat();
+    const interval = setInterval(heartbeat, 3000);
+    return () => clearInterval(interval);
+  }, [remoteUrl, remoteStatus]);
 
   const handleTestRemote = async () => {
     if (!remoteUrl) return;

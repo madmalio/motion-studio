@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useRef, useState, useEffect, useCallback, memo } from "react";
+import React, { useRef, useState, useEffect, useCallback, memo, useMemo } from "react";
 import {
   Play,
   Pause,
@@ -22,7 +22,7 @@ import {
   MoreVertical,
   Maximize2, // New Icon
 } from "lucide-react";
-import { useDroppable } from "@dnd-kit/core";
+import { useDroppable, useDndContext, pointerWithin } from "@dnd-kit/core";
 
 // --- CONSTANTS ---
 const LEFT_PANEL_W = 160;
@@ -196,11 +196,48 @@ const TrackRow = memo(
     splitHover, // <--- NEW PROP
     onSplitHover, // <--- NEW PROP
     zIndex, // <--- NEW PROP
+    dragMouseX, // <--- NEW PROP
   }: any) {
-    const { setNodeRef, isOver } = useDroppable({
+    const { setNodeRef, isOver, node } = useDroppable({
       id: `track-${trackIdx}`,
       data: { trackIndex: trackIdx },
     });
+
+    const { active, over } = useDndContext();
+
+    // --- LIBRARY DRAG GHOST ---
+    // Use a local state for the ghost start time to trigger re-renders only for this track
+    const [ghostStartTime, setGhostStartTime] = useState<number | null>(null);
+    const ghostDuration = active?.data.current?.shot?.duration || 4;
+
+    useEffect(() => {
+      let rafId: number;
+      
+      const updateGhost = () => {
+        if (active?.data.current?.shot && over?.id === `track-${trackIdx}` && node.current) {
+          const rect = node.current.getBoundingClientRect();
+          const currentMouseX = dragMouseX.current;
+          const dragCenterOnTrack = currentMouseX - rect.left;
+          
+          // Center: start = center - (duration / 2)
+          const startTime = Math.max(0, (dragCenterOnTrack / zoom) - (ghostDuration / 2));
+          const quantizedStart = Math.round(startTime * 30) / 30;
+          
+          setGhostStartTime(quantizedStart);
+        } else {
+          setGhostStartTime(null);
+        }
+        rafId = requestAnimationFrame(updateGhost);
+      };
+
+      if (active && over?.id === `track-${trackIdx}`) {
+        rafId = requestAnimationFrame(updateGhost);
+      } else {
+        setGhostStartTime(null);
+      }
+
+      return () => cancelAnimationFrame(rafId);
+    }, [active, over, trackIdx, zoom, node, dragMouseX, ghostDuration]);
 
     return (
       <div
@@ -289,6 +326,17 @@ const TrackRow = memo(
             if (activeTool === "split" && onSplitHover) onSplitHover(null);
           }}
         >
+          {/* LIBRARY DRAG GHOST */}
+          {ghostStartTime !== null && (
+            <div
+              className="absolute top-1 bottom-1 border-2 border-dashed border-[#D2FF44]/50 bg-[#D2FF44]/10 rounded-sm pointer-events-none z-40"
+              style={{
+                left: ghostStartTime * zoom,
+                width: ghostDuration * zoom,
+              }}
+            />
+          )}
+
           {/* SPLIT LINE INDICATOR */}
           {activeTool === "split" && splitHover?.trackIndex === trackIdx && (
             (() => {
@@ -310,6 +358,8 @@ const TrackRow = memo(
 
           {track.clips.map((clip: any) => {
             const isSelected = selectedClipId === clip.id;
+            const isBeingMoved = dragState?.clipId === clip.id && dragState.type === "move";
+
             return (
               <div
                 key={clip.id}
@@ -320,6 +370,7 @@ const TrackRow = memo(
                   }
                 ${track.isLocked ? "opacity-50 cursor-not-allowed" : "hover:brightness-110"}
                 ${dragState?.clipId === clip.id ? "ring-2 ring-[#D2FF44] z-30 opacity-80" : "z-10"}
+                ${isBeingMoved ? "opacity-30 border-dashed border-[#D2FF44]/50 grayscale" : ""}
                 ${isSelected ? "ring-2 ring-white z-20" : ""} 
                 ${activeTool === "split" ? "cursor-crosshair" : ""}
                 ${clip.isMuted ? "grayscale opacity-75" : ""}
@@ -365,9 +416,6 @@ const TrackRow = memo(
                         draggable={false}
                       />
                     )}
-                    <div className="absolute bottom-0 w-full bg-gradient-to-t from-black/90 to-transparent px-2 py-0.5 text-[9px] text-zinc-300 truncate font-mono pointer-events-none z-10">
-                      {clip.name}
-                    </div>
                     <div className="absolute bottom-0 w-full bg-gradient-to-t from-black/90 to-transparent px-2 py-0.5 text-[9px] text-zinc-300 truncate font-mono pointer-events-none z-10">
                       {clip.name}
                     </div>
@@ -566,6 +614,7 @@ export default function SimpleTimeline({
   const containerRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const horizontalScrollRef = useRef<HTMLDivElement>(null);
+  const proxyRef = useRef<HTMLDivElement>(null);
   const rafRef = useRef<number | null>(null);
   const dragMouseX = useRef<number>(0);
   const dragMouseY = useRef<number>(0);
@@ -593,6 +642,8 @@ export default function SimpleTimeline({
     trackIndex: number;
     x: number;
   } | null>(null);
+
+  const { active } = useDndContext();
 
   const handleSplitHover = useCallback(
     (trackIndex: number | null, x?: number) => {
@@ -669,6 +720,8 @@ export default function SimpleTimeline({
     originalDuration: number;
     originalOffset: number;
     snapPoints: number[]; // Optimization: Cache snap points
+    clickOffsetX: number;
+    clickOffsetY: number;
   } | null>(null);
 
   // --- STABILIZATION: LOCAL TRACKS ENGINE ---
@@ -682,6 +735,16 @@ export default function SimpleTimeline({
       localTracksRef.current = tracks;
     }
   }, [tracks, dragState]);
+
+  // Derived Drag Proxy State
+  const activeClipForProxy = useMemo(() => {
+    if (!dragState || dragState.type !== "move") return null;
+    const track = localTracksRef.current[dragState.trackIndex];
+    if (!track) return null;
+    const clip = track.clips.find((c) => c.id === dragState.clipId);
+    if (!clip) return null;
+    return { clip, trackType: track.type };
+  }, [dragState]);
 
   // --- ACTIONS ---
   const handleZoom = useCallback(
@@ -878,6 +941,10 @@ export default function SimpleTimeline({
         });
       });
 
+      const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+      const offsetX = e.clientX - rect.left;
+      const offsetY = e.clientY - rect.top;
+
       setDragState({
         type,
         clipId: clip.id,
@@ -887,6 +954,8 @@ export default function SimpleTimeline({
         originalDuration: clip.duration,
         originalOffset: clip.offset,
         snapPoints,
+        clickOffsetX: offsetX,
+        clickOffsetY: offsetY,
       });
     },
     [activeTool, tracks, onRegisterHistory],
@@ -917,6 +986,14 @@ export default function SimpleTimeline({
 
       rafRef.current = requestAnimationFrame(() => {
         rafRef.current = null;
+
+        // UPDATE PROXY (Smooth Cursor Tracking - Centered)
+        if (proxyRef.current && dragState.type === "move" && activeClipForProxy) {
+          const proxyX = dragMouseX.current - (activeClipForProxy.clip.duration * zoom / 2);
+          const proxyY = dragMouseY.current - (TRACK_HEIGHT / 2);
+          proxyRef.current.style.transform = `translate(${proxyX}px, ${proxyY}px)`;
+        }
+
         if (!scrollContainerRef.current) return;
 
         const deltaX = dragMouseX.current - dragState.startX;
@@ -1339,15 +1416,17 @@ export default function SimpleTimeline({
   }, [dragState, setTracks, setIsPlaying]);
 
   useEffect(() => {
-    if (dragState || isDraggingPlayhead) {
+    if (dragState || isDraggingPlayhead || active) {
       window.addEventListener("mousemove", handleMouseMove);
-      window.addEventListener("mouseup", handleMouseUp);
+      if (dragState || isDraggingPlayhead) {
+        window.addEventListener("mouseup", handleMouseUp);
+      }
     }
     return () => {
       window.removeEventListener("mousemove", handleMouseMove);
       window.removeEventListener("mouseup", handleMouseUp);
     };
-  }, [dragState, isDraggingPlayhead, handleMouseMove, handleMouseUp]);
+  }, [dragState, isDraggingPlayhead, active, handleMouseMove, handleMouseUp]);
 
   const handleRulerMouseDown = (e: React.MouseEvent) => {
     if (!scrollContainerRef.current) return;
@@ -1564,6 +1643,7 @@ export default function SimpleTimeline({
                 splitHover={activeTool === "split" ? splitHover : null}
                 onSplitHover={handleSplitHover}
                 zIndex={localTracks.length - i}
+                dragMouseX={dragMouseX}
               />
             ))}
             <div className="h-32 w-full"></div>
@@ -1606,6 +1686,41 @@ export default function SimpleTimeline({
           </div>
         </div>
       </div>
+
+      {/* DRAG PROXY */}
+      {dragState?.type === "move" && activeClipForProxy && (
+        <div
+          ref={proxyRef}
+          className="fixed top-0 left-0 pointer-events-none z-[9999] opacity-100 shadow-2xl overflow-hidden rounded-sm"
+          style={{
+            width: activeClipForProxy.clip.duration * zoom,
+            height: TRACK_HEIGHT,
+            // Initial position centered on cursor
+            transform: `translate(${dragMouseX.current - (activeClipForProxy.clip.duration * zoom / 2)}px, ${dragMouseY.current - (TRACK_HEIGHT / 2)}px)`,
+          }}
+        >
+          {activeClipForProxy.trackType !== "audio" ? (
+            <div className="flex-1 h-full relative overflow-hidden flex bg-[#375a6c] border border-[#213845]">
+              {activeClipForProxy.clip.thumbnail && (
+                <img
+                  src={activeClipForProxy.clip.thumbnail}
+                  className="w-full h-full object-cover opacity-70"
+                />
+              )}
+              <div className="absolute bottom-0 w-full bg-gradient-to-t from-black/90 to-transparent px-2 py-0.5 text-[9px] text-zinc-300 truncate font-mono">
+                {activeClipForProxy.clip.name}
+              </div>
+            </div>
+          ) : (
+            <div className="relative overflow-hidden shrink-0 flex items-center h-full flex-1 bg-[#101012] border border-white/10">
+              <div className="w-full h-px bg-[#D2FF44]/30" />
+              <div className="absolute top-1 left-2 text-[9px] text-zinc-400 font-mono">
+                {activeClipForProxy.clip.name}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* CONTEXT MENU */}
       {contextMenu && (

@@ -77,7 +77,7 @@ const DraggableShotItem = memo(function DraggableShotItem({
       className={`
         relative group aspect-video rounded border overflow-hidden cursor-grab active:cursor-grabbing
         ${isActive ? "border-[#D2FF44] ring-1 ring-[#D2FF44]/30" : "border-zinc-800 hover:border-zinc-600"}
-        ${isDragging ? "opacity-50" : ""}
+        ${isDragging ? "opacity-0" : ""}
         ${isPlaying ? "ring-2 ring-[#D2FF44] ring-offset-2 ring-offset-zinc-900" : ""}
       `}
     >

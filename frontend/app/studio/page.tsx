@@ -750,9 +750,8 @@ function StudioContent() {
   const handleDragOver = (event: DragOverEvent) => { };
 
   const handleDragEnd = async (event: DragEndEvent) => {
-    const { active, over } = event;
+    const { active, over, delta } = event;
     setActiveDragItem(null);
-    const currentDragContext = dragContext;
     setDragContext(null);
 
     if (!over) return;
@@ -769,22 +768,21 @@ function StudioContent() {
 
     if (shotData) {
       recordHistory();
-      let dropX = (active.rect.current.translated?.left || 0) - over.rect.left;
+      
+      const activatorEvent = event.activatorEvent as MouseEvent;
+      const currentMouseX = activatorEvent.clientX + delta.x;
+      const dropX = currentMouseX - over.rect.left;
 
-      // If we snapped the overlay to the cursor, we shift the drop by the same amount 
-      // so it drops exactly where the visual overlay was tracking.
-      if (currentDragContext) {
-        dropX += currentDragContext.cursorOffsetX;
-      }
-
-      let startTime = Math.max(0, dropX / zoom);
+      let duration = shotData.duration || 4;
+      
+      // Center the clip: start = dropTime - (duration / 2)
+      let startTime = Math.max(0, (dropX / zoom) - (duration / 2));
 
       // Quantize to frame
       const fps = project?.fps || 30; // Use project FPS
       startTime = Math.round(startTime * fps) / fps;
 
       // --- DURATION FIX: Load Metadata ---
-      let duration = shotData.duration || 4;
       const src = shotData.outputVideo || shotData.audioPath || shotData.sourceImage || "";
       const isVideoOrAudio = shotData.outputVideo || shotData.audioPath;
 
@@ -902,7 +900,13 @@ function StudioContent() {
 
 
   return (
-    <DndContext sensors={sensors} collisionDetection={pointerWithin} onDragStart={handleDragStart} onDragOver={handleDragOver} onDragEnd={handleDragEnd}>
+    <DndContext 
+      sensors={sensors} 
+      collisionDetection={pointerWithin} 
+      onDragStart={handleDragStart} 
+      onDragOver={handleDragOver} 
+      onDragEnd={handleDragEnd}
+    >
       <div className="flex-1 w-full flex flex-col overflow-hidden bg-[#09090b]">
         <header className="h-10 w-full border-b border-zinc-800 bg-[#09090b] flex items-center justify-between px-4 shrink-0">
           <h1 className="text-sm font-bold text-white flex items-center gap-2">
@@ -1006,27 +1010,27 @@ function StudioContent() {
         modifiers={[
           ({ transform, activeNodeRect, activatorEvent }) => {
             if (!activeNodeRect || !activatorEvent) return transform;
-            if (activatorEvent instanceof PointerEvent || activatorEvent instanceof MouseEvent || ('clientX' in activatorEvent)) {
-              const e = activatorEvent as any;
-              const offsetX = e.clientX - activeNodeRect.left;
-              const offsetY = e.clientY - activeNodeRect.top;
-              // Add a slight 2px offset so the cursor doesn't completely block the top-left edge
-              return {
-                ...transform,
-                x: transform.x + offsetX + 2,
-                y: transform.y + offsetY + 2,
-              };
-            }
-            return transform;
+            const e = activatorEvent as any;
+            const isShot = activeDragItem && !("timelineId" in activeDragItem);
+            if (!isShot) return transform;
+
+            // Shift visually so cursor is in the MIDDLE
+            const grabOffsetX = e.clientX - activeNodeRect.left;
+            const halfWidth = activeNodeRect.width / 2;
+            
+            return {
+              ...transform,
+              x: transform.x + grabOffsetX - halfWidth,
+            };
           }
         ]}
         dropAnimation={activeDragItem && "timelineId" in activeDragItem ? { sideEffects: defaultDropAnimationSideEffects({ styles: { active: { opacity: "0.5" } } }) } : null}
       >
         {activeDragItem ? (
           "timelineId" in activeDragItem ? (
-            <div style={{ width: (activeDragItem.duration || 4) * zoom, height: "96px" }} className="relative flex flex-col overflow-hidden bg-[#375a6c] border border-[#213845] rounded-sm shadow-xl cursor-grabbing opacity-90">
+            <div style={{ width: (activeDragItem.duration || 4) * zoom, height: "96px" }} className="relative flex flex-col overflow-hidden bg-[#375a6c] border border-[#213845] rounded-sm shadow-xl cursor-grabbing">
               <div className="flex-1 relative overflow-hidden flex">
-                {activeDragItem.previewBase64 && <img src={activeDragItem.previewBase64} className="h-full w-full object-cover opacity-80" />}
+                {activeDragItem.previewBase64 && <img src={activeDragItem.previewBase64} className="h-full w-full object-cover" />}
               </div>
               <div className="absolute bottom-0 w-full bg-[#20343e] px-2 py-0.5 text-[9px] text-zinc-300 truncate font-mono">{activeDragItem.name} ({activeDragItem.duration?.toFixed(2)}s)</div>
             </div>
@@ -1036,16 +1040,20 @@ function StudioContent() {
                 width: ((activeDragItem.duration || 4) * zoom),
                 height: 48, // TRACK_HEIGHT
               }}
-              className={`relative flex flex-col overflow-hidden border rounded-sm shadow-xl cursor-grabbing opacity-90
+              className={`relative flex flex-col overflow-hidden border rounded-sm shadow-2xl cursor-grabbing
                 ${activeDragItem.audioPath && !activeDragItem.outputVideo ? "bg-[#1a1a1c] border-white/10" : "bg-[#375a6c] border-[#213845]"}
               `}
             >
+              {/* VERTICAL ALIGNMENT LINE */}
+              <div className="absolute top-0 bottom-0 left-0 w-0.5 bg-[#D2FF44] z-50" />
+              
+              {/* CONTENT */}
               {!(activeDragItem.audioPath && !activeDragItem.outputVideo) && (
                 <div className="flex-1 relative overflow-hidden flex bg-zinc-800">
                   {activeDragItem.previewBase64 && (
                     <img
                       src={activeDragItem.previewBase64}
-                      className="w-full h-full object-cover opacity-70 pointer-events-none"
+                      className="w-full h-full object-cover opacity-90 pointer-events-none"
                     />
                   )}
                   <div className="absolute bottom-0 w-full bg-gradient-to-t from-black/90 to-transparent px-2 py-0.5 text-[9px] text-zinc-300 truncate font-mono pointer-events-none z-10">
