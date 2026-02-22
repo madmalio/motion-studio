@@ -778,7 +778,42 @@ function StudioContent() {
       // Center the clip: start = dropTime - (duration / 2)
       let startTime = Math.max(0, (dropX / zoom) - (duration / 2));
 
-      // Quantize to frame
+      // --- SNAPPING LOGIC ---
+      const snapThreshold = 0.2; // 200ms threshold
+      let bestSnapDelta = Infinity;
+      let snapTarget = null;
+
+      const track = tracks[trackIndex];
+      const candidates = [0]; // Always snap to 0
+      track.clips.forEach(c => {
+        candidates.push(c.start);
+        candidates.push(c.start + c.duration);
+      });
+
+      // Check for snap on START
+      candidates.forEach(pt => {
+        const delta = pt - startTime;
+        if (Math.abs(delta) < snapThreshold && Math.abs(delta) < Math.abs(bestSnapDelta)) {
+          bestSnapDelta = delta;
+          snapTarget = pt;
+        }
+      });
+
+      // Check for snap on END
+      const endTime = startTime + duration;
+      candidates.forEach(pt => {
+        const delta = pt - endTime;
+        if (Math.abs(delta) < snapThreshold && Math.abs(delta) < Math.abs(bestSnapDelta)) {
+          bestSnapDelta = delta;
+          snapTarget = pt - duration; // Adjust start time to align end
+        }
+      });
+
+      if (snapTarget !== null) {
+        startTime = snapTarget;
+      }
+
+      // Quantize to frame (if not snapped, or even if snapped to align perfectly)
       const fps = project?.fps || 30; // Use project FPS
       startTime = Math.round(startTime * fps) / fps;
 
@@ -1012,9 +1047,35 @@ function StudioContent() {
             if (!activeNodeRect || !activatorEvent) return transform;
             const e = activatorEvent as any;
             const isShot = activeDragItem && !("timelineId" in activeDragItem);
-            if (!isShot) return transform;
+            
+            if (isShot) {
+              // Calculate the rendered width of the overlay
+              const duration = activeDragItem.duration || 4;
+              const overlayWidth = duration * zoom;
+              const halfOverlayWidth = overlayWidth / 2;
+              const overlayHeight = 48; // TRACK_HEIGHT
+              const halfOverlayHeight = overlayHeight / 2;
 
-            // Shift visually so cursor is in the MIDDLE
+              // Calculate current cursor position based on initial click + delta
+              // e.clientX is the INITIAL click X
+              const currentCursorX = e.clientX + transform.x;
+              const currentCursorY = e.clientY + transform.y;
+
+              // We want to center the overlay on the CURRENT cursor.
+              // dnd-kit positions relative to the INITIAL element rect (activeNodeRect.left/top).
+              // transform = TargetScreenPos - InitialRectPos
+              
+              const newTransformX = currentCursorX - halfOverlayWidth - activeNodeRect.left;
+              const newTransformY = currentCursorY - halfOverlayHeight - activeNodeRect.top;
+
+              return {
+                ...transform,
+                x: newTransformX,
+                y: newTransformY,
+              };
+            }
+
+            // Normal logic for timeline clips (grabbing center logic)
             const grabOffsetX = e.clientX - activeNodeRect.left;
             const halfWidth = activeNodeRect.width / 2;
             

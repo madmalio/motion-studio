@@ -197,30 +197,64 @@ const TrackRow = memo(
     onSplitHover, // <--- NEW PROP
     zIndex, // <--- NEW PROP
     dragMouseX, // <--- NEW PROP
+    ghostClip, // <--- NEW PROP (Optimization: Pass data instead of context)
   }: any) {
     const { setNodeRef, isOver, node } = useDroppable({
       id: `track-${trackIdx}`,
       data: { trackIndex: trackIdx },
     });
 
-    const { active, over } = useDndContext();
-
     // --- LIBRARY DRAG GHOST ---
     // Use a local state for the ghost start time to trigger re-renders only for this track
     const [ghostStartTime, setGhostStartTime] = useState<number | null>(null);
-    const ghostDuration = active?.data.current?.shot?.duration || 4;
+    const ghostDuration = ghostClip?.duration || 4;
 
     useEffect(() => {
       let rafId: number;
       
       const updateGhost = () => {
-        if (active?.data.current?.shot && over?.id === `track-${trackIdx}` && node.current) {
+        if (ghostClip && isOver && node.current) {
           const rect = node.current.getBoundingClientRect();
           const currentMouseX = dragMouseX.current;
           const dragCenterOnTrack = currentMouseX - rect.left;
           
           // Center: start = center - (duration / 2)
-          const startTime = Math.max(0, (dragCenterOnTrack / zoom) - (ghostDuration / 2));
+          let startTime = Math.max(0, (dragCenterOnTrack / zoom) - (ghostDuration / 2));
+
+          // --- GHOST SNAPPING ---
+          const snapThreshold = 10 / zoom; // 10px snap
+          let bestSnapDelta = Infinity;
+          let snapTarget = null;
+
+          const candidates = [0];
+          track.clips.forEach((c: any) => {
+            candidates.push(c.start);
+            candidates.push(c.start + c.duration);
+          });
+
+          // Snap START
+          candidates.forEach(pt => {
+            const delta = pt - startTime;
+            if (Math.abs(delta) < snapThreshold && Math.abs(delta) < Math.abs(bestSnapDelta)) {
+              bestSnapDelta = delta;
+              snapTarget = pt;
+            }
+          });
+
+          // Snap END
+          const endTime = startTime + ghostDuration;
+          candidates.forEach(pt => {
+            const delta = pt - endTime;
+            if (Math.abs(delta) < snapThreshold && Math.abs(delta) < Math.abs(bestSnapDelta)) {
+              bestSnapDelta = delta;
+              snapTarget = pt - ghostDuration;
+            }
+          });
+
+          if (snapTarget !== null) {
+            startTime = snapTarget;
+          }
+
           const quantizedStart = Math.round(startTime * 30) / 30;
           
           setGhostStartTime(quantizedStart);
@@ -230,14 +264,14 @@ const TrackRow = memo(
         rafId = requestAnimationFrame(updateGhost);
       };
 
-      if (active && over?.id === `track-${trackIdx}`) {
+      if (ghostClip && isOver) {
         rafId = requestAnimationFrame(updateGhost);
       } else {
         setGhostStartTime(null);
       }
 
       return () => cancelAnimationFrame(rafId);
-    }, [active, over, trackIdx, zoom, node, dragMouseX, ghostDuration]);
+    }, [ghostClip, isOver, zoom, node, dragMouseX, ghostDuration, track.clips]);
 
     return (
       <div
@@ -578,6 +612,9 @@ const TrackRow = memo(
       }
     }
 
+    // 7. Ghost Clip Changed? (Drag started/stopped)
+    if (prevProps.ghostClip !== nextProps.ghostClip) return false;
+
     return true; // Else, skip re-render
   },
 );
@@ -644,6 +681,7 @@ export default function SimpleTimeline({
   } | null>(null);
 
   const { active } = useDndContext();
+  const ghostClip = active?.data.current?.shot; // Extract shot data for ghosting
 
   const handleSplitHover = useCallback(
     (trackIndex: number | null, x?: number) => {
@@ -1644,6 +1682,7 @@ export default function SimpleTimeline({
                 onSplitHover={handleSplitHover}
                 zIndex={localTracks.length - i}
                 dragMouseX={dragMouseX}
+                ghostClip={ghostClip}
               />
             ))}
             <div className="h-32 w-full"></div>
