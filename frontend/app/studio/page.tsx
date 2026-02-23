@@ -33,6 +33,7 @@ const round = (n: number) => Math.round(n * 10000) / 10000;
 import GeneratorPanel from "../../components/studio/GeneratorPanel";
 import LibraryPanel from "../../components/studio/LibraryPanel";
 import ViewerPanel from "../../components/studio/ViewerPanel";
+import AssetLibraryModal from "../../components/studio/AssetLibraryModal";
 import SimpleTimeline, {
   TimelineTrack,
   TimelineClip,
@@ -184,7 +185,7 @@ function StudioContent() {
   const projectId = searchParams.get("projectId") || "";
   const sceneId = searchParams.get("sceneId") || "";
   const { confirm } = useConfirm();
-  const { isExportModalOpen, closeExportModal } = useStudio();
+  const { isExportModalOpen, closeExportModal, isAssetLibraryOpen, closeAssetLibrary } = useStudio();
 
   // --- STATE ---
   const [project, setProject] = useState<Project | null>(null);
@@ -1248,6 +1249,13 @@ function StudioContent() {
           </div>
         </div>
       )}
+
+      {/* ASSET LIBRARY MODAL */}
+      <AssetLibraryModal
+        isOpen={isAssetLibraryOpen}
+        onClose={closeAssetLibrary}
+        project={project}
+      />
     </DndContext>
   );
 }

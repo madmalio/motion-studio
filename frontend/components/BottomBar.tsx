@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
-import { Home, Settings, Clapperboard, Layers, ChevronRight, Download } from "lucide-react";
+import { Home, Settings, Clapperboard, Layers, ChevronRight, Download, Library } from "lucide-react";
 import { useSettings } from "./SettingsProvider";
 import { useStudio } from "./StudioProvider";
 import { useEffect, useState } from "react";
@@ -22,7 +22,7 @@ export default function BottomBar() {
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const { openSettings } = useSettings();
-  const { openExportModal } = useStudio();
+  const { openExportModal, openAssetLibrary } = useStudio();
 
   const projectId = searchParams.get("projectId");
   const sceneId = searchParams.get("sceneId");
@@ -103,6 +103,16 @@ export default function BottomBar() {
       <div className="flex items-center gap-4">
         {isStudio && (
           <>
+            <button
+              onClick={() => openAssetLibrary()}
+              className="p-1.5 rounded-lg text-zinc-500 hover:text-[#D2FF44] hover:bg-zinc-800/50 transition-all flex items-center gap-2"
+              title="Asset Library"
+            >
+              <Library size={16} />
+              <span className="text-[10px] font-bold uppercase tracking-wider hidden lg:block">Assets</span>
+            </button>
+            <div className="w-px h-4 bg-zinc-800" />
+
             <button
               onClick={() => openExportModal()}
               className="bg-[#D2FF44] hover:bg-[#c2eb39] text-black text-[10px] font-black px-4 py-1.5 rounded-full flex items-center gap-2 transition-all hover:scale-105 active:scale-95 shadow-[0_0_15px_rgba(210,255,68,0.2)]"

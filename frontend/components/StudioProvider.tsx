@@ -6,6 +6,9 @@ interface StudioContextType {
   isExportModalOpen: boolean;
   openExportModal: () => void;
   closeExportModal: () => void;
+  isAssetLibraryOpen: boolean;
+  openAssetLibrary: () => void;
+  closeAssetLibrary: () => void;
 }
 
 const StudioContext = createContext<StudioContextType | undefined>(undefined);
@@ -20,9 +23,13 @@ export const useStudio = () => {
 
 export function StudioProvider({ children }: { children: ReactNode }) {
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
+  const [isAssetLibraryOpen, setIsAssetLibraryOpen] = useState(false);
 
   const openExportModal = () => setIsExportModalOpen(true);
   const closeExportModal = () => setIsExportModalOpen(false);
+
+  const openAssetLibrary = () => setIsAssetLibraryOpen(true);
+  const closeAssetLibrary = () => setIsAssetLibraryOpen(false);
 
   return (
     <StudioContext.Provider
@@ -30,6 +37,9 @@ export function StudioProvider({ children }: { children: ReactNode }) {
         isExportModalOpen,
         openExportModal,
         closeExportModal,
+        isAssetLibraryOpen,
+        openAssetLibrary,
+        closeAssetLibrary,
       }}
     >
       {children}
