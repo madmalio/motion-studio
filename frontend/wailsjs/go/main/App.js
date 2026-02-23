@@ -18,6 +18,10 @@ export function DeleteProject(arg1) {
   return window['go']['main']['App']['DeleteProject'](arg1);
 }
 
+export function DeleteProjectAsset(arg1, arg2) {
+  return window['go']['main']['App']['DeleteProjectAsset'](arg1, arg2);
+}
+
 export function DeleteScene(arg1, arg2) {
   return window['go']['main']['App']['DeleteScene'](arg1, arg2);
 }

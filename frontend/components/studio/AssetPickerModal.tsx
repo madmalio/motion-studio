@@ -11,12 +11,15 @@ import {
   Play,
   Pause,
   AudioLines,
+  Trash2,
 } from "lucide-react";
 import {
   ImportImage,
   ImportAudio,
   GetProjectAssets,
-} from "../../wailsjs/go/main/App";
+  DeleteProjectAsset,
+} from "../../lib/wailsSafe";
+import { useConfirm } from "../ConfirmProvider";
 
 interface AssetPickerModalProps {
   isOpen: boolean;
@@ -35,6 +38,7 @@ export default function AssetPickerModal({
 }: AssetPickerModalProps) {
   const [activeTab, setActiveTab] = useState<"upload" | "library">("upload");
   const [assets, setAssets] = useState<any[]>([]);
+  const { confirm } = useConfirm();
 
   // --- AUDIO PREVIEW STATE ---
   const [playingAsset, setPlayingAsset] = useState<string | null>(null);
@@ -95,6 +99,30 @@ export default function AssetPickerModal({
       audioRef.current = audio;
       setPlayingAsset(path);
     }
+  };
+
+  const handleDelete = (e: React.MouseEvent, asset: any) => {
+    e.stopPropagation();
+    if (!project?.id) return;
+
+    confirm({
+      title: `Delete ${type === "image" ? "Image" : "Audio"}?`,
+      message: `This will permanently delete "${asset.name}" from your project assets.`,
+      confirmText: "Delete",
+      variant: "danger",
+      onConfirm: async () => {
+        const result = await DeleteProjectAsset(project.id, asset.path);
+        if (result === "Success") {
+          // Stop audio if it's the one being deleted
+          if (playingAsset === asset.path) stopAudio();
+          // Refresh list
+          const list = await GetProjectAssets(project.id);
+          setAssets(list || []);
+        } else {
+          alert(`Failed to delete: ${result}`);
+        }
+      },
+    });
   };
 
   const handleUploadSystem = async () => {
@@ -240,6 +268,15 @@ export default function AssetPickerModal({
                                 />
                               )}
                             </button>
+                            
+                            {/* Delete Button */}
+                            <button
+                              onClick={(e) => handleDelete(e, asset)}
+                              className="absolute top-2 right-2 p-1.5 rounded-lg bg-red-500/20 text-red-500 opacity-0 group-hover:opacity-100 hover:bg-red-500 hover:text-white transition-all"
+                              title="Delete Asset"
+                            >
+                              <Trash2 size={12} />
+                            </button>
                           </div>
                         </div>
                       )}
@@ -254,6 +291,14 @@ export default function AssetPickerModal({
                             alt={asset.name}
                             loading="lazy"
                           />
+                          <div className="absolute inset-0 bg-black/20 opacity-0 group-hover:opacity-100 transition-opacity" />
+                          <button
+                            onClick={(e) => handleDelete(e, asset)}
+                            className="absolute top-2 right-2 p-1.5 rounded-lg bg-black/60 text-white border border-white/10 opacity-0 group-hover:opacity-100 hover:bg-red-500 hover:border-red-500 transition-all z-10"
+                            title="Delete Asset"
+                          >
+                            <Trash2 size={12} />
+                          </button>
                         </>
                       )}
                     </div>

@@ -1244,6 +1244,32 @@ func (a *App) GetProjectAssets(projectId string) []ProjectAsset {
 	return assets
 }
 
+func (a *App) DeleteProjectAsset(projectId string, path string) string {
+	// 1. Security check: Ensure the path is inside the project assets directory
+	assetsDir := filepath.Join(a.getAppDir(), projectId, "assets")
+	absAssetsDir, err := filepath.Abs(assetsDir)
+	if err != nil {
+		return "Invalid project ID"
+	}
+
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return "Invalid asset path"
+	}
+
+	if !strings.HasPrefix(absPath, absAssetsDir) {
+		return "Access denied: Asset is outside project directory"
+	}
+
+	// 2. Delete the file
+	err = os.Remove(absPath)
+	if err != nil {
+		return fmt.Sprintf("Error deleting file: %v", err)
+	}
+
+	return "Success"
+}
+
 // ImportAudio opens a dialog, copies the file to the project assets, and returns the new path
 func (a *App) ImportAudio(projectId string) string {
 	// 1. Open the Audio File Dialog

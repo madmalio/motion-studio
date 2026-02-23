@@ -31,6 +31,16 @@ export const GetTimeline = (p: string, s: string) =>
 export const SaveTimeline = (p: string, s: string, data: any) =>
   callGo(() => App.SaveTimeline(p, s, data), "SaveTimeline");
 
+export const GetProjectAssets = (id: string) =>
+  callGo(() => App.GetProjectAssets(id), "GetProjectAssets");
+export const DeleteProjectAsset = (projectId: string, path: string) =>
+  callGo(() => App.DeleteProjectAsset(projectId, path), "DeleteProjectAsset");
+
+export const ImportImage = (projectId: string) =>
+  callGo(() => App.ImportImage(projectId), "ImportImage");
+export const ImportAudio = (projectId: string) =>
+  callGo(() => App.ImportAudio(projectId), "ImportAudio");
+
 export const ReadImageBase64 = (path: string) =>
   callGo(() => App.ReadImageBase64(path), "ReadImageBase64");
 export const ExtractLastFrame = (path: string) =>

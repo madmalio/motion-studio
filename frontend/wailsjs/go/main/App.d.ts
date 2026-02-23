@@ -10,6 +10,8 @@ export function CreateShot(arg1:string):Promise<main.Shot>;
 
 export function DeleteProject(arg1:string):Promise<void>;
 
+export function DeleteProjectAsset(arg1:string,arg2:string):Promise<string>;
+
 export function DeleteScene(arg1:string,arg2:string):Promise<void>;
 
 export function DeleteShot(arg1:string,arg2:string,arg3:string):Promise<void>;
