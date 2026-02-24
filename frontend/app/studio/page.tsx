@@ -290,6 +290,18 @@ function StudioContent() {
   const initialized = useRef(false);
   const videoCache = useRef<Map<string, string>>(new Map());
 
+  // --- REFS FOR STABLE HANDLERS ---
+  const tracksRef = useRef(tracks);
+  const shotsRef = useRef(shots);
+
+  useEffect(() => {
+    tracksRef.current = tracks;
+  }, [tracks]);
+
+  useEffect(() => {
+    shotsRef.current = shots;
+  }, [shots]);
+
   // --- UNDO / REDO ---
   const [history, setHistory] = useState<any[]>([]);
   const [redoStack, setRedoStack] = useState<any[]>([]);
@@ -420,88 +432,7 @@ function StudioContent() {
     }
   }, [isPlaying, previewingShotId]);
 
-  // --- AUTO-SAVE ---
-  useEffect(() => {
-    if (projectId && sceneId && initialized.current && shots.length > 0) {
-      const timer = setTimeout(() => {
-        const cleanShots = shots.map(({ previewBase64, ...keep }) => keep);
-        SaveShots(projectId, sceneId, cleanShots as any);
-      }, 500);
-      return () => clearTimeout(timer);
-    }
-  }, [shots, projectId, sceneId]);
-
-  useEffect(() => {
-    if (projectId && sceneId && initialized.current) {
-      const timer = setTimeout(() => {
-        const legacyTracks = tracks.map((t) =>
-          t.clips.map((c) => ({
-            ...c,
-            timelineId: c.id,
-            startTime: c.start,
-            trimStart: c.offset,
-            outputVideo: t.type === "video" ? c.src : undefined,
-            audioPath: t.type === "audio" ? c.src : undefined,
-          })),
-        );
-        const legacySettings = tracks.map((t) => ({ name: t.name, type: t.type, visible: !t.isHidden, locked: t.isLocked }));
-        SaveTimeline(projectId, sceneId, { tracks: legacyTracks, trackSettings: legacySettings } as any);
-      }, 500);
-      return () => clearTimeout(timer);
-    }
-  }, [tracks, projectId, sceneId]);
-
-  // --- SYNC NEW VIDEOS TO BLOBS ---
-  const fetchedBlobs = useRef<Set<string>>(new Set());
-
-  useEffect(() => {
-    shots.forEach((shot) => {
-      // If we have a video, and it's not in the Blobs map, and we haven't already tried to fetch it...
-      if (shot.outputVideo && !videoBlobs.has(shot.outputVideo) && !fetchedBlobs.current.has(shot.outputVideo)) {
-        fetchedBlobs.current.add(shot.outputVideo);
-        refreshVideoBlob(shot.outputVideo);
-      }
-    });
-  }, [shots, videoBlobs]);
-
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
-
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
-        e.preventDefault();
-        e.shiftKey ? redo() : undo();
-      }
-
-      if (e.key === "Delete" || e.key === "Backspace") {
-        if (selectedClipId) {
-          e.preventDefault();
-          recordHistory();
-          setTracks((prev) => prev.map((t) => ({ ...t, clips: t.clips.filter((c) => c.id !== selectedClipId) })));
-          setSelectedClipId(null);
-        }
-      }
-
-      if (e.code === "Space") {
-        if (libraryRef.current?.contains(e.target as Node)) return;
-        e.preventDefault();
-        togglePlay();
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => { window.removeEventListener("keydown", handleKeyDown); };
-  }, [history, redoStack, tracks, shots, togglePlay, selectedClipId]);
-
-  const handleDeleteClip = useCallback(
-    (clipId: string) => {
-      recordHistory();
-      setTracks((prev) => prev.map((t) => ({ ...t, clips: t.clips.filter((c) => c.id !== clipId) })));
-      if (selectedClipId === clipId) setSelectedClipId(null);
-    },
-    [selectedClipId],
-  );
-
-  const generateWaveform = async (shotId: string, filePath: string) => {
+  const generateWaveform = useCallback(async (shotId: string, filePath: string) => {
     if (!filePath) return;
     const peaks = await ExtractAudioPeaks(filePath, 20);
     if (peaks && peaks.length > 0) {
@@ -510,9 +441,9 @@ function StudioContent() {
         prev.map((track) => ({ ...track, clips: track.clips.map((clip) => clip.id === shotId ? { ...clip, waveform: peaks } : clip) })),
       );
     }
-  };
+  }, []);
 
-  const refreshVideoBlob = async (path: string) => {
+  const refreshVideoBlob = useCallback(async (path: string) => {
     try {
       const url = `http://localhost:3456/video/${path.replace(/\\/g, "/")}?t=${Date.now()}`;
       const res = await fetch(url);
@@ -528,12 +459,7 @@ function StudioContent() {
     } catch (e) {
       console.error("Failed to refresh blob:", path, e);
     }
-  };
-
-  // --- LOAD DATA ---
-  useEffect(() => {
-    if (projectId && sceneId) loadData(projectId, sceneId);
-  }, [projectId, sceneId]);
+  }, []);
 
   const loadData = async (pId: string, sId: string) => {
     setIsLoading(true);
@@ -611,6 +537,8 @@ function StudioContent() {
           initialized.current = true;
           setTracks(newTracks);
 
+          // Batch blob updates
+          const newBlobs = new Map();
           await Promise.all(
             Array.from(uniquePaths).map(async (path) => {
               try {
@@ -618,11 +546,19 @@ function StudioContent() {
                 const res = await fetch(url);
                 if (res.ok) {
                   const blob = await res.blob();
-                  setVideoBlobs((prev) => new Map(prev).set(path, URL.createObjectURL(blob)));
+                  newBlobs.set(path, URL.createObjectURL(blob));
                 }
               } catch (e) { }
             }),
           );
+          
+          if (newBlobs.size > 0) {
+            setVideoBlobs((prev) => {
+              const next = new Map(prev);
+              newBlobs.forEach((v, k) => next.set(k, v));
+              return next;
+            });
+          }
         } else {
           initialized.current = true;
           setTracks([{ id: "t1", name: "Video 1", type: "video", clips: [] }, { id: "t2", name: "Audio 1", type: "audio", clips: [] }]);
@@ -633,6 +569,83 @@ function StudioContent() {
       }
     } catch (err) { console.error(err); } finally { setIsLoading(false); }
   };
+
+  // --- LOAD DATA ---
+  useEffect(() => {
+    if (projectId && sceneId) loadData(projectId, sceneId);
+  }, [projectId, sceneId]);
+
+  // --- AUTO-SAVE ---
+  useEffect(() => {
+    if (projectId && sceneId && initialized.current && shots.length > 0) {
+      const timer = setTimeout(() => {
+        const cleanShots = shots.map(({ previewBase64, ...keep }) => keep);
+        SaveShots(projectId, sceneId, cleanShots as any);
+      }, 500);
+      return () => clearTimeout(timer);
+    }
+  }, [shots, projectId, sceneId]);
+
+  useEffect(() => {
+    if (projectId && sceneId && initialized.current) {
+      const timer = setTimeout(() => {
+        const legacyTracks = tracks.map((t) =>
+          t.clips.map((c) => ({
+            ...c,
+            timelineId: c.id,
+            startTime: c.start,
+            trimStart: c.offset,
+            outputVideo: t.type === "video" ? c.src : undefined,
+            audioPath: t.type === "audio" ? c.src : undefined,
+          })),
+        );
+        const legacySettings = tracks.map((t) => ({ name: t.name, type: t.type, visible: !t.isHidden, locked: t.isLocked }));
+        SaveTimeline(projectId, sceneId, { tracks: legacyTracks, trackSettings: legacySettings } as any);
+      }, 500);
+      return () => clearTimeout(timer);
+    }
+  }, [tracks, projectId, sceneId]);
+
+  // --- SYNC NEW VIDEOS TO BLOBS ---
+  const fetchedBlobs = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    shots.forEach((shot) => {
+      // If we have a video, and it's not in the Blobs map, and we haven't already tried to fetch it...
+      if (shot.outputVideo && !videoBlobs.has(shot.outputVideo) && !fetchedBlobs.current.has(shot.outputVideo)) {
+        fetchedBlobs.current.add(shot.outputVideo);
+        refreshVideoBlob(shot.outputVideo);
+      }
+    });
+  }, [shots, videoBlobs]);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
+        e.preventDefault();
+        e.shiftKey ? redo() : undo();
+      }
+
+      if (e.key === "Delete" || e.key === "Backspace") {
+        if (selectedClipId) {
+          e.preventDefault();
+          recordHistory();
+          setTracks((prev) => prev.map((t) => ({ ...t, clips: t.clips.filter((c) => c.id !== selectedClipId) })));
+          setSelectedClipId(null);
+        }
+      }
+
+      if (e.code === "Space") {
+        if (libraryRef.current?.contains(e.target as Node)) return;
+        e.preventDefault();
+        togglePlay();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => { window.removeEventListener("keydown", handleKeyDown); };
+  }, [history, redoStack, tracks, shots, togglePlay, selectedClipId]);
 
   const activeShotIndex = shots.findIndex((s) => s.id === activeShotId);
   const activeShot = shots[activeShotIndex];
@@ -645,13 +658,38 @@ function StudioContent() {
       const newShot: Shot = {
         id: newId,
         sceneId: sceneId,
-        name: `Shot ${prev.reduce((max, s) => { const match = s.name.match(/^Shot (\d+)$/); return match ? Math.max(max, parseInt(match[1])) : max; }, 0) + 1}`,
-        sourceImage: "", audioPath: "", waveform: [], prompt: "", motionStrength: 127, seed: Math.floor(Math.random() * 1000000), duration: 4, status: "DRAFT", outputVideo: "",
+        name: `Shot ${prev.reduce((max, s) => {
+          const match = s.name.match(/^Shot (\d+)$/);
+          return match ? Math.max(max, parseInt(match[1])) : max;
+        }, 0) + 1}`,
+        sourceImage: "",
+        audioPath: "",
+        waveform: [],
+        prompt: "",
+        motionStrength: 127,
+        seed: Math.floor(Math.random() * 1000000),
+        duration: 4,
+        status: "DRAFT",
+        outputVideo: "",
       };
       return [...prev, newShot];
     });
     setActiveShotId(newId);
   }, [sceneId]);
+
+  const handleDeleteClip = useCallback(
+    (clipId: string) => {
+      recordHistory();
+      setTracks((prev) =>
+        prev.map((t) => ({
+          ...t,
+          clips: t.clips.filter((c) => c.id !== clipId),
+        })),
+      );
+      if (selectedClipId === clipId) setSelectedClipId(null);
+    },
+    [selectedClipId],
+  );
 
   const createExtensionShot = useCallback(async (originalShot: Shot) => {
     const sourcePath = originalShot.outputVideo || originalShot.sourceImage;
@@ -661,6 +699,82 @@ function StudioContent() {
     const b64 = await ReadImageBase64(lastFramePath);
     return { ...originalShot, id: crypto.randomUUID(), name: `${originalShot.name} (Ext)`, sourceImage: lastFramePath, audioPath: "", waveform: [], previewBase64: b64, status: "DRAFT", outputVideo: "", duration: 4 };
   }, []);
+
+  const handleExtendTimelineClip = useCallback(
+    async (trackIndex: number, clipId: string) => {
+      const track = tracks[trackIndex];
+      if (!track) return;
+      const clip = track.clips.find((c) => c.id === clipId);
+      if (!clip) return;
+
+      // Find the shot this clip was likely derived from
+      const originalShot = shots.find(
+        (s) =>
+          s.outputVideo === clip.src ||
+          s.sourceImage === clip.src ||
+          s.audioPath === clip.src,
+      );
+
+      // Synthesize a shot object if not found (needed for createExtensionShot)
+      const shotToExtend = originalShot || ({
+        id: crypto.randomUUID(),
+        name: clip.name,
+        sourceImage: clip.type === "image" ? clip.src : "",
+        outputVideo: clip.type === "video" ? clip.src : "",
+        audioPath: clip.type === "audio" ? clip.src : "",
+        duration: clip.duration,
+        prompt: "",
+        motionStrength: 127,
+        seed: 0,
+        status: "DONE",
+      } as Shot);
+
+      const newShot = await createExtensionShot(shotToExtend);
+      if (!newShot) return;
+
+      recordHistory();
+
+      // Add the new shot to the project's shots list
+      setShots((prev) => {
+        // Try to insert after the original shot if found
+        if (originalShot) {
+          const idx = prev.findIndex((s) => s.id === originalShot.id);
+          const next = [...prev];
+          next.splice(idx + 1, 0, newShot);
+          return next;
+        }
+        return [...prev, newShot];
+      });
+
+      // Create the new timeline clip
+      const newClip: TimelineClip = {
+        id: newShot.id,
+        type: newShot.outputVideo ? "video" : (newShot.audioPath ? "audio" : "video"),
+        name: newShot.name,
+        src: newShot.outputVideo || newShot.audioPath || newShot.sourceImage || "",
+        start: clip.start + clip.duration, // Place immediately after the original clip
+        duration: newShot.duration || 4,
+        offset: 0,
+        sourceDuration: newShot.duration || 4,
+        color: newShot.audioPath ? "bg-purple-600" : "bg-blue-600",
+        thumbnail: newShot.previewBase64,
+      };
+
+      // Update the tracks state to include the new clip
+      setTracks((prev) => {
+        const next = [...prev];
+        const t = { ...next[trackIndex] };
+        // Collision resolution happens on next drag/save or we can trust the user to move it
+        t.clips = [...t.clips, newClip];
+        next[trackIndex] = t;
+        return next;
+      });
+
+      // Make the new extension shot active for the generator
+      setActiveShotId(newShot.id);
+    },
+    [tracks, shots, createExtensionShot, recordHistory],
+  );
 
   const handleExtendShot = useCallback(
     async (originalShot: Shot) => {
@@ -1022,6 +1136,7 @@ function StudioContent() {
                   selectedClipId={selectedClipId}
                   onSelectClip={setSelectedClipId}
                   onDeleteClip={handleDeleteClip}
+                  onExtendClip={handleExtendTimelineClip}
                   onRegisterHistory={recordHistory}
                   fps={projectFps}
                 />

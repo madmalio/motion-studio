@@ -74,8 +74,9 @@ interface SimpleTimelineProps {
   selectedClipId?: string | null;
   onSelectClip?: (clipId: string | null) => void;
   onDeleteClip?: (clipId: string) => void;
+  onExtendClip?: (trackIndex: number, clipId: string) => void;
   onRegisterHistory?: () => void;
-  fps?: number; // <--- NEW PROP
+  fps?: number;
 }
 
 // --- 1. THE RULER (Fixed: Optional Labels) ---
@@ -514,108 +515,40 @@ const TrackRow = memo(
     );
   },
   (prevProps, nextProps) => {
-    // --- OPTIMIZATION: Only re-render if necessary ---
-    // 1. Zoom changed?
     if (prevProps.zoom !== nextProps.zoom) return false;
-
-    // 1.5 Z-Index changed?
     if (prevProps.zIndex !== nextProps.zIndex) return false;
-
-    // 2. Track Data changed?
-    if (prevProps.track !== nextProps.track) {
-      // If the track length changed, definitely re-render
-      if (prevProps.track.clips.length !== nextProps.track.clips.length) return false;
-
-      // If any basic properties changed, re-render
-      if (
-        prevProps.track.name !== nextProps.track.name ||
-        prevProps.track.isMuted !== nextProps.track.isMuted ||
-        prevProps.track.isHidden !== nextProps.track.isHidden ||
-        prevProps.track.isLocked !== nextProps.track.isLocked
-      ) {
+    if (prevProps.activeTool !== nextProps.activeTool) return false;
+    if (prevProps.track.name !== nextProps.track.name) return false;
+    if (prevProps.track.isMuted !== nextProps.track.isMuted) return false;
+    if (prevProps.track.isHidden !== nextProps.track.isHidden) return false;
+    if (prevProps.track.isLocked !== nextProps.track.isLocked) return false;
+    if (prevProps.track.clips.length !== nextProps.track.clips.length) return false;
+    
+    // Check clip IDs - only re-render if dragged clip position changed on this track
+    const prevClipIds = prevProps.track.clips.map((c: any) => c.id);
+    const nextClipIds = nextProps.track.clips.map((c: any) => c.id);
+    
+    for (let i = 0; i < prevClipIds.length; i++) {
+      if (prevClipIds[i] !== nextClipIds[i]) return false;
+      const nextClip = nextProps.track.clips[i];
+      if (nextProps.dragState?.clipId === nextClip.id && nextProps.dragState?.trackIndex === nextProps.trackIdx) {
         return false;
       }
-
-      // If the clips changed...
-      let hasMeaningfulClipChange = false;
-      for (let i = 0; i < prevProps.track.clips.length; i++) {
-        const prevClip = prevProps.track.clips[i];
-        const nextClip = nextProps.track.clips[i];
-
-        if (prevClip !== nextClip) {
-          // A clip in this track changed.
-          // Is it the clip we are actively dragging?
-          const isDraggedClip =
-            nextProps.dragState &&
-            nextProps.dragState.clipId === nextClip.id;
-
-          // If it's NOT the dragged clip, then something else changed this clip (e.g. undo/redo or trim), so re-render.
-          // If it IS the dragged clip, we still MUST re-render this row to show the drag visually!
-          // So ANY clip change == must re-render this active row.
-          hasMeaningfulClipChange = true;
-          break;
-        }
-      }
-
-      if (hasMeaningfulClipChange) return false;
     }
-
-    // 3. Selection Changed?
+    
     if (prevProps.selectedClipId !== nextProps.selectedClipId) {
-      // Only re-render if the selection change affects THIS track's clips
-      const prevSelectedInTrack = prevProps.track.clips.some(
-        (c: any) => c.id === prevProps.selectedClipId,
-      );
-      const nextSelectedInTrack = nextProps.track.clips.some(
-        (c: any) => c.id === nextProps.selectedClipId,
-      );
+      const prevSelectedInTrack = prevProps.track.clips.some((c: any) => c.id === prevProps.selectedClipId);
+      const nextSelectedInTrack = nextProps.track.clips.some((c: any) => c.id === nextProps.selectedClipId);
       if (prevSelectedInTrack || nextSelectedInTrack) return false;
     }
-
-    // 4. Drag State
-    const prevDrag = prevProps.dragState;
-    const nextDrag = nextProps.dragState;
-
-    if (prevDrag !== nextDrag) {
-      // Drag started, ended, or changed
-      if (!prevDrag && nextDrag) {
-        // Drag Started. Only re-render if Drag is ON THIS TRACK
-        if (nextDrag.trackIndex === nextProps.trackIdx) return false;
-      }
-      if (prevDrag && !nextDrag) {
-        // Drag Ended. Only re-render if Drag WAS ON THIS TRACK
-        if (prevDrag.trackIndex === prevProps.trackIdx) return false;
-      }
-      if (prevDrag && nextDrag) {
-        // Dragging updates.
-        // Re-render if drag is ON this track or WAS on this track (moving between tracks)
-        if (
-          prevDrag.trackIndex === prevProps.trackIdx ||
-          nextDrag.trackIndex === nextProps.trackIdx
-        )
-          return false;
-      }
+    
+    if (prevProps.dragState?.trackIndex === prevProps.trackIdx || nextProps.dragState?.trackIndex === nextProps.trackIdx) {
+      return false;
     }
-
-    // 5. Tool Changed?
-    if (prevProps.activeTool !== nextProps.activeTool) return false;
-
-    // 6. Split Clip Hover Position Changed?
-    if (prevProps.activeTool === "split" || nextProps.activeTool === "split") {
-      if (prevProps.splitHover !== nextProps.splitHover) {
-        // Only re-render if hover affects THIS track
-        if (
-          prevProps.splitHover?.trackIndex === prevProps.trackIdx ||
-          nextProps.splitHover?.trackIndex === nextProps.trackIdx
-        )
-          return false;
-      }
-    }
-
-    // 7. Ghost Clip Changed? (Drag started/stopped)
+    
     if (prevProps.ghostClip !== nextProps.ghostClip) return false;
-
-    return true; // Else, skip re-render
+    
+    return true;
   },
 );
 
@@ -653,6 +586,7 @@ export default function SimpleTimeline({
   const horizontalScrollRef = useRef<HTMLDivElement>(null);
   const proxyRef = useRef<HTMLDivElement>(null);
   const rafRef = useRef<number | null>(null);
+  const lastStateUpdateRef = useRef<number>(0);
   const dragMouseX = useRef<number>(0);
   const dragMouseY = useRef<number>(0);
 
@@ -1030,6 +964,9 @@ export default function SimpleTimeline({
           const proxyX = dragMouseX.current - (activeClipForProxy.clip.duration * zoom / 2);
           const proxyY = dragMouseY.current - (TRACK_HEIGHT / 2);
           proxyRef.current.style.transform = `translate(${proxyX}px, ${proxyY}px)`;
+          proxyRef.current.style.display = 'block';
+        } else if (proxyRef.current) {
+          proxyRef.current.style.display = 'none';
         }
 
         if (!scrollContainerRef.current) return;
@@ -1252,8 +1189,12 @@ export default function SimpleTimeline({
         }
 
         if (hasTrackChange) {
-          setLocalTracks(newTracks);
-          localTracksRef.current = newTracks;
+          const now = performance.now();
+          if (now - lastStateUpdateRef.current > 16) {
+            setLocalTracks(newTracks);
+            localTracksRef.current = newTracks;
+            lastStateUpdateRef.current = now;
+          }
         }
         if (hasDragStateChange) {
           setDragState(nextDragState);
