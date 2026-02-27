@@ -1051,10 +1051,22 @@ func (a *App) sanitizeVideo(path string) error {
 
 // SanitizeLocalFile exposes the sanitize logic to the frontend for dropped files
 func (a *App) SanitizeLocalFile(path string) (string, error) {
-	// 1. Check if already sanitized (optional, but good for performance)
-	// For now, we just run it. The ffmpeg command overwrites safely via temp file.
+	ext := strings.ToLower(filepath.Ext(path))
+	
+	// SKIP sanitization for pure audio files - they don't need H.264 proxying
+	if ext == ".mp3" || ext == ".wav" || ext == ".ogg" || ext == ".m4a" || ext == ".flac" {
+		return path, nil
+	}
+
+	// For videos, run the sanitizer
 	err := a.sanitizeVideo(path)
 	if err != nil {
+		// If it's a "file in use" error on Windows, we just return the original path
+		// rather than crashing the drop operation.
+		if strings.Contains(err.Error(), "used by another process") {
+			fmt.Printf("Warning: Video sanitization skipped (file locked): %s\n", path)
+			return path, nil
+		}
 		return "", err
 	}
 	return path, nil
@@ -1227,7 +1239,7 @@ func (a *App) GetProjectAssets(projectId string) []ProjectAsset {
 				assetType = "image"
 			}
 			// Identify Audio
-			if ext == ".mp3" || ext == ".wav" || ext == ".ogg" || ext == ".m4a" || ext == ".flac" {
+			if ext == ".mp3" || ext == ".wav" || ext == ".ogg" || ext == ".m4a" || ext == ".flac" || ext == ".aac" || ext == ".opus" || ext == ".aiff" {
 				assetType = "audio"
 			}
 
@@ -1306,7 +1318,7 @@ func (a *App) SelectAudio() string {
 	selection, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
 		Title: "Select Audio File",
 		Filters: []runtime.FileFilter{
-			{DisplayName: "Audio", Pattern: "*.mp3;*.wav;*.ogg;*.m4a;*.flac"},
+			{DisplayName: "Audio", Pattern: "*.mp3;*.wav;*.ogg;*.m4a;*.flac;*.aac;*.opus;*.aiff"},
 		},
 	})
 	if err != nil {

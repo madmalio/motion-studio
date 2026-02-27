@@ -1,6 +1,13 @@
 "use client";
 
-import React, { useRef, useState, useEffect, useCallback, memo, useMemo } from "react";
+import React, {
+  useRef,
+  useState,
+  useEffect,
+  useCallback,
+  memo,
+  useMemo,
+} from "react";
 import {
   Play,
   Pause,
@@ -20,16 +27,19 @@ import {
   VolumeX,
   Magnet,
   MoreVertical,
-  Maximize2, // New Icon
+  Maximize2,
+  Video,
+  AudioLines,
 } from "lucide-react";
 import { useDroppable, useDndContext, pointerWithin } from "@dnd-kit/core";
 
 // --- CONSTANTS ---
-const LEFT_PANEL_W = 160;
-const LEFT_PANEL_BG = "bg-[#2c2f33]";
-const LEFT_PANEL_BORDER = "border-r border-zinc-700";
-const TRACK_HEIGHT = 48;
-const SNAP_THRESHOLD_PX = 10;
+export const LEFT_PANEL_W = 160;
+export const LEFT_PANEL_BG = "bg-[#2c2f33]";
+export const LEFT_PANEL_BORDER = "border-r border-zinc-700";
+export const VIDEO_TRACK_H = 64;
+export const AUDIO_TRACK_H = 32;
+export const SNAP_THRESHOLD_PX = 10;
 
 // --- TYPES ---
 export type ClipType = "video" | "audio" | "image" | "text" | "solid";
@@ -45,7 +55,8 @@ export interface TimelineClip {
   color: string;
   sourceDuration?: number;
   thumbnail?: string;
-  isMuted?: boolean; // <--- NEW PROP
+  isMuted?: boolean;
+  volume?: number; // <--- NEW PROP
 }
 
 export interface TimelineTrack {
@@ -56,6 +67,7 @@ export interface TimelineTrack {
   isHidden?: boolean;
   isLocked?: boolean;
   clips: TimelineClip[];
+  volume?: number; // <--- NEW PROP
 }
 
 interface SimpleTimelineProps {
@@ -71,6 +83,7 @@ interface SimpleTimelineProps {
   onRedo?: () => void;
   volume?: number;
   onVolumeChange?: (vol: number) => void;
+  onTrackVolumeChange?: (trackIdx: number, vol: number) => void; // <--- NEW PROP
   selectedClipId?: string | null;
   onSelectClip?: (clipId: string | null) => void;
   onDeleteClip?: (clipId: string) => void;
@@ -94,45 +107,50 @@ const TimelineRuler = memo(function TimelineRuler({
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    // Handle High DPI
+    // Handle High DPI - Only resize if necessary
     const dpr = window.devicePixelRatio || 1;
     const rect = canvas.getBoundingClientRect();
-    canvas.width = rect.width * dpr;
-    canvas.height = rect.height * dpr;
-    ctx.scale(dpr, dpr);
+    const width = Math.floor(rect.width);
+    const height = Math.floor(rect.height);
+    
+    if (canvas.width !== width * dpr || canvas.height !== height * dpr) {
+      canvas.width = width * dpr;
+      canvas.height = height * dpr;
+      ctx.scale(dpr, dpr);
+    }
 
-    ctx.clearRect(0, 0, rect.width, rect.height);
+    ctx.clearRect(0, 0, width, height);
     ctx.fillStyle = "#71717a"; // zinc-500
     ctx.font = "9px monospace";
     ctx.textAlign = "left";
 
     // Calculate visible range
     const startSec = Math.max(0, Math.floor(scrollLeft / zoom));
-    const endSec = Math.ceil((scrollLeft + rect.width) / zoom);
+    const endSec = Math.ceil((scrollLeft + width) / zoom);
 
+    ctx.beginPath(); // Batch drawing
     for (let i = startSec; i <= endSec; i++) {
       const x = i * zoom - scrollLeft;
 
       // Major Tick (30s)
       if (i % 30 === 0) {
-        ctx.fillRect(x, 0, 1, 14); // Even shorter major tick
+        ctx.fillRect(x, 0, 1, 14); 
         if (showLabels) {
-          // NLE Format with 01:00:00 offset
           const adjusted = i + 3600;
           const h = Math.floor(adjusted / 3600);
           const m = Math.floor((adjusted % 3600) / 60);
           const s = Math.floor(adjusted % 60);
           const timeStr = `${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
-          ctx.fillText(timeStr, x + 4, rect.height - 4); // Labels at bottom
+          ctx.fillText(timeStr, x + 4, height - 4);
         }
       }
       // Medium Tick (15s)
       else if (showTicks && i % 15 === 0) {
-        ctx.fillRect(x, 0, 1, 8); // Shorter medium tick
+        ctx.fillRect(x, 0, 1, 8);
       }
       // Minor Tick (1s)
       else if (showTicks) {
-        ctx.fillRect(x, 0, 1, 4); // Shorter minor tick
+        ctx.fillRect(x, 0, 1, 4);
       }
     }
   }, [zoom, scrollLeft, showLabels, showTicks]);
@@ -199,85 +217,96 @@ const TrackRow = memo(
     zIndex, // <--- NEW PROP
     dragMouseX, // <--- NEW PROP
     ghostClip, // <--- NEW PROP (Optimization: Pass data instead of context)
+    onTrackVolumeChange, // <--- NEW PROP
   }: any) {
     const { setNodeRef, isOver, node } = useDroppable({
       id: `track-${trackIdx}`,
       data: { trackIndex: trackIdx },
     });
 
+    const currentHeight = track.type === "audio" ? AUDIO_TRACK_H : VIDEO_TRACK_H;
+
     // --- LIBRARY DRAG GHOST ---
-    // Use a local state for the ghost start time to trigger re-renders only for this track
     const [ghostStartTime, setGhostStartTime] = useState<number | null>(null);
     const ghostDuration = ghostClip?.duration || 4;
 
+    const isCompatible = useMemo(() => {
+      if (!ghostClip) return true;
+      // Library assets: audio assets have audioPath and NO outputVideo.
+      const isLibraryAudio = !!ghostClip.audioPath && !ghostClip.outputVideo;
+      if (isLibraryAudio) return track.type === "audio";
+      return track.type !== "audio";
+    }, [ghostClip, track.type]);
+
     useEffect(() => {
-      let rafId: number;
-      
-      const updateGhost = () => {
-        if (ghostClip && isOver && node.current) {
-          const rect = node.current.getBoundingClientRect();
-          const currentMouseX = dragMouseX.current;
-          const dragCenterOnTrack = currentMouseX - rect.left;
-          
-          // Center: start = center - (duration / 2)
-          let startTime = Math.max(0, (dragCenterOnTrack / zoom) - (ghostDuration / 2));
-
-          // --- GHOST SNAPPING ---
-          const snapThreshold = 10 / zoom; // 10px snap
-          let bestSnapDelta = Infinity;
-          let snapTarget = null;
-
-          const candidates = [0];
-          track.clips.forEach((c: any) => {
-            candidates.push(c.start);
-            candidates.push(c.start + c.duration);
-          });
-
-          // Snap START
-          candidates.forEach(pt => {
-            const delta = pt - startTime;
-            if (Math.abs(delta) < snapThreshold && Math.abs(delta) < Math.abs(bestSnapDelta)) {
-              bestSnapDelta = delta;
-              snapTarget = pt;
-            }
-          });
-
-          // Snap END
-          const endTime = startTime + ghostDuration;
-          candidates.forEach(pt => {
-            const delta = pt - endTime;
-            if (Math.abs(delta) < snapThreshold && Math.abs(delta) < Math.abs(bestSnapDelta)) {
-              bestSnapDelta = delta;
-              snapTarget = pt - ghostDuration;
-            }
-          });
-
-          if (snapTarget !== null) {
-            startTime = snapTarget;
-          }
-
-          const quantizedStart = Math.round(startTime * 30) / 30;
-          
-          setGhostStartTime(quantizedStart);
-        } else {
-          setGhostStartTime(null);
-        }
-        rafId = requestAnimationFrame(updateGhost);
-      };
-
-      if (ghostClip && isOver) {
-        rafId = requestAnimationFrame(updateGhost);
-      } else {
+      if (!ghostClip || !isOver || !isCompatible) {
         setGhostStartTime(null);
+        return;
       }
 
-      return () => cancelAnimationFrame(rafId);
-    }, [ghostClip, isOver, zoom, node, dragMouseX, ghostDuration, track.clips]);
+      const updateGhost = (e: MouseEvent) => {
+        if (!node.current) return;
+        const rect = node.current.getBoundingClientRect();
+        const dragCenterOnTrack = e.clientX - rect.left;
+
+        // Center: start = center - (duration / 2)
+        let startTime = Math.max(
+          0,
+          dragCenterOnTrack / zoom - ghostDuration / 2,
+        );
+
+        // --- GHOST SNAPPING ---
+        const snapThreshold = 10 / zoom; // 10px snap
+        let bestSnapDelta = Infinity;
+        let snapTarget = null;
+
+        const candidates = [0];
+        track.clips.forEach((c: any) => {
+          candidates.push(c.start);
+          candidates.push(c.start + c.duration);
+        });
+
+        // Snap START
+        candidates.forEach((pt) => {
+          const delta = pt - startTime;
+          if (
+            Math.abs(delta) < snapThreshold &&
+            Math.abs(delta) < Math.abs(bestSnapDelta)
+          ) {
+            bestSnapDelta = delta;
+            snapTarget = pt;
+          }
+        });
+
+        // Snap END
+        const endTime = startTime + ghostDuration;
+        candidates.forEach((pt) => {
+          const delta = pt - endTime;
+          if (
+            Math.abs(delta) < snapThreshold &&
+            Math.abs(delta) < Math.abs(bestSnapDelta)
+          ) {
+            bestSnapDelta = delta;
+            snapTarget = pt - ghostDuration;
+          }
+        });
+
+        if (snapTarget !== null) {
+          startTime = snapTarget;
+        }
+
+        const quantizedStart = Math.round(startTime * 30) / 30;
+        setGhostStartTime(quantizedStart);
+      };
+
+      window.addEventListener("mousemove", updateGhost);
+      return () => window.removeEventListener("mousemove", updateGhost);
+    }, [ghostClip, isOver, isCompatible, zoom, node, dragMouseX, ghostDuration, track.clips]);
 
     return (
       <div
         className="flex relative shrink-0 group"
-        style={{ height: TRACK_HEIGHT, zIndex }}
+        style={{ height: currentHeight, zIndex }}
       >
         {/* HEADER */}
         <div
@@ -286,18 +315,6 @@ const TrackRow = memo(
           onContextMenu={(e) => {
             e.preventDefault();
             if (onTrackContextMenu) onTrackContextMenu(e, trackIdx);
-          }}
-          onMouseMove={(e) => {
-            if (activeTool === "split" && onSplitHover) {
-              const rect = e.currentTarget.getBoundingClientRect();
-              const x = e.clientX - rect.left;
-              onSplitHover(trackIdx, x);
-            }
-          }}
-          onMouseLeave={() => {
-            if (activeTool === "split" && onSplitHover) {
-              onSplitHover(null);
-            }
           }}
         >
           <div className="flex justify-between items-center text-zinc-400">
@@ -326,8 +343,6 @@ const TrackRow = memo(
                 onClick={(e) => {
                   e.preventDefault();
                   e.stopPropagation();
-                  e.preventDefault();
-                  e.stopPropagation();
                   if (onTrackContextMenu) onTrackContextMenu(e, trackIdx);
                 }}
               >
@@ -340,7 +355,7 @@ const TrackRow = memo(
         {/* TIMELINE CONTENT */}
         <div
           ref={setNodeRef}
-          className={`flex-1 relative min-w-[2000px] transition-colors ${isOver ? "bg-zinc-800/30" : ""} ${activeTool === "split" ? "cursor-crosshair" : ""}`}
+          className={`flex-1 relative min-w-[2000px] transition-colors ${isOver && isCompatible ? "bg-zinc-800/30" : ""} ${activeTool === "split" ? "cursor-crosshair" : ""}`}
           onClick={(e) => {
             if (activeTool === "split" && onSplitClip) {
               const rect = e.currentTarget.getBoundingClientRect();
@@ -373,11 +388,15 @@ const TrackRow = memo(
           )}
 
           {/* SPLIT LINE INDICATOR */}
-          {activeTool === "split" && splitHover?.trackIndex === trackIdx && (
+          {activeTool === "split" &&
+            splitHover?.trackIndex === trackIdx &&
             (() => {
               // Check if hovering over a clip
               const hoverTime = splitHover.x / zoom;
-              const hoveringClip = track.clips.find((c: any) => hoverTime >= c.start && hoverTime <= c.start + c.duration);
+              const hoveringClip = track.clips.find(
+                (c: any) =>
+                  hoverTime >= c.start && hoverTime <= c.start + c.duration,
+              );
 
               if (hoveringClip) {
                 return (
@@ -388,21 +407,22 @@ const TrackRow = memo(
                 );
               }
               return null;
-            })()
-          )}
+            })()}
 
           {track.clips.map((clip: any) => {
             const isSelected = selectedClipId === clip.id;
-            const isBeingMoved = dragState?.clipId === clip.id && dragState.type === "move";
+            const isBeingMoved =
+              dragState?.clipId === clip.id && dragState.type === "move";
 
             return (
               <div
                 key={clip.id}
                 className={`absolute top-0 bottom-0 border flex flex-col overflow-hidden cursor-pointer select-none group/clip rounded-sm
-                ${track.type === "audio"
-                    ? "bg-[#1a1a1c] border-white/10"
+                ${
+                  track.type === "audio"
+                    ? "bg-[#D2FF44] border-black/10"
                     : "bg-[#375a6c] border-[#213845]"
-                  }
+                }
                 ${track.isLocked ? "opacity-50 cursor-not-allowed" : "hover:brightness-110"}
                 ${dragState?.clipId === clip.id ? "ring-2 ring-[#D2FF44] z-30 opacity-80" : "z-10"}
                 ${isBeingMoved ? "opacity-30 border-dashed border-[#D2FF44]/50 grayscale" : ""}
@@ -413,21 +433,11 @@ const TrackRow = memo(
                 style={{
                   left: clip.start * zoom,
                   width: Math.max(2, clip.duration * zoom),
-                  transition:
-                    dragState?.clipId === clip.id
-                      ? "none"
-                      : "left 0.1s, width 0.1s",
                 }}
                 onMouseDown={(e) => {
                   e.stopPropagation(); // Prevent deselect
                   if (activeTool === "split") {
                     if (onSplitClip) {
-                      // Click calculation needs to happen relative to track container, handled by parent onClick.
-                      // But since we stopPropagation here, we need to manually trigger split.
-                      // However, finding the X relative to track container is tricky here.
-                      // Better approach: Let the click bubbling handle it?
-                      // No, because onMouseDown stops prop.
-                      // Let's manually call split here.
                       const rect =
                         e.currentTarget.parentElement?.getBoundingClientRect();
                       if (rect) {
@@ -439,6 +449,13 @@ const TrackRow = memo(
                   }
                   if (onSelectClip) onSelectClip(clip.id);
                   onDragStart(e, clip, trackIdx, "move");
+                }}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  if (onClipContextMenu) {
+                    onClipContextMenu(e, trackIdx, clip.id);
+                  }
                 }}
               >
                 {track.type !== "audio" && (
@@ -471,15 +488,15 @@ const TrackRow = memo(
                   </div>
                 )}
                 {track.type === "audio" && (
-                  <div className="relative overflow-hidden shrink-0 flex items-center flex-1 bg-[#101012]">
-                    <div className="w-full h-px bg-[#D2FF44]/30" />
-                    <div className="absolute top-1 left-2 text-[9px] text-zinc-400 font-mono pointer-events-none">
+                  <div className="relative overflow-hidden shrink-0 flex items-center flex-1 bg-transparent px-2">
+                    <div className="w-full h-px bg-black/10 absolute left-0" style={{ top: '50%' }} />
+                    <div className="relative text-[10px] text-black font-bold font-mono pointer-events-none truncate uppercase">
                       {clip.name}
                     </div>
                     {/* KEBAB MENU (Audio - Right side) */}
                     <div className="absolute top-1 right-1 z-40 opacity-0 group-hover/clip:opacity-100 transition-opacity">
                       <button
-                        className={`p-1 hover:bg-zinc-600/80 rounded text-white ${clip.isMuted ? "bg-red-500/20 text-red-400 opacity-100" : "bg-black/50"}`}
+                        className={`p-1 hover:bg-black/10 rounded text-black ${clip.isMuted ? "opacity-50" : ""}`}
                         onClick={(e) => {
                           e.stopPropagation();
                           if (onClipContextMenu)
@@ -518,39 +535,79 @@ const TrackRow = memo(
     if (prevProps.zoom !== nextProps.zoom) return false;
     if (prevProps.zIndex !== nextProps.zIndex) return false;
     if (prevProps.activeTool !== nextProps.activeTool) return false;
-    if (prevProps.track.name !== nextProps.track.name) return false;
-    if (prevProps.track.isMuted !== nextProps.track.isMuted) return false;
-    if (prevProps.track.isHidden !== nextProps.track.isHidden) return false;
-    if (prevProps.track.isLocked !== nextProps.track.isLocked) return false;
-    if (prevProps.track.clips.length !== nextProps.track.clips.length) return false;
-    
-    // Check clip IDs - only re-render if dragged clip position changed on this track
-    const prevClipIds = prevProps.track.clips.map((c: any) => c.id);
-    const nextClipIds = nextProps.track.clips.map((c: any) => c.id);
-    
-    for (let i = 0; i < prevClipIds.length; i++) {
-      if (prevClipIds[i] !== nextClipIds[i]) return false;
-      const nextClip = nextProps.track.clips[i];
-      if (nextProps.dragState?.clipId === nextClip.id && nextProps.dragState?.trackIndex === nextProps.trackIdx) {
+    if (prevProps.track !== nextProps.track) return false;
+    if (prevProps.selectedClipId !== nextProps.selectedClipId) return false;
+    if (prevProps.dragState !== nextProps.dragState) return false;
+    if (prevProps.ghostClip !== nextProps.ghostClip) return false;
+
+    if (prevProps.splitHover !== nextProps.splitHover) {
+      if (
+        prevProps.splitHover?.trackIndex === prevProps.trackIdx ||
+        nextProps.splitHover?.trackIndex === nextProps.trackIdx
+      ) {
         return false;
       }
     }
-    
-    if (prevProps.selectedClipId !== nextProps.selectedClipId) {
-      const prevSelectedInTrack = prevProps.track.clips.some((c: any) => c.id === prevProps.selectedClipId);
-      const nextSelectedInTrack = nextProps.track.clips.some((c: any) => c.id === nextProps.selectedClipId);
-      if (prevSelectedInTrack || nextSelectedInTrack) return false;
-    }
-    
-    if (prevProps.dragState?.trackIndex === prevProps.trackIdx || nextProps.dragState?.trackIndex === nextProps.trackIdx) {
-      return false;
-    }
-    
-    if (prevProps.ghostClip !== nextProps.ghostClip) return false;
-    
+
     return true;
   },
 );
+
+// --- TRACK ADD DROPDOWN ---
+function TrackAddDropdown({
+  addTrack,
+}: {
+  addTrack: (type: "video" | "audio") => void;
+}) {
+  const [isOpen, setIsOpen] = useState(false);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (
+        dropdownRef.current &&
+        !dropdownRef.current.contains(event.target as Node)
+      ) {
+        setIsOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  return (
+    <div className="relative" ref={dropdownRef}>
+      <button
+        onClick={() => setIsOpen(!isOpen)}
+        className="flex items-center gap-1 text-[10px] bg-zinc-800 hover:bg-zinc-700 px-2 py-1 rounded text-zinc-300"
+      >
+        <Plus size={10} /> Add Track
+      </button>
+      {isOpen && (
+        <div className="absolute top-full left-0 mt-1 z-[101] bg-[#2c2f33] border border-zinc-700 rounded-lg shadow-xl py-1 min-w-[140px]">
+          <button
+            className="w-full text-left px-3 py-2 hover:bg-zinc-700 text-zinc-300 flex items-center gap-2 text-xs"
+            onClick={() => {
+              addTrack("video");
+              setIsOpen(false);
+            }}
+          >
+            <Video size={12} /> Video Track
+          </button>
+          <button
+            className="w-full text-left px-3 py-2 hover:bg-zinc-700 text-zinc-300 flex items-center gap-2 text-xs"
+            onClick={() => {
+              addTrack("audio");
+              setIsOpen(false);
+            }}
+          >
+            <AudioLines size={12} /> Audio Track
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
 
 // --- MAIN COMPONENT ---
 export default function SimpleTimeline({
@@ -566,9 +623,11 @@ export default function SimpleTimeline({
   onRedo,
   volume = 1,
   onVolumeChange,
+  onTrackVolumeChange, // <--- NEW PROP
   selectedClipId,
   onSelectClip,
   onDeleteClip, // <--- NEW PROP
+  onExtendClip, // <--- NEW PROP
   onRegisterHistory,
   fps = 30,
 }: SimpleTimelineProps) {
@@ -589,6 +648,12 @@ export default function SimpleTimeline({
   const lastStateUpdateRef = useRef<number>(0);
   const dragMouseX = useRef<number>(0);
   const dragMouseY = useRef<number>(0);
+  const clipVolumeCommitTimerRef = useRef<number | null>(null);
+  const pendingClipVolumeRef = useRef<{
+    clipId: string;
+    trackIndex: number;
+    vol: number;
+  } | null>(null);
 
   // Helper: Format Time (HH:MM:SS:FF) matching TimelinePanel
   const formatTime = (seconds: number) => {
@@ -700,8 +765,10 @@ export default function SimpleTimeline({
   // To prevent Next.js from re-rendering the entire page 60 FPS during drags
   const [localTracks, setLocalTracks] = useState(tracks);
   const localTracksRef = useRef(tracks);
+  const tracksRef = useRef(tracks);
 
   useEffect(() => {
+    tracksRef.current = tracks;
     if (!dragState) {
       setLocalTracks(tracks);
       localTracksRef.current = tracks;
@@ -726,22 +793,35 @@ export default function SimpleTimeline({
     [setZoom],
   );
 
-  const addTrack = useCallback(() => {
-    if (onRegisterHistory) onRegisterHistory();
-    setTracks((prev) => {
-      const nextNum = prev.length + 1;
-      const newTrack: TimelineTrack = {
-        id: crypto.randomUUID(),
-        name: `Track ${nextNum}`,
-        type: "video",
-        clips: [],
-        isHidden: false,
-        isMuted: false,
-        isLocked: false,
-      };
-      return [newTrack, ...prev];
-    });
-  }, [setTracks, onRegisterHistory]);
+  const addTrack = useCallback(
+    (trackType: "video" | "audio" = "video") => {
+      if (onRegisterHistory) onRegisterHistory();
+      setTracks((prev) => {
+        const videoTracks = prev.filter((t) => t.type === "video");
+        const audioTracks = prev.filter((t) => t.type === "audio");
+        const nextNum =
+          trackType === "video"
+            ? videoTracks.length + 1
+            : audioTracks.length + 1;
+        const newTrack: TimelineTrack = {
+          id: crypto.randomUUID(),
+          name: trackType === "video" ? `Video ${nextNum}` : `Audio ${nextNum}`,
+          type: trackType,
+          clips: [],
+          isHidden: false,
+          isMuted: false,
+          isLocked: false,
+        };
+        if (trackType === "video") {
+          return [newTrack, ...prev];
+        }
+        const videoPart = prev.filter((t) => t.type === "video");
+        const audioPart = prev.filter((t) => t.type === "audio");
+        return [...videoPart, ...audioPart, newTrack];
+      });
+    },
+    [setTracks, onRegisterHistory],
+  );
 
   const deleteTrack = useCallback(
     (index: number) => {
@@ -760,6 +840,72 @@ export default function SimpleTimeline({
     },
     [setTracks, onRegisterHistory],
   );
+
+  const handleTrackVolumeChangeInternal = useCallback(
+    (index: number, vol: number) => {
+      // Local update for performance
+      setLocalTracks((prev) => {
+        const next = [...prev];
+        next[index] = { ...next[index], volume: vol };
+        localTracksRef.current = next;
+        return next;
+      });
+
+      // Global update
+      if (onTrackVolumeChange) onTrackVolumeChange(index, vol);
+      setTracks((prev) =>
+        prev.map((t, i) => (i === index ? { ...t, volume: vol } : t)),
+      );
+    },
+    [onTrackVolumeChange, setTracks],
+  );
+
+  const updateClipVolumeInTracks = useCallback(
+    (
+      prev: TimelineTrack[],
+      clipId: string,
+      trackIndex: number,
+      vol: number,
+    ): TimelineTrack[] => {
+      if (trackIndex < 0 || trackIndex >= prev.length) return prev;
+
+      const next = [...prev];
+      const track = next[trackIndex];
+      if (!track) return prev;
+
+      const clipIdx = track.clips.findIndex((c) => c.id === clipId);
+      if (clipIdx === -1) return prev;
+
+      const currentClip = track.clips[clipIdx];
+      if (currentClip.volume === vol) return prev;
+
+      const nextTrack = { ...track, clips: [...track.clips] };
+      nextTrack.clips[clipIdx] = { ...currentClip, volume: vol };
+      next[trackIndex] = nextTrack;
+      return next;
+    },
+    [],
+  );
+
+  const flushPendingClipVolume = useCallback(() => {
+    if (clipVolumeCommitTimerRef.current) {
+      window.clearTimeout(clipVolumeCommitTimerRef.current);
+      clipVolumeCommitTimerRef.current = null;
+    }
+
+    const pending = pendingClipVolumeRef.current;
+    if (!pending) return;
+
+    pendingClipVolumeRef.current = null;
+    setTracks((prev) =>
+      updateClipVolumeInTracks(
+        prev,
+        pending.clipId,
+        pending.trackIndex,
+        pending.vol,
+      ),
+    );
+  }, [setTracks, updateClipVolumeInTracks]);
 
   const toggleClipMute = useCallback(
     (clipId: string, trackIndex: number) => {
@@ -780,6 +926,47 @@ export default function SimpleTimeline({
     },
     [setTracks, onRegisterHistory],
   );
+
+  const setClipVolume = useCallback(
+    (clipId: string, trackIndex: number, vol: number) => {
+      const clamped = Math.max(0, Math.min(2, vol));
+
+      setLocalTracks((prev) => {
+        const next = updateClipVolumeInTracks(prev, clipId, trackIndex, clamped);
+        localTracksRef.current = next;
+        return next;
+      });
+
+      pendingClipVolumeRef.current = { clipId, trackIndex, vol: clamped };
+
+      if (clipVolumeCommitTimerRef.current) {
+        window.clearTimeout(clipVolumeCommitTimerRef.current);
+      }
+
+      clipVolumeCommitTimerRef.current = window.setTimeout(() => {
+        const pending = pendingClipVolumeRef.current;
+        if (!pending) return;
+
+        pendingClipVolumeRef.current = null;
+        clipVolumeCommitTimerRef.current = null;
+        setTracks((prev) =>
+          updateClipVolumeInTracks(
+            prev,
+            pending.clipId,
+            pending.trackIndex,
+            pending.vol,
+          ),
+        );
+      }, 120);
+    },
+    [setTracks, updateClipVolumeInTracks],
+  );
+
+  useEffect(() => {
+    return () => {
+      flushPendingClipVolume();
+    };
+  }, [flushPendingClipVolume]);
 
   const handleSplitClip = useCallback(
     (trackIndex: number, x: number, zoom: number) => {
@@ -899,13 +1086,13 @@ export default function SimpleTimeline({
     ) => {
       e.stopPropagation();
       if (activeTool === "split") return;
-      if (tracks[trackIndex].isLocked) return;
+      if (tracksRef.current[trackIndex].isLocked) return;
 
       if (onRegisterHistory) onRegisterHistory();
 
       // Pre-calculate snap points (Optimization)
       const snapPoints = [0]; // Always snap to 0
-      tracks.forEach((t) => {
+      tracksRef.current.forEach((t) => {
         t.clips.forEach((c) => {
           if (c.id === clip.id) return; // Skip self
           snapPoints.push(c.start);
@@ -930,7 +1117,7 @@ export default function SimpleTimeline({
         clickOffsetY: offsetY,
       });
     },
-    [activeTool, tracks, onRegisterHistory],
+    [activeTool, onRegisterHistory],
   );
 
   const handleMouseMove = useCallback(
@@ -959,14 +1146,24 @@ export default function SimpleTimeline({
       rafRef.current = requestAnimationFrame(() => {
         rafRef.current = null;
 
+        // --- CALC CURRENT DRAG PROXY HEIGHT ---
+        const currentTracks = localTracksRef.current;
+        const draggingTrack = currentTracks[dragState.trackIndex];
+        const draggingTrackH = draggingTrack?.type === "audio" ? AUDIO_TRACK_H : VIDEO_TRACK_H;
+
         // UPDATE PROXY (Smooth Cursor Tracking - Centered)
-        if (proxyRef.current && dragState.type === "move" && activeClipForProxy) {
-          const proxyX = dragMouseX.current - (activeClipForProxy.clip.duration * zoom / 2);
-          const proxyY = dragMouseY.current - (TRACK_HEIGHT / 2);
+        if (
+          proxyRef.current &&
+          dragState.type === "move" &&
+          activeClipForProxy
+        ) {
+          const proxyX =
+            dragMouseX.current - (activeClipForProxy.clip.duration * zoom) / 2;
+          const proxyY = dragMouseY.current - draggingTrackH / 2;
           proxyRef.current.style.transform = `translate(${proxyX}px, ${proxyY}px)`;
-          proxyRef.current.style.display = 'block';
+          proxyRef.current.style.display = "block";
         } else if (proxyRef.current) {
-          proxyRef.current.style.display = 'none';
+          proxyRef.current.style.display = "none";
         }
 
         if (!scrollContainerRef.current) return;
@@ -975,7 +1172,6 @@ export default function SimpleTimeline({
         const deltaSeconds = deltaX / zoom;
 
         // STABILIZATION: Read from ref
-        const currentTracks = localTracksRef.current;
         const newTracks = [...currentTracks];
 
         let hasTrackChange = false;
@@ -989,7 +1185,18 @@ export default function SimpleTimeline({
             dragMouseY.current -
             rect.top +
             scrollContainerRef.current!.scrollTop;
-          const targetTrackIndex = Math.floor(relativeY / TRACK_HEIGHT);
+          
+          // --- ACCUMULATED HEIGHT RESOLUTION ---
+          let targetTrackIndex = -1;
+          let accumulatedHeight = 0;
+          for (let i = 0; i < currentTracks.length; i++) {
+            const h = currentTracks[i].type === "audio" ? AUDIO_TRACK_H : VIDEO_TRACK_H;
+            if (relativeY >= accumulatedHeight && relativeY < accumulatedHeight + h) {
+              targetTrackIndex = i;
+              break;
+            }
+            accumulatedHeight += h;
+          }
 
           if (
             targetTrackIndex >= 0 &&
@@ -1006,6 +1213,11 @@ export default function SimpleTimeline({
 
             if (clipIndex !== -1) {
               const clip = { ...originalTrack.clips[clipIndex] };
+
+              // --- COMPATIBILITY CHECK ---
+              const isAudioClip = clip.type === "audio";
+              const isTargetAudioTrack = targetTrack.type === "audio";
+              if (isAudioClip !== isTargetAudioTrack) return;
 
               // 1. Remove from old
               newTracks[dragState.trackIndex] = {
@@ -1075,7 +1287,10 @@ export default function SimpleTimeline({
               const eDelta = checkSnap(currentEnd);
               if (eDelta !== null) {
                 // If we already have a start snap, only override if end snap is closer
-                if (snapDelta === null || Math.abs(eDelta) < Math.abs(snapDelta)) {
+                if (
+                  snapDelta === null ||
+                  Math.abs(eDelta) < Math.abs(snapDelta)
+                ) {
                   snapDelta = eDelta;
                 }
               }
@@ -1108,7 +1323,12 @@ export default function SimpleTimeline({
             }
           } else if (dragState.type === "resize-right") {
             const currentOffset = clip.offset || 0;
-            const maxDuration = (clip.sourceDuration || 86400) - currentOffset;
+            const hasFiniteSourceDuration =
+              typeof clip.sourceDuration === "number" &&
+              Number.isFinite(clip.sourceDuration);
+            const maxDuration = hasFiniteSourceDuration
+              ? clip.sourceDuration! - currentOffset
+              : null;
 
             let newDuration =
               dragState.originalDuration + deltaSeconds + (snapDelta || 0);
@@ -1116,13 +1336,17 @@ export default function SimpleTimeline({
             // Cap at min duration (0.1s)
             newDuration = Math.max(0.1, newDuration);
 
-            // Cap at max duration (source length)
-            newDuration = Math.min(newDuration, maxDuration);
+            // Cap at max duration only when we have a valid source limit
+            if (maxDuration !== null && maxDuration >= 0.1) {
+              newDuration = Math.min(newDuration, maxDuration);
+            }
 
             // Quantize ONLY if we aren't actively snapping to an exact timestamp
             if (snapDelta === null) {
               newDuration = quantizeTime(newDuration);
             }
+
+            newDuration = Math.max(0.1, newDuration);
 
             if (clip.duration !== newDuration) {
               clip.duration = newDuration;
@@ -1177,7 +1401,8 @@ export default function SimpleTimeline({
               const finalDuration = dragState.originalDuration - finalShift;
               const finalOffset = dragState.originalOffset + finalShift;
 
-              if (finalDuration >= 0.1) { // Min duration check
+              if (finalDuration >= 0.1) {
+                // Min duration check
                 clip.start = finalStart;
                 clip.duration = finalDuration;
                 clip.offset = finalOffset;
@@ -1228,7 +1453,9 @@ export default function SimpleTimeline({
       let destTrackIdx = -1;
 
       for (let i = 0; i < currentLocalTracks.length; i++) {
-        const found = currentLocalTracks[i].clips.find((c) => c.id === dragState.clipId);
+        const found = currentLocalTracks[i].clips.find(
+          (c) => c.id === dragState.clipId,
+        );
         if (found) {
           finalDraggedClip = found;
           destTrackIdx = i;
@@ -1254,7 +1481,7 @@ export default function SimpleTimeline({
         newTracks.forEach((t, i) => {
           newTracks[i] = {
             ...t,
-            clips: t.clips.filter((c) => c.id !== dragState.clipId)
+            clips: t.clips.filter((c) => c.id !== dragState.clipId),
           };
         });
 
@@ -1369,11 +1596,13 @@ export default function SimpleTimeline({
           targetTrack.clips.sort((a, b) => a.start - b.start);
 
           // Force strictly quantized frames to prevent Remotion floating point drift
-          targetTrack.clips = targetTrack.clips.map(c => ({
-            ...c,
-            start: quantizeTime(c.start),
-            duration: quantizeTime(c.duration)
-          })).filter(c => c.duration >= 0.1);
+          targetTrack.clips = targetTrack.clips
+            .map((c) => ({
+              ...c,
+              start: quantizeTime(c.start),
+              duration: quantizeTime(c.duration),
+            }))
+            .filter((c) => c.duration >= 0.1);
 
           newTracks[destTrackIdx] = targetTrack;
           return newTracks;
@@ -1440,7 +1669,7 @@ export default function SimpleTimeline({
   );
 
   return (
-    <div className="flex flex-col h-full bg-[#1e1e20] text-xs font-sans select-none overflow-hidden border-t border-black">
+    <div className="flex flex-col h-full bg-[#1e1e20] text-xs font-sans select-none overflow-visible border-t border-black">
       {/* TOOLBAR */}
       <div className="h-10 border-b border-black/40 bg-[#262629] shrink-0 flex items-center justify-center relative z-20">
         <div className="flex items-center gap-4">
@@ -1488,14 +1717,9 @@ export default function SimpleTimeline({
         </div>
       </div>
 
-      <div className="h-10 border-b border-black/40 bg-[#262629] shrink-0 flex items-center px-4 justify-between z-20">
-        <div className="flex items-center gap-3">
-          <button
-            onClick={addTrack}
-            className="flex items-center gap-1 text-[10px] bg-zinc-800 hover:bg-zinc-700 px-2 py-1 rounded text-zinc-300"
-          >
-            <Plus size={10} /> Add Track
-          </button>
+      <div className="h-10 border-b border-black/40 bg-[#262629] shrink-0 flex items-center px-4 justify-between z-40">
+        <div className="flex items-center gap-2">
+          <TrackAddDropdown addTrack={addTrack} />
           <div className="w-px h-4 bg-zinc-700 mx-1" />
           <button
             onClick={() => setActiveTool("select")}
@@ -1621,9 +1845,10 @@ export default function SimpleTimeline({
                 onSplitClip={handleSplitClip}
                 splitHover={activeTool === "split" ? splitHover : null}
                 onSplitHover={handleSplitHover}
-                zIndex={localTracks.length - i}
+                zIndex={track.type === "audio" ? i + 1 : localTracks.length - i}
                 dragMouseX={dragMouseX}
                 ghostClip={ghostClip}
+                onTrackVolumeChange={handleTrackVolumeChangeInternal}
               />
             ))}
             <div className="h-32 w-full"></div>
@@ -1674,9 +1899,9 @@ export default function SimpleTimeline({
           className="fixed top-0 left-0 pointer-events-none z-[9999] opacity-100 shadow-2xl overflow-hidden rounded-sm"
           style={{
             width: activeClipForProxy.clip.duration * zoom,
-            height: TRACK_HEIGHT,
+            height: activeClipForProxy.trackType === "audio" ? AUDIO_TRACK_H : VIDEO_TRACK_H,
             // Initial position centered on cursor
-            transform: `translate(${dragMouseX.current - (activeClipForProxy.clip.duration * zoom / 2)}px, ${dragMouseY.current - (TRACK_HEIGHT / 2)}px)`,
+            transform: `translate(${dragMouseX.current - (activeClipForProxy.clip.duration * zoom) / 2}px, ${dragMouseY.current - (activeClipForProxy.trackType === "audio" ? AUDIO_TRACK_H : VIDEO_TRACK_H) / 2}px)`,
           }}
         >
           {activeClipForProxy.trackType !== "audio" ? (
@@ -1692,9 +1917,9 @@ export default function SimpleTimeline({
               </div>
             </div>
           ) : (
-            <div className="relative overflow-hidden shrink-0 flex items-center h-full flex-1 bg-[#101012] border border-white/10">
-              <div className="w-full h-px bg-[#D2FF44]/30" />
-              <div className="absolute top-1 left-2 text-[9px] text-zinc-400 font-mono">
+            <div className="relative overflow-hidden shrink-0 flex items-center h-full flex-1 bg-[#D2FF44] border border-black/10 px-2">
+              <div className="w-full h-px bg-black/10 absolute left-0" style={{ top: '50%' }} />
+              <div className="relative text-[10px] text-black font-bold font-mono pointer-events-none truncate uppercase">
                 {activeClipForProxy.clip.name}
               </div>
             </div>
@@ -1705,8 +1930,11 @@ export default function SimpleTimeline({
       {/* CONTEXT MENU */}
       {contextMenu && (
         <div
-          className="fixed z-[100] bg-[#2c2f33] border border-zinc-700 rounded-lg shadow-xl py-1 min-w-[140px]"
-          style={{ top: contextMenu.y, left: contextMenu.x }}
+          className="fixed z-[100] bg-[#2c2f33] border border-zinc-700 rounded-lg shadow-xl py-1 min-w-[140px] max-h-[calc(100vh-10px)] overflow-y-auto"
+          style={{
+            top: Math.min(contextMenu.y, window.innerHeight - 280),
+            left: Math.min(contextMenu.x, window.innerWidth - 150),
+          }}
           onClick={(e) => e.stopPropagation()}
         >
           <div className="px-3 py-1.5 text-xs font-semibold text-zinc-400 border-b border-zinc-700 mb-1">
@@ -1805,6 +2033,33 @@ export default function SimpleTimeline({
                   </>
                 )}
               </button>
+
+              {/* CLIP VOLUME SLIDER */}
+              <div className="px-3 py-2 border-t border-zinc-700 mt-1">
+                <div className="flex justify-between items-center text-[10px] text-zinc-500 mb-1">
+                  <span>Clip Volume</span>
+                  <span className="font-mono">
+                    {Math.round(((localTracks[contextMenu.trackIndex]?.clips.find((c) => c.id === contextMenu.clipId)?.volume ?? 1) * 100))}%
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min="0"
+                  max="2"
+                  step="0.01"
+                  value={localTracks[contextMenu.trackIndex]?.clips.find((c) => c.id === contextMenu.clipId)?.volume ?? 1}
+                  onChange={(e) =>
+                    setClipVolume(
+                      contextMenu.clipId!,
+                      contextMenu.trackIndex,
+                      parseFloat(e.target.value),
+                    )
+                  }
+                  onMouseUp={flushPendingClipVolume}
+                  onPointerUp={flushPendingClipVolume}
+                  className="w-full h-1 accent-[#D2FF44] bg-zinc-800 rounded-lg appearance-none cursor-pointer"
+                />
+              </div>
 
               <button
                 className="w-full text-left px-3 py-1.5 hover:bg-zinc-700 text-zinc-300 flex items-center gap-2 text-xs"

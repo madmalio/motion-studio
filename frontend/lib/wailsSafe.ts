@@ -45,6 +45,10 @@ export const ReadImageBase64 = (path: string) =>
   callGo(() => App.ReadImageBase64(path), "ReadImageBase64");
 export const ExtractLastFrame = (path: string) =>
   callGo(() => App.ExtractLastFrame(path), "ExtractLastFrame");
+export const SanitizeLocalFile = (path: string) =>
+  callGo(() => App.SanitizeLocalFile(path), "SanitizeLocalFile");
+export const ExportVideo = (projectId: string, sceneId: string, options: any) =>
+  callGo(() => App.ExportVideo(projectId, sceneId, options), "ExportVideo");
 
 export async function ExtractAudioPeaks(
   filePath: string,

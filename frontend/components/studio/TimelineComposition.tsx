@@ -57,15 +57,29 @@ export const TimelineComposition = (props: any) => {
               clip: c,
               trackIdx,
               trackIsMuted: track.isMuted,
+              trackVolume: track.volume, // <--- NEW PROP
               startFrame, // Original Start
               durationInFrames, // Original Duration
-              // Z-INDEX SORTING: (100 - trackIdx) * 1000 ensures Track 0 (top of UI) is rendered LATER than Track 1 (so it's ON TOP)
-              score: (100 - trackIdx) * 1000 + clipIdx,
+              // Z-INDEX SORTING: 
+              // For video, lower trackIdx is on top.
+              // For audio, higher trackIdx is on top (reverse hierarchy).
+              score: c.type === "video" || c.type === "image" || c.type === "text" || c.type === "solid"
+                ? (100 - trackIdx) * 1000 + clipIdx
+                : (trackIdx + 1) * 1000 + clipIdx,
             };
           });
         });
 
         allClips.sort((a, b) => a.score - b.score);
+
+        // --- AUDIO DOMINANCE PRE-CALCULATION ---
+        const audioClipsForDominance = allClips
+          .filter(item => item.clip.type === "audio" && !item.clip.isMuted && !item.trackIsMuted)
+          .map(item => ({
+            startFrame: item.startFrame,
+            endFrame: item.startFrame + item.durationInFrames,
+            trackIdx: item.trackIdx,
+          }));
 
         return allClips.map((item) => (
           <VideoClipRenderer
@@ -75,6 +89,7 @@ export const TimelineComposition = (props: any) => {
             globalVolume={globalVolume}
             videoBlobs={videoBlobs}
             isPlaying={isPlaying}
+            audioClipsForDominance={audioClipsForDominance}
           />
         ));
       })()}
@@ -83,14 +98,15 @@ export const TimelineComposition = (props: any) => {
 };
 
 // --- GAPLESS DOM CLIP RENDERER ---
-const VideoClipRenderer = ({ item, fps, globalVolume, videoBlobs, isPlaying }: {
+const VideoClipRenderer = ({ item, fps, globalVolume, videoBlobs, isPlaying, audioClipsForDominance }: {
   item: any;
   fps: number;
   globalVolume: number;
   videoBlobs?: Map<string, string>;
   isPlaying?: boolean;
+  audioClipsForDominance: any[];
 }) => {
-  const { clip: c, startFrame, durationInFrames, trackIsMuted } = item;
+  const { clip: c, startFrame, durationInFrames, trackIsMuted, trackIdx, trackVolume } = item;
 
   let src = c.src || c.file || "";
   if (c.type === "audio") {
@@ -113,8 +129,11 @@ const VideoClipRenderer = ({ item, fps, globalVolume, videoBlobs, isPlaying }: {
   const seqDuration = Math.max(durationInFrames, 1);
   const startFrom = Math.max(0, Math.round((c.trimStart || c.offset || 0) * fps));
 
-  const volume = typeof c.volume === "number" ? c.volume : 1;
-  const finalVolume = volume * (typeof globalVolume === "number" ? globalVolume : 1);
+  // MULTIPLIER VOLUME: Global * Track * Clip
+  const clipVolume = typeof c.volume === "number" ? c.volume : 1;
+  const tVolume = typeof trackVolume === "number" ? trackVolume : 1;
+  const finalVolume = clipVolume * tVolume * (typeof globalVolume === "number" ? globalVolume : 1);
+  
   const isMuted = finalVolume === 0 || !!trackIsMuted || !!c.isMuted;
 
   const volumeVal = isMuted ? 0 : finalVolume;
@@ -132,20 +151,37 @@ const VideoClipRenderer = ({ item, fps, globalVolume, videoBlobs, isPlaying }: {
         volumeVal={volumeVal}
         isMuted={isMuted}
         isImage={isImage}
+        seqFrom={seqFrom}
+        trackIdx={trackIdx}
+        audioClipsForDominance={audioClipsForDominance}
       />
     </Sequence>
   );
 };
 
 // Use a tertiary component to access useCurrentFrame cleanly inside the Sequence
-const ClipContent = ({ c, src, startFrom, volumeVal, isMuted, isImage }: any) => {
+const ClipContent = ({ c, src, startFrom, volumeVal, isMuted, isImage, seqFrom, trackIdx, audioClipsForDominance }: any) => {
+  const frame = useCurrentFrame();
+
   if (c.type === "audio") {
+    // --- DOMINANCE CALCULATION ---
+    // For audio, lower tracks (higher index) are dominant.
+    // If an overlapping clip exists on a track with a HIGHER index, mute this one.
+    const absFrame = frame + seqFrom;
+    const isCovered = audioClipsForDominance.some((other: any) => 
+      other.trackIdx > trackIdx && 
+      absFrame >= other.startFrame && 
+      absFrame < other.endFrame
+    );
+
+    const finalVolume = isCovered ? 0 : volumeVal;
+
     return (
       <Audio
         src={src}
         startFrom={startFrom}
-        volume={volumeVal}
-        muted={isMuted}
+        volume={finalVolume}
+        muted={isMuted || isCovered}
         pauseWhenBuffering={false} // NEVER FREEZE TIMELINE!
         onError={(e) => console.error(`❌ Audio File Failed: ${src}`, e)}
       />

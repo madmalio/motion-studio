@@ -8,6 +8,7 @@ import {
   useRef,
   useCallback,
   useMemo,
+  SetStateAction,
 } from "react";
 import { useConfirm } from "../../components/ConfirmProvider";
 import { useStudio } from "../../components/StudioProvider";
@@ -31,12 +32,14 @@ const round = (n: number) => Math.round(n * 10000) / 10000;
 
 // --- COMPONENTS ---
 import GeneratorPanel from "../../components/studio/GeneratorPanel";
-import LibraryPanel from "../../components/studio/LibraryPanel";
+import LibraryPanel, { ProjectAsset } from "../../components/studio/LibraryPanel";
 import ViewerPanel from "../../components/studio/ViewerPanel";
 import AssetLibraryModal from "../../components/studio/AssetLibraryModal";
 import SimpleTimeline, {
   TimelineTrack,
   TimelineClip,
+  VIDEO_TRACK_H,
+  AUDIO_TRACK_H,
 } from "@/components/studio/SimpleTimeline";
 import { waitForWails } from "../../lib/wailsReady";
 
@@ -52,29 +55,16 @@ import {
   SaveTimeline,
   GetTimeline,
   ExtractAudioPeaks,
+  GetProjectAssets,
+  ImportAudio,
+  DeleteProjectAsset,
+  SanitizeLocalFile,
+  ExportVideo,
 } from "../../lib/wailsSafe";
 
 // --- TYPESCRIPT FIX FOR WAILS ---
 declare global {
   interface Window {
-    go: {
-      main: {
-        App: {
-          GetVideoFPS: (path: string) => Promise<number>;
-          RenderTimelinePreview: (
-            projectId: string,
-            sceneId: string,
-            timeline: any,
-          ) => Promise<string>;
-          ExportVideo: (
-            projectId: string,
-            sceneId: string,
-            options: any,
-          ) => Promise<string>;
-          SanitizeLocalFile: (path: string) => Promise<string>;
-        };
-      };
-    };
     runtime: {
       EventsOn: (event: string, callback: (data: any) => void) => () => void;
     };
@@ -191,10 +181,12 @@ function StudioContent() {
   const [project, setProject] = useState<Project | null>(null);
   const [scene, setScene] = useState<Scene | null>(null);
   const [shots, setShots] = useState<Shot[]>([]);
+  const [projectAssets, setProjectAssets] = useState<ProjectAsset[]>([]);
   const [activeShotId, setActiveShotId] = useState<string | null>(null);
 
   // PREVIEW STATE
   const [previewingShotId, setPreviewingShotId] = useState<string | null>(null);
+  const [previewingAssetPath, setPreviewingAssetPath] = useState<string | null>(null);
 
   const [isRendering, setIsRendering] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
@@ -212,6 +204,43 @@ function StudioContent() {
   const [previewTime, setPreviewTime] = useState(0);     // Isolated Library Preview
   const [isPlaying, setIsPlaying] = useState(false);
   const [projectFps, setProjectFps] = useState(30);
+
+  // --- ASSET HELPERS ---
+  const refreshAssets = useCallback(async () => {
+    if (!projectId) return;
+    try {
+      const assets = await GetProjectAssets(projectId);
+      setProjectAssets(assets || []);
+    } catch (e) {
+      console.error("Failed to refresh assets:", e);
+    }
+  }, [projectId]);
+
+  const handleUploadAudio = useCallback(async () => {
+    if (!projectId) return;
+    try {
+      const path = await ImportAudio(projectId);
+      if (path) {
+        await refreshAssets();
+      }
+    } catch (e) {
+      console.error("Audio upload failed:", e);
+    }
+  }, [projectId, refreshAssets]);
+
+  const handleDeleteAsset = useCallback((e: React.MouseEvent, path: string) => {
+    e.stopPropagation();
+    confirm({
+      title: "Delete Asset?",
+      message: "This will permanently remove the file from your project assets folder.",
+      variant: "danger",
+      onConfirm: async () => {
+        if (!projectId) return;
+        await DeleteProjectAsset(projectId, path);
+        await refreshAssets();
+      },
+    });
+  }, [confirm, projectId, refreshAssets]);
 
   // --- REAL TIMELINE STATE ---
   const [tracks, setTracks] = useState<TimelineTrack[]>([
@@ -347,8 +376,9 @@ function StudioContent() {
   // --- PLAYBACK ROUTING ---
   const totalDuration = Math.max(0, ...tracks.map((t) => t.clips.reduce((acc, s) => Math.max(acc, s.start + (s.duration || 4)), 0)));
 
-  // Derived Preview State (Tricks ViewerPanel into playing only the requested shot)
+  // Derived Preview State
   const previewShotObj = useMemo(() => shots.find(s => s.id === previewingShotId), [shots, previewingShotId]);
+  const previewAssetObj = useMemo(() => projectAssets.find(a => a.path === previewingAssetPath), [projectAssets, previewingAssetPath]);
 
   const displayTracks = useMemo(() => {
     if (previewShotObj) {
@@ -376,70 +406,109 @@ function StudioContent() {
         }
       ];
     }
+    if (previewAssetObj) {
+      return [
+        {
+          id: "preview-asset-track",
+          name: "Asset Preview",
+          type: previewAssetObj.type === "audio" ? "audio" as const : "video" as const,
+          clips: [
+            {
+              id: "asset-preview-clip",
+              type: previewAssetObj.type as "audio" | "video",
+              name: previewAssetObj.name,
+              src: previewAssetObj.path,
+              start: 0,
+              duration: 1000, 
+              offset: 0,
+              color: "#D2FF44",
+            }
+          ],
+          isMuted: false,
+          isHidden: false,
+          isLocked: false
+        }
+      ];
+    }
     return tracks;
-  }, [tracks, previewShotObj]);
+  }, [tracks, previewShotObj, previewAssetObj]);
 
-  const displayDuration = previewShotObj ? (previewShotObj.duration || 4) : totalDuration;
+  const displayDuration = previewShotObj ? (previewShotObj.duration || 4) : (previewAssetObj ? 1000 : totalDuration);
 
   // Decide which time state the player should use
-  const activeTime = previewingShotId ? previewTime : currentTime;
-  const setActiveTime = previewingShotId ? setPreviewTime : setCurrentTime;
+  const activeTime = (previewingShotId || previewingAssetPath) ? previewTime : currentTime;
+  const setActiveTime = (previewingShotId || previewingAssetPath) ? setPreviewTime : setCurrentTime;
 
   // Updated Toggles
   const togglePlay = useCallback(() => {
     setIsPlaying((prev) => {
       if (!prev) {
-        if (previewingShotId && previewTime >= displayDuration) setPreviewTime(0);
-        else if (!previewingShotId && currentTime >= totalDuration) setCurrentTime(0);
+        if ((previewingShotId || previewingAssetPath) && previewTime >= displayDuration) setPreviewTime(0);
+        else if (!previewingShotId && !previewingAssetPath && currentTime >= totalDuration) setCurrentTime(0);
       }
       return !prev;
     });
-  }, [currentTime, totalDuration, previewingShotId, displayDuration, previewTime]);
-
-  // Break out of Preview mode if the user clicks the global timeline
-  const handleTimelineTimeChange: React.Dispatch<React.SetStateAction<number>> = useCallback((value) => {
-    if (previewingShotId) {
-      setPreviewingShotId(null);
-      setIsPlaying(false);
-    }
-    setCurrentTime(value);
-  }, [previewingShotId]);
+  }, [currentTime, totalDuration, previewingShotId, previewingAssetPath, displayDuration, previewTime]);
 
   const handlePlayShot = useCallback(
     async (shot: Shot) => {
-      // Toggle off
       if (previewingShotId === shot.id) {
         setPreviewingShotId(null);
         setIsPlaying(false);
         setPreviewTime(0);
         return;
       }
-      // Toggle on
+      setPreviewingAssetPath(null);
       setPreviewingShotId(shot.id);
-      setPreviewTime(0); // Instantly seek to 0:00 for the preview
+      setPreviewTime(0); 
       setIsPlaying(true);
     },
     [previewingShotId],
   );
 
-  // --- AUTO-CLEAR PREVIEW WHEN VIDEO ENDS ---
-  // If the ViewerPanel reaches the end of the clip, it calls setIsPlaying(false).
-  // We need to catch that and officially exit Preview Mode so the timeline works again!
-  useEffect(() => {
-    if (previewingShotId && !isPlaying) {
+  const handlePlayAsset = useCallback(
+    async (asset: ProjectAsset) => {
+      if (previewingAssetPath === asset.path) {
+        setPreviewingAssetPath(null);
+        setIsPlaying(false);
+        setPreviewTime(0);
+        return;
+      }
       setPreviewingShotId(null);
+      setPreviewingAssetPath(asset.path);
+      setPreviewTime(0);
+      setIsPlaying(true);
+    },
+    [previewingAssetPath],
+  );
+
+  const handleTimelineTimeChange = useCallback((value: SetStateAction<number>) => {
+    setPreviewingShotId(null);
+    setPreviewingAssetPath(null);
+    setCurrentTime(value);
+  }, []);
+
+  // --- AUTO-CLEAR PREVIEW WHEN VIDEO ENDS ---
+  useEffect(() => {
+    if ((previewingShotId || previewingAssetPath) && !isPlaying) {
+      setPreviewingShotId(null);
+      setPreviewingAssetPath(null);
       setPreviewTime(0);
     }
-  }, [isPlaying, previewingShotId]);
+  }, [isPlaying, previewingShotId, previewingAssetPath]);
 
   const generateWaveform = useCallback(async (shotId: string, filePath: string) => {
     if (!filePath) return;
-    const peaks = await ExtractAudioPeaks(filePath, 20);
-    if (peaks && peaks.length > 0) {
-      setShots((prev) => prev.map((s) => (s.id === shotId ? { ...s, waveform: peaks } : s)));
-      setTracks((prev) =>
-        prev.map((track) => ({ ...track, clips: track.clips.map((clip) => clip.id === shotId ? { ...clip, waveform: peaks } : clip) })),
-      );
+    try {
+      const peaks = await ExtractAudioPeaks(filePath, 20);
+      if (peaks && peaks.length > 0) {
+        setShots((prev) => prev.map((s) => (s.id === shotId ? { ...s, waveform: peaks } : s)));
+        setTracks((prev) =>
+          prev.map((track) => ({ ...track, clips: track.clips.map((clip) => clip.id === shotId ? { ...clip, waveform: peaks } : clip) })),
+        );
+      }
+    } catch (e) {
+      console.error("Failed to generate waveform:", e);
     }
   }, []);
 
@@ -500,7 +569,14 @@ function StudioContent() {
                     start: item.startTime,
                     duration: item.duration,
                     offset: item.trimStart || 0,
-                    sourceDuration: item.duration,
+                    sourceDuration:
+                      typeof item.sourceDuration === "number" &&
+                      Number.isFinite(item.sourceDuration)
+                        ? item.sourceDuration
+                        : (item.trimStart || 0) +
+                          (typeof item.duration === "number" ? item.duration : 4),
+                    volume: typeof item.volume === "number" ? item.volume : 1,
+                    isMuted: !!item.isMuted,
                     color: item.audioPath ? "bg-purple-600" : "bg-blue-600",
                   };
                 }),
@@ -521,9 +597,10 @@ function StudioContent() {
                 id: `track-${index}-${crypto.randomUUID()}`,
                 name: trackName,
                 type: trackType as "video" | "audio",
-                isMuted: false,
+                isMuted: !!setting.isMuted,
                 isHidden: !setting.visible,
                 isLocked: setting.locked,
+                volume: typeof setting.volume === "number" ? setting.volume : 1,
                 clips: clipsWithThumbnails,
               };
             }),
@@ -532,12 +609,9 @@ function StudioContent() {
           const uniquePaths = new Set<string>();
           timelineData.tracks.flat().forEach((item: any) => { if (item.outputVideo) uniquePaths.add(item.outputVideo); });
 
-          // Set initialized to true BEFORE setting tracks so that the useEffect hooks (prerender, auto-save) 
-          // can fire when the render commits.
           initialized.current = true;
           setTracks(newTracks);
 
-          // Batch blob updates
           const newBlobs = new Map();
           await Promise.all(
             Array.from(uniquePaths).map(async (path) => {
@@ -567,19 +641,24 @@ function StudioContent() {
         initialized.current = true;
         setTracks([{ id: "t1", name: "Video 1", type: "video", clips: [] }, { id: "t2", name: "Audio 1", type: "audio", clips: [] }]);
       }
+
+      // Ensure assets are loaded
+      await refreshAssets();
     } catch (err) { console.error(err); } finally { setIsLoading(false); }
   };
 
-  // --- LOAD DATA ---
   useEffect(() => {
     if (projectId && sceneId) loadData(projectId, sceneId);
   }, [projectId, sceneId]);
 
-  // --- AUTO-SAVE ---
+  useEffect(() => {
+    if (projectId) refreshAssets();
+  }, [projectId, refreshAssets]);
+
   useEffect(() => {
     if (projectId && sceneId && initialized.current && shots.length > 0) {
       const timer = setTimeout(() => {
-        const cleanShots = shots.map(({ previewBase64, ...keep }) => keep);
+        const cleanShots = shots.map(({ previewBase64, ...keep }: any) => keep);
         SaveShots(projectId, sceneId, cleanShots as any);
       }, 500);
       return () => clearTimeout(timer);
@@ -597,21 +676,21 @@ function StudioContent() {
             trimStart: c.offset,
             outputVideo: t.type === "video" ? c.src : undefined,
             audioPath: t.type === "audio" ? c.src : undefined,
+            volume: c.volume,
+            isMuted: c.isMuted,
           })),
         );
-        const legacySettings = tracks.map((t) => ({ name: t.name, type: t.type, visible: !t.isHidden, locked: t.isLocked }));
+        const legacySettings = tracks.map((t) => ({ name: t.name, type: t.type, visible: !t.isHidden, locked: t.isLocked, volume: t.volume, isMuted: t.isMuted }));
         SaveTimeline(projectId, sceneId, { tracks: legacyTracks, trackSettings: legacySettings } as any);
       }, 500);
       return () => clearTimeout(timer);
     }
   }, [tracks, projectId, sceneId]);
 
-  // --- SYNC NEW VIDEOS TO BLOBS ---
   const fetchedBlobs = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     shots.forEach((shot) => {
-      // If we have a video, and it's not in the Blobs map, and we haven't already tried to fetch it...
       if (shot.outputVideo && !videoBlobs.has(shot.outputVideo) && !fetchedBlobs.current.has(shot.outputVideo)) {
         fetchedBlobs.current.add(shot.outputVideo);
         refreshVideoBlob(shot.outputVideo);
@@ -622,12 +701,10 @@ function StudioContent() {
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
-
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
         e.preventDefault();
         e.shiftKey ? redo() : undo();
       }
-
       if (e.key === "Delete" || e.key === "Backspace") {
         if (selectedClipId) {
           e.preventDefault();
@@ -636,7 +713,6 @@ function StudioContent() {
           setSelectedClipId(null);
         }
       }
-
       if (e.code === "Space") {
         if (libraryRef.current?.contains(e.target as Node)) return;
         e.preventDefault();
@@ -707,7 +783,6 @@ function StudioContent() {
       const clip = track.clips.find((c) => c.id === clipId);
       if (!clip) return;
 
-      // Find the shot this clip was likely derived from
       const originalShot = shots.find(
         (s) =>
           s.outputVideo === clip.src ||
@@ -715,7 +790,6 @@ function StudioContent() {
           s.audioPath === clip.src,
       );
 
-      // Synthesize a shot object if not found (needed for createExtensionShot)
       const shotToExtend = originalShot || ({
         id: crypto.randomUUID(),
         name: clip.name,
@@ -734,9 +808,7 @@ function StudioContent() {
 
       recordHistory();
 
-      // Add the new shot to the project's shots list
       setShots((prev) => {
-        // Try to insert after the original shot if found
         if (originalShot) {
           const idx = prev.findIndex((s) => s.id === originalShot.id);
           const next = [...prev];
@@ -746,13 +818,12 @@ function StudioContent() {
         return [...prev, newShot];
       });
 
-      // Create the new timeline clip
       const newClip: TimelineClip = {
         id: newShot.id,
         type: newShot.outputVideo ? "video" : (newShot.audioPath ? "audio" : "video"),
         name: newShot.name,
         src: newShot.outputVideo || newShot.audioPath || newShot.sourceImage || "",
-        start: clip.start + clip.duration, // Place immediately after the original clip
+        start: clip.start + clip.duration,
         duration: newShot.duration || 4,
         offset: 0,
         sourceDuration: newShot.duration || 4,
@@ -760,17 +831,14 @@ function StudioContent() {
         thumbnail: newShot.previewBase64,
       };
 
-      // Update the tracks state to include the new clip
       setTracks((prev) => {
         const next = [...prev];
         const t = { ...next[trackIndex] };
-        // Collision resolution happens on next drag/save or we can trust the user to move it
         t.clips = [...t.clips, newClip];
         next[trackIndex] = t;
         return next;
       });
 
-      // Make the new extension shot active for the generator
       setActiveShotId(newShot.id);
     },
     [tracks, shots, createExtensionShot, recordHistory],
@@ -813,7 +881,6 @@ function StudioContent() {
       const isNewRender = updates.status?.toUpperCase() === "DONE";
       const newPath = updates.outputVideo;
 
-      // Force a fresh blob fetch if a new video just finished rendering
       if (newPath && (isNewRender || newPath !== shot.outputVideo)) {
         refreshVideoBlob(newPath);
         generateWaveform(shot.id, newPath);
@@ -828,7 +895,6 @@ function StudioContent() {
       ...track, clips: track.clips.map((clip) => {
         if (clip.id === activeShotId) {
           const newItem = { ...clip, ...updates } as any;
-          // CRITICAL FIX: The timeline reads 'src', not 'outputVideo'. 
           if (updates.outputVideo) newItem.src = updates.outputVideo;
           if (updates.duration) newItem.duration = updates.duration;
           return newItem;
@@ -875,6 +941,7 @@ function StudioContent() {
     if (!overId.startsWith("track-")) return;
 
     const trackIndex = parseInt(overId.split("-")[1]);
+    const targetTrack = tracks[trackIndex];
 
     let shotData = active.data.current?.shot;
     if (!shotData) {
@@ -882,7 +949,24 @@ function StudioContent() {
       shotData = shots.find((s) => s.id === activeId);
     }
 
+    if (!shotData && active.data.current?.asset) {
+      const asset = active.data.current.asset as ProjectAsset;
+      shotData = {
+        id: crypto.randomUUID(),
+        name: asset.name,
+        audioPath: asset.type === "audio" ? asset.path : "",
+        outputVideo: "", 
+        duration: 4, 
+        status: "DONE",
+      } as Shot;
+    }
+
     if (shotData) {
+      // --- COMPATIBILITY CHECK ---
+      const isLibraryAudio = !!shotData.audioPath && !shotData.outputVideo;
+      if (isLibraryAudio && targetTrack.type !== "audio") return;
+      if (!isLibraryAudio && targetTrack.type === "audio") return;
+
       recordHistory();
       
       const activatorEvent = event.activatorEvent as MouseEvent;
@@ -890,23 +974,19 @@ function StudioContent() {
       const dropX = currentMouseX - over.rect.left;
 
       let duration = shotData.duration || 4;
-      
-      // Center the clip: start = dropTime - (duration / 2)
       let startTime = Math.max(0, (dropX / zoom) - (duration / 2));
 
-      // --- SNAPPING LOGIC ---
-      const snapThreshold = 0.2; // 200ms threshold
+      const snapThreshold = 0.2;
       let bestSnapDelta = Infinity;
       let snapTarget = null;
 
       const track = tracks[trackIndex];
-      const candidates = [0]; // Always snap to 0
+      const candidates = [0];
       track.clips.forEach(c => {
         candidates.push(c.start);
         candidates.push(c.start + c.duration);
       });
 
-      // Check for snap on START
       candidates.forEach(pt => {
         const delta = pt - startTime;
         if (Math.abs(delta) < snapThreshold && Math.abs(delta) < Math.abs(bestSnapDelta)) {
@@ -915,40 +995,26 @@ function StudioContent() {
         }
       });
 
-      // Check for snap on END
       const endTime = startTime + duration;
       candidates.forEach(pt => {
         const delta = pt - endTime;
         if (Math.abs(delta) < snapThreshold && Math.abs(delta) < Math.abs(bestSnapDelta)) {
           bestSnapDelta = delta;
-          snapTarget = pt - duration; // Adjust start time to align end
+          snapTarget = pt - duration;
         }
       });
 
-      if (snapTarget !== null) {
-        startTime = snapTarget;
-      }
-
-      // Quantize to frame (if not snapped, or even if snapped to align perfectly)
-      const fps = project?.fps || 30; // Use project FPS
+      if (snapTarget !== null) startTime = snapTarget;
+      const fps = project?.fps || 30;
       startTime = Math.round(startTime * fps) / fps;
 
-      // --- DURATION FIX: Load Metadata ---
       const src = shotData.outputVideo || shotData.audioPath || shotData.sourceImage || "";
       const isVideoOrAudio = shotData.outputVideo || shotData.audioPath;
 
       if (isVideoOrAudio && src) {
         try {
-          // --- PROXY ENGINE: Sanitize Dropped File ---
-          // This ensures local files get the same "Fast Decode" treatment as generated ones.
-          // Note: This operation might take a moment for large files. 
-          // Ideally we show a spinner, but for now we await it to guarantee stability.
-          console.log("Sanitizing/Proxying file...", src);
-          // @ts-ignore
-          await window.go.main.App.SanitizeLocalFile(src);
-          console.log("Sanitization complete.");
+          await SanitizeLocalFile(src);
 
-          // Helper to get safe URL (local server)
           const getSafeUrl = (filePath: string) => {
             if (!filePath) return "";
             if (filePath.startsWith("http") || filePath.startsWith("blob")) return filePath;
@@ -961,13 +1027,10 @@ function StudioContent() {
 
           await new Promise((resolve) => {
             element.onloadedmetadata = () => {
-              if (element.duration && isFinite(element.duration)) {
-                duration = element.duration;
-              }
+              if (element.duration && isFinite(element.duration)) duration = element.duration;
               resolve(true);
             };
             element.onerror = () => resolve(false);
-            // Timeout to prevent hanging
             setTimeout(() => resolve(false), 2000);
           });
         } catch (e) {
@@ -1007,7 +1070,7 @@ function StudioContent() {
     const cleanupProgress = (window as any).runtime.EventsOn("export:progress", (pct: number) => setExportProgress(pct));
 
     try {
-      const result = await (window as any).go.main.App.ExportVideo(project?.id, scene?.id, exportOptions);
+      const result = await ExportVideo(project?.id || "", scene?.id || "", exportOptions);
       if (result !== "Success" && result !== "Cancelled") alert("Export failed: " + result);
     } finally {
       cleanupStatus();
@@ -1078,13 +1141,18 @@ function StudioContent() {
               <div ref={libraryRef} style={{ width: libraryWidth }} className="border-r border-zinc-800 bg-[#09090b] flex flex-col min-h-0 shrink-0">
                 <LibraryPanel
                   shots={shots}
+                  assets={projectAssets}
                   activeShotId={activeShotId}
                   setActiveShotId={setActiveShotId}
                   handleAddShot={handleAddShot}
+                  handleUploadAudio={handleUploadAudio}
                   handleExtendShot={handleExtendShot}
                   handleDeleteShot={handleDeleteShot}
+                  handleDeleteAsset={handleDeleteAsset}
                   handlePlayShot={handlePlayShot}
+                  handlePlayAsset={handlePlayAsset}
                   previewingShotId={previewingShotId}
+                  previewingAssetPath={previewingAssetPath}
                 />
               </div>
               <div className="w-1 hover:w-1.5 bg-zinc-900 hover:bg-[#D2FF44] cursor-col-resize transition-all z-50 flex-shrink-0" onPointerDown={(e) => { isResizingLib.current = true; e.currentTarget.setPointerCapture(e.pointerId); }} onPointerUp={(e) => e.currentTarget.releasePointerCapture(e.pointerId)} />
@@ -1158,7 +1226,9 @@ function StudioContent() {
               const duration = activeDragItem.duration || 4;
               const overlayWidth = duration * zoom;
               const halfOverlayWidth = overlayWidth / 2;
-              const overlayHeight = 48; // TRACK_HEIGHT
+              
+              const isAudio = !!activeDragItem.audioPath && !activeDragItem.outputVideo;
+              const overlayHeight = isAudio ? AUDIO_TRACK_H : VIDEO_TRACK_H; 
               const halfOverlayHeight = overlayHeight / 2;
 
               // Calculate current cursor position based on initial click + delta
@@ -1204,7 +1274,7 @@ function StudioContent() {
             <div
               style={{
                 width: ((activeDragItem.duration || 4) * zoom),
-                height: 48, // TRACK_HEIGHT
+                height: (activeDragItem.audioPath && !activeDragItem.outputVideo) ? AUDIO_TRACK_H : VIDEO_TRACK_H,
               }}
               className={`relative flex flex-col overflow-hidden border rounded-sm shadow-2xl cursor-grabbing
                 ${activeDragItem.audioPath && !activeDragItem.outputVideo ? "bg-[#1a1a1c] border-white/10" : "bg-[#375a6c] border-[#213845]"}
