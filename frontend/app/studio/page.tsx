@@ -512,6 +512,11 @@ function StudioContent() {
     }
   }, []);
 
+  const normalizeMediaPath = useCallback((value?: string) => {
+    if (!value) return "";
+    return value.replace(/\\/g, "/").toLowerCase();
+  }, []);
+
   const refreshVideoBlob = useCallback(async (path: string) => {
     try {
       const url = `http://localhost:3456/video/${path.replace(/\\/g, "/")}?t=${Date.now()}`;
@@ -577,19 +582,36 @@ function StudioContent() {
                           (typeof item.duration === "number" ? item.duration : 4),
                     volume: typeof item.volume === "number" ? item.volume : 1,
                     isMuted: !!item.isMuted,
+                    waveform: Array.isArray(item.waveform)
+                      ? item.waveform
+                      : undefined,
                     color: item.audioPath ? "bg-purple-600" : "bg-blue-600",
                   };
                 }),
               );
 
               const setting = settings[index] || {};
+              const settingExtras = setting as unknown as Record<string, unknown>;
               const defaultName = index === 0 ? "Video 1" : `Audio ${index}`;
               const trackName = setting.name || defaultName;
               const trackType = setting.type || (trackName.toUpperCase().startsWith("A") ? "audio" : "video");
 
               const clipsWithThumbnails = clips.map((clip) => {
-                const matchingShot = loadedShots.find((s) => s.outputVideo === clip.src || s.audioPath === clip.src || s.sourceImage === clip.src);
-                if (matchingShot && matchingShot.previewBase64) return { ...clip, thumbnail: matchingShot.previewBase64 };
+                const clipSrc = normalizeMediaPath(clip.src);
+                const matchingShot = loadedShots.find((s) => {
+                  return (
+                    normalizeMediaPath(s.outputVideo) === clipSrc ||
+                    normalizeMediaPath(s.audioPath) === clipSrc ||
+                    normalizeMediaPath(s.sourceImage) === clipSrc
+                  );
+                });
+                if (matchingShot) {
+                  return {
+                    ...clip,
+                    thumbnail: matchingShot.previewBase64,
+                    waveform: matchingShot.waveform ? [...matchingShot.waveform] : clip.waveform,
+                  };
+                }
                 return clip;
               });
 
@@ -597,10 +619,16 @@ function StudioContent() {
                 id: `track-${index}-${crypto.randomUUID()}`,
                 name: trackName,
                 type: trackType as "video" | "audio",
-                isMuted: !!setting.isMuted,
+                isMuted:
+                  typeof settingExtras.isMuted === "boolean"
+                    ? settingExtras.isMuted
+                    : false,
                 isHidden: !setting.visible,
                 isLocked: setting.locked,
-                volume: typeof setting.volume === "number" ? setting.volume : 1,
+                volume:
+                  typeof settingExtras.volume === "number"
+                    ? settingExtras.volume
+                    : 1,
                 clips: clipsWithThumbnails,
               };
             }),
@@ -686,6 +714,64 @@ function StudioContent() {
       return () => clearTimeout(timer);
     }
   }, [tracks, projectId, sceneId]);
+
+  const waveformJobsRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    const pending: { clipId: string; src: string }[] = [];
+
+    tracks.forEach((track) => {
+      if (track.type !== "audio") return;
+      track.clips.forEach((clip) => {
+        const hasWaveform = !!clip.waveform && clip.waveform.length > 0;
+        if (hasWaveform || !clip.src) return;
+        if (clip.src.startsWith("http") || clip.src.startsWith("blob:")) return;
+
+        const jobKey = `${clip.id}:${clip.src}`;
+        if (waveformJobsRef.current.has(jobKey)) return;
+
+        waveformJobsRef.current.add(jobKey);
+        pending.push({ clipId: clip.id, src: clip.src });
+      });
+    });
+
+    if (pending.length === 0) return;
+
+    pending.forEach(async ({ clipId, src }) => {
+      try {
+        const peaks = await ExtractAudioPeaks(src, 20);
+        if (!peaks || peaks.length === 0) return;
+
+        setTracks((prev) =>
+          prev.map((track) => {
+            if (track.type !== "audio") return track;
+
+            let changed = false;
+            const nextClips = track.clips.map((clip) => {
+              if (clip.id !== clipId) return clip;
+              if (clip.waveform && clip.waveform.length > 0) return clip;
+              changed = true;
+              return { ...clip, waveform: peaks };
+            });
+
+            return changed ? { ...track, clips: nextClips } : track;
+          }),
+        );
+
+        setShots((prev) =>
+          prev.map((shot) => {
+            if (normalizeMediaPath(shot.audioPath) !== normalizeMediaPath(src)) {
+              return shot;
+            }
+            if (shot.waveform && shot.waveform.length > 0) return shot;
+            return { ...shot, waveform: peaks };
+          }),
+        );
+      } catch (e) {
+        console.error("Failed to backfill timeline waveform:", e);
+      }
+    });
+  }, [tracks, normalizeMediaPath]);
 
   const fetchedBlobs = useRef<Set<string>>(new Set());
 
@@ -829,6 +915,7 @@ function StudioContent() {
         sourceDuration: newShot.duration || 4,
         color: newShot.audioPath ? "bg-purple-600" : "bg-blue-600",
         thumbnail: newShot.previewBase64,
+        waveform: newShot.waveform ? [...newShot.waveform] : undefined,
       };
 
       setTracks((prev) => {
@@ -1049,6 +1136,7 @@ function StudioContent() {
         sourceDuration: duration,
         color: shotData.audioPath ? "bg-purple-600" : "bg-blue-600",
         thumbnail: shotData.previewBase64,
+        waveform: shotData.waveform ? [...shotData.waveform] : undefined,
       };
 
       setTracks((prev) => {

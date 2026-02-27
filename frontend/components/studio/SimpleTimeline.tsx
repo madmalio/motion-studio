@@ -56,6 +56,7 @@ export interface TimelineClip {
   sourceDuration?: number;
   thumbnail?: string;
   isMuted?: boolean;
+  waveform?: number[];
   volume?: number; // <--- NEW PROP
 }
 
@@ -191,6 +192,78 @@ const Playhead = memo(function Playhead({
         </div>
       )}
     </div>
+  );
+});
+
+const AudioClipWaveform = memo(function AudioClipWaveform({
+  peaks,
+  widthPx,
+  isMuted,
+}: {
+  peaks?: number[];
+  widthPx: number;
+  isMuted?: boolean;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return;
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    const dpr = window.devicePixelRatio || 1;
+    const pixelWidth = Math.max(1, Math.floor(rect.width));
+    const pixelHeight = Math.max(1, Math.floor(rect.height));
+    const targetW = Math.max(1, Math.floor(pixelWidth * dpr));
+    const targetH = Math.max(1, Math.floor(pixelHeight * dpr));
+
+    if (canvas.width !== targetW || canvas.height !== targetH) {
+      canvas.width = targetW;
+      canvas.height = targetH;
+    }
+
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, pixelWidth, pixelHeight);
+
+    const lineColor = isMuted ? "rgba(0, 0, 0, 0.28)" : "rgba(0, 0, 0, 0.14)";
+    ctx.fillStyle = lineColor;
+    ctx.fillRect(0, (pixelHeight - 1) / 2, pixelWidth, 1);
+
+    if (!peaks || peaks.length === 0 || widthPx < 8) return;
+
+    const bars = Math.min(320, Math.max(16, Math.floor(widthPx / 3)));
+    const samplesPerBar = peaks.length / bars;
+    const barStep = pixelWidth / bars;
+    const barW = Math.max(1, barStep - 1);
+    const barColor = isMuted ? "rgba(0, 0, 0, 0.42)" : "rgba(0, 0, 0, 0.72)";
+
+    ctx.fillStyle = barColor;
+    for (let i = 0; i < bars; i++) {
+      const start = Math.floor(i * samplesPerBar);
+      const end = Math.min(peaks.length, Math.floor((i + 1) * samplesPerBar));
+      let maxPeak = 0;
+      for (let j = start; j < end; j++) {
+        const value = Math.abs(peaks[j] ?? 0);
+        if (value > maxPeak) maxPeak = value;
+      }
+      const amp = Math.max(0, Math.min(1, maxPeak));
+      const h = Math.max(2, Math.round(amp * (pixelHeight - 2)));
+      const x = i * barStep;
+      const y = (pixelHeight - h) / 2;
+      ctx.fillRect(x, y, barW, h);
+    }
+  }, [peaks, widthPx, isMuted]);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      className="absolute inset-0 w-full h-full pointer-events-none"
+    />
   );
 });
 
@@ -488,11 +561,12 @@ const TrackRow = memo(
                   </div>
                 )}
                 {track.type === "audio" && (
-                  <div className="relative overflow-hidden shrink-0 flex items-center flex-1 bg-transparent px-2">
-                    <div className="w-full h-px bg-black/10 absolute left-0" style={{ top: '50%' }} />
-                    <div className="relative text-[10px] text-black font-bold font-mono pointer-events-none truncate uppercase">
-                      {clip.name}
-                    </div>
+                  <div className="relative overflow-hidden shrink-0 flex items-center flex-1 bg-transparent px-2 py-1">
+                    <AudioClipWaveform
+                      peaks={clip.waveform}
+                      widthPx={Math.max(2, clip.duration * zoom)}
+                      isMuted={clip.isMuted}
+                    />
                     {/* KEBAB MENU (Audio - Right side) */}
                     <div className="absolute top-1 right-1 z-40 opacity-0 group-hover/clip:opacity-100 transition-opacity">
                       <button
